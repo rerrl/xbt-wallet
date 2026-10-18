@@ -1,4 +1,4 @@
-package com.xbtwallet.app.ui.importwallet
+package com.xbtwallet.app.ui.signers
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -30,12 +30,12 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.xbtwallet.app.crypto.XpubImport
 import com.xbtwallet.app.crypto.validateXpubInput
-import com.xbtwallet.app.data.Wallet
-import com.xbtwallet.app.data.WalletStore
+import com.xbtwallet.app.data.Signer
+import com.xbtwallet.app.data.SignerStore
 
 /**
- * State behind the Import Wallet screen: two text fields, their inline errors,
- * and the save action.
+ * State behind the watch-only xpub import screen: two text fields, their inline
+ * errors, and the save action.
  *
  * Kept out of the composable for two reasons. First, it is plain Kotlin and can
  * be exercised without a UI test. Second, the screen is re-composed constantly
@@ -44,9 +44,9 @@ import com.xbtwallet.app.data.WalletStore
  * object, not of how many times Compose happened to re-run the composable.
  */
 @Stable
-class ImportWalletScreenState(
-    private val walletStore: WalletStore,
-    private val onSaved: (Wallet) -> Unit,
+class ImportXpubScreenState(
+    private val signerStore: SignerStore,
+    private val onSaved: (Signer) -> Unit,
 ) {
 
     var name by mutableStateOf("")
@@ -84,10 +84,10 @@ class ImportWalletScreenState(
         revalidate(showError = submitAttempted)
     }
 
-    /** Validates and, when everything checks out, stores the wallet. */
+    /** Validates and, when everything checks out, stores a new watch-only signer. */
     fun import() {
         submitAttempted = true
-        nameError = if (name.isBlank()) "Give this xpub a name." else null
+        nameError = if (name.isBlank()) "Give this signer a name." else null
         revalidate(showError = true)
 
         val key = parsedKey
@@ -96,7 +96,7 @@ class ImportWalletScreenState(
         // The key is stored as entered (trimmed) rather than re-encoded: the
         // user should see back what they pasted, and every accepted version is
         // derived as native segwit anyway. `key` proves it was valid.
-        onSaved(walletStore.add(name = name, xpub = xpub))
+        onSaved(signerStore.add(name = name, xpub = xpub))
     }
 
     private fun revalidate(showError: Boolean) {
@@ -125,32 +125,38 @@ class ImportWalletScreenState(
 }
 
 /**
- * Remembers an [ImportWalletScreenState] for the Import screen.
+ * Remembers an [ImportXpubScreenState] for the import screen.
  *
  * The `onSaved` callback goes through [rememberUpdatedState] and the state
- * object is keyed only on `walletStore`: if the callback were a `remember` key,
+ * object is keyed only on `signerStore`: if the callback were a `remember` key,
  * a fresh lambda on every composition would recreate the state object and wipe
  * whatever the user had typed.
  */
 @Composable
-fun rememberImportWalletScreenState(
-    walletStore: WalletStore,
-    onSaved: (Wallet) -> Unit,
-): ImportWalletScreenState {
+fun rememberImportXpubScreenState(
+    signerStore: SignerStore,
+    onSaved: (Signer) -> Unit,
+): ImportXpubScreenState {
     val currentOnSaved by rememberUpdatedState(onSaved)
-    return remember(walletStore) { ImportWalletScreenState(walletStore) { wallet -> currentOnSaved(wallet) } }
+    return remember(signerStore) { ImportXpubScreenState(signerStore) { signer -> currentOnSaved(signer) } }
 }
 
 /**
- * Manual xpub import.
+ * Add a signer by pasting its account xpub — the manual half of the Add-signer
+ * flow, reached from [AddSignerScreen]'s **Add watch-only xpub** button.
  *
- * QR scanning (a SeedSigner `crypto-account` export) is the primary path in the
- * long run; this screen is the fallback paste path described in PLAN.md §4.
- * Both fields validate inline and the import is refused until the key parses.
+ * This is the fallback path from PLAN.md §4. The primary path is scanning a
+ * SeedSigner `crypto-account` QR export, which is a later feature — a code note
+ * for whoever builds it: swapping in a scanner means feeding the decoded string
+ * through this same state object, because the validation already lives behind
+ * [com.xbtwallet.app.crypto.validateXpubInput] and never touches a camera.
+ *
+ * The fields validate inline (via the shared [validateXpubInput] seam, not a
+ * copy of it) and the save is refused until the name is set and the key parses.
  */
 @Composable
-fun ImportWalletScreen(
-    state: ImportWalletScreenState,
+fun ImportXpubScreen(
+    state: ImportXpubScreenState,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -166,7 +172,7 @@ fun ImportWalletScreen(
                 TextButton(onClick = onBack) { Text("\u2190 Back") }
                 Spacer(modifier = Modifier.width(4.dp))
                 Text(
-                    text = "Import xpub",
+                    text = "Add watch-only xpub",
                     style = MaterialTheme.typography.titleLarge,
                 )
             }
@@ -185,7 +191,7 @@ fun ImportWalletScreen(
             OutlinedTextField(
                 value = state.name,
                 onValueChange = state::onNameChange,
-                label = { Text("xpub name") },
+                label = { Text("signer name") },
                 placeholder = { Text("Cold storage") },
                 singleLine = true,
                 isError = state.nameError != null,
@@ -241,7 +247,7 @@ fun ImportWalletScreen(
                 onClick = state::import,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Import xpub")
+                Text("Add signer")
             }
 
             Spacer(modifier = Modifier.height(24.dp))

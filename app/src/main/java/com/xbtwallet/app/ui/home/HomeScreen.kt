@@ -17,7 +17,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Stable
@@ -27,14 +26,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.xbtwallet.app.data.KeyValueStore
 import com.xbtwallet.app.data.ServerSettings
-import com.xbtwallet.app.data.Wallet
-import com.xbtwallet.app.data.WalletStore
+import com.xbtwallet.app.data.Signer
+import com.xbtwallet.app.data.SignerStore
 import com.xbtwallet.app.electrum.ElectrumClient
 import com.xbtwallet.app.electrum.ElectrumProtocol
 import com.xbtwallet.app.electrum.ElectrumServer
@@ -60,14 +58,17 @@ enum class ServerStatus {
 }
 
 /**
- * State behind the Home screen: the saved xpubs, which one is the active
- * signer, and whether the private Electrum server is reachable.
+ * State behind the Home screen: the saved signers and whether the private
+ * Electrum server is reachable.
  *
  * This is the home screen's whole state machine, and it is deliberately plain
- * Kotlin: [WalletStore] and [ServerSettings] own persistence, this class owns
+ * Kotlin: [SignerStore] and [ServerSettings] own persistence, this class owns
  * the snapshot Compose observes, and [HomeScreen] only renders. That split keeps
  * the screen a pure function of the state (easy to preview) and keeps the
- * "what is active" and "is the server up" rules testable without a UI.
+ * "how many signers" and "is the server up" rules testable without a UI.
+ *
+ * There is deliberately **no active-signer selection** here: signers are just a
+ * list, and the rules that act on one signer live on that signer's own screen.
  *
  * Nothing writes either store except through this class, so the in-memory
  * snapshot cannot drift from what is on disk.
@@ -76,14 +77,14 @@ enum class ServerStatus {
  * only Android involvement is the caller that starts and stops
  * [runHeartbeat] while the home screen is on display (see `XbtWalletApp`).
  *
- * @param walletStore persistence for the xpub list and the active selection.
+ * @param signerStore persistence for the signer list.
  * @param serverSettings read access to the saved Electrum endpoint.
  * @param ping one liveness check against an endpoint; injected so the rules
  *   above can be tested on the JVM without a socket.
  */
 @Stable
 class HomeScreenState(
-    private val walletStore: WalletStore,
+    private val signerStore: SignerStore,
     private val serverSettings: ServerSettings,
     private val ping: suspend (ElectrumServer) -> Boolean = { server ->
         // The heartbeat must never write to the Server screen's log, so the
@@ -92,41 +93,16 @@ class HomeScreenState(
     },
 ) {
 
-    /** Every saved xpub, oldest first. */
-    var xpubs by mutableStateOf(walletStore.list())
+    /** Every saved signer, oldest first. */
+    var signers by mutableStateOf(signerStore.list())
         private set
 
     /**
-     * Id of the active signer, or null when none is selected. It is read back
-     * through the store rather than remembered here, so an id whose xpub was
-     * deleted reads as "none" instead of as a dangling selection.
-     */
-    var activeId by mutableStateOf(walletStore.activeId())
-        private set
-
-    /** The active xpub, or null when nothing is selected. */
-    val active: Wallet?
-        get() = xpubs.firstOrNull { it.id == activeId }
-
-    /** Shortened active xpub for display, or null when nothing is active. */
-    val activeSnippet: String?
-        get() = active?.xpub?.let { key ->
-            if (key.length <= SNIPPET_CHARS) key else key.take(SNIPPET_CHARS) + "\u2026"
-        }
-
-    /**
-     * Re-reads the store. Called after the import screen saves and after the
-     * picker selects, so the screen reflects writes made through other screens.
+     * Re-reads the store. Called after a signer is added or removed on another
+     * screen, so this screen reflects writes made elsewhere.
      */
     fun refresh() {
-        xpubs = walletStore.list()
-        activeId = walletStore.activeId()
-    }
-
-    /** Makes [wallet] the active signer. */
-    fun setActive(wallet: Wallet) {
-        walletStore.setActive(wallet.id)
-        refresh()
+        signers = signerStore.list()
     }
 
     /**
@@ -196,9 +172,6 @@ class HomeScreenState(
     private fun configuredServer(): ElectrumServer? = serverSettings.load().takeIf { it.host.isNotBlank() }
 
     companion object {
-        /** Characters of an xpub shown on the signer card before the ellipsis. */
-        const val SNIPPET_CHARS = 16
-
         /** Gap between heartbeat checks while the home screen is on display. */
         const val HEARTBEAT_INTERVAL_MILLIS: Long = 60_000L
     }
@@ -208,27 +181,30 @@ class HomeScreenState(
  * Remembers a [HomeScreenState] for the app's lifetime.
  *
  * Held at the navigation level rather than inside [HomeScreen] so it survives
- * leaving and returning to the screen — and so the Addresses screen can ask it
- * which xpub is active.
+ * leaving and returning to the screen — and so the Signers screen reads the same
+ * list the home screen counts.
  */
 @Composable
 fun rememberHomeScreenState(
-    walletStore: WalletStore,
+    signerStore: SignerStore,
     serverSettings: ServerSettings,
-): HomeScreenState = remember(walletStore, serverSettings) {
-    HomeScreenState(walletStore, serverSettings)
+): HomeScreenState = remember(signerStore, serverSettings) {
+    HomeScreenState(signerStore, serverSettings)
 }
 
 /**
  * Home screen — the app's hub, and its statement of what the app is: a
  * coordinator holding xpubs, not a wallet holding keys.
  *
- * Top to bottom: **Server** (private Electrum endpoint), the **active signer**
- * card showing the selected xpub, **Import xpub**, **Select active xpub**, and
- * **Addresses** — which needs an active signer to have anything to derive, so it
- * stays disabled until one is selected. Receive and Send are gone: importing an
- * xpub is the one way in, and the signer round-trip those would need does not
- * exist yet.
+ * Top to bottom: **Server** (private Electrum endpoint) with its live status
+ * line, then the two things you do with signers — **Add signer** and
+ * **Signers**. The old standalone "Import xpub", "Select active xpub" and
+ * "Addresses" buttons are gone: xpubs are signers now, they live in a list
+ * rather than behind an "active" selection, and everything that works on one
+ * signer (addresses included) is reached by opening that signer. **Add signer**
+ * now opens the signer chooser (watch-only xpub live, hot wallet disabled) and
+ * **Signers** the list of what is saved; a signer's own detail screen is the one
+ * screen still to come.
  *
  * Under the Server button the screen shows the live connection status: the
  * "connect your own server" hint until an endpoint is saved, then a dot with
@@ -241,9 +217,8 @@ fun rememberHomeScreenState(
 fun HomeScreen(
     state: HomeScreenState,
     onOpenServer: () -> Unit,
-    onOpenImportXpub: () -> Unit,
-    onSelectActiveXpub: () -> Unit,
-    onOpenAddresses: () -> Unit,
+    onAddSigner: () -> Unit,
+    onOpenSigners: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
@@ -256,7 +231,7 @@ fun HomeScreen(
             verticalArrangement = Arrangement.Center,
         ) {
             // 1. Server first: it is the one setup step that has nothing to do
-            //    with keys, so the screen reads as "configure, then import".
+            //    with keys, so the screen reads as "configure, then signers".
             OutlinedButton(
                 onClick = onOpenServer,
                 modifier = Modifier.fillMaxWidth(),
@@ -266,57 +241,38 @@ fun HomeScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Live server status replaces the old static hint here: the facts
-            // (configured? reachable?) are the state's, this only renders them.
+            // Live server status: the facts (configured? reachable?) are the
+            // state's, this only renders them.
             ServerStatusLine(status = state.serverStatus, serverLabel = state.serverLabel)
 
             Spacer(modifier = Modifier.height(28.dp))
 
-            // 2. The active signer gets its own box, so "who am I watching" is
-            //    the thing the eye lands on rather than one button among many.
-            ActiveSignerCard(state)
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            // 3. Import.
+            // 2. Add a signer — the one way in.
             Button(
-                onClick = onOpenImportXpub,
+                onClick = onAddSigner,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Import xpub")
+                Text("Add signer")
             }
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // 4. Pick which saved xpub the rest of the app works on. There is
-            //    nothing to pick from until something has been imported.
+            // 3. The saved signers. Always tappable: the list screen is where an
+            //    empty list explains itself.
             Button(
-                onClick = onSelectActiveXpub,
-                enabled = state.xpubs.isNotEmpty(),
+                onClick = onOpenSigners,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Select active xpub")
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // 5. Addresses follows the active signer, so it is only meaningful
-            //    once one has been chosen.
-            Button(
-                onClick = onOpenAddresses,
-                enabled = state.active != null,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Addresses")
+                Text("Signers")
             }
 
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = when (state.xpubs.size) {
-                    0 -> "No xpub imported yet \u2014 import an account xpub to begin."
-                    1 -> "1 xpub saved."
-                    else -> "${state.xpubs.size} xpubs saved."
+                text = when (state.signers.size) {
+                    0 -> "No signer yet — add one to begin."
+                    1 -> "1 signer."
+                    else -> "${state.signers.size} signers."
                 },
                 style = MaterialTheme.typography.bodySmall,
                 textAlign = TextAlign.Center,
@@ -326,7 +282,7 @@ fun HomeScreen(
             Spacer(modifier = Modifier.height(32.dp))
 
             Text(
-                text = "XBT / SeedSigner coordinator \u2014 watch-only",
+                text = "XBT / SeedSigner coordinator — watch-only",
                 style = MaterialTheme.typography.bodySmall,
                 textAlign = TextAlign.Center,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -352,7 +308,7 @@ private fun ServerStatusLine(
         ServerStatus.NOT_CONFIGURED ->
             MaterialTheme.colorScheme.onSurfaceVariant to "Connect to your own Electrum server"
         ServerStatus.CHECKING ->
-            MaterialTheme.colorScheme.onSurfaceVariant to "Checking\u2026"
+            MaterialTheme.colorScheme.onSurfaceVariant to "Checking…"
         ServerStatus.CONNECTED ->
             XbtSuccessDark to "Connected to ${serverLabel.orEmpty()}"
         ServerStatus.DISCONNECTED ->
@@ -387,59 +343,6 @@ private fun ServerStatusLine(
     }
 }
 
-/**
- * The active-signer box: the selected xpub's name plus a shortened key, or a
- * placeholder explaining that nothing is selected.
- */
-@Composable
-private fun ActiveSignerCard(state: HomeScreenState) {
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = MaterialTheme.shapes.medium,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-        ) {
-            Text(
-                text = "Active signer",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            val active = state.active
-            if (active == null) {
-                Text(
-                    text = "No active xpub",
-                    style = MaterialTheme.typography.titleMedium,
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "Import an xpub, then select it as the active signer.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else {
-                Text(
-                    text = active.name,
-                    style = MaterialTheme.typography.titleMedium,
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = state.activeSnippet.orEmpty(),
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-    }
-}
-
 /** In-memory storage, so the previews can show a populated home screen. */
 private class PreviewKeyValueStore : KeyValueStore {
     private val values = mutableMapOf<String, String>()
@@ -462,16 +365,15 @@ private class PreviewServerSettings : ServerSettings {
 @Composable
 private fun HomeScreenPreview() {
     val previewState = rememberHomeScreenState(
-        remember { previewHomeScreenStore(active = true) },
+        remember { previewSignerStore(populated = true) },
         remember { PreviewServerSettings() },
     )
     XbtWalletTheme {
         HomeScreen(
             state = previewState,
             onOpenServer = {},
-            onOpenImportXpub = {},
-            onSelectActiveXpub = {},
-            onOpenAddresses = {},
+            onAddSigner = {},
+            onOpenSigners = {},
         )
     }
 }
@@ -480,16 +382,15 @@ private fun HomeScreenPreview() {
 @Composable
 private fun HomeScreenEmptyPreview() {
     val previewState = rememberHomeScreenState(
-        remember { previewHomeScreenStore(active = false) },
+        remember { previewSignerStore(populated = false) },
         remember { PreviewServerSettings() },
     )
     XbtWalletTheme {
         HomeScreen(
             state = previewState,
             onOpenServer = {},
-            onOpenImportXpub = {},
-            onSelectActiveXpub = {},
-            onOpenAddresses = {},
+            onAddSigner = {},
+            onOpenSigners = {},
         )
     }
 }
@@ -511,22 +412,19 @@ private fun ServerStatusLinePreview() {
     }
 }
 
-/**
- * A throwaway store for the previews: two xpubs with deterministic ids, and
- * optionally one of them made active.
- */
-private fun previewHomeScreenStore(active: Boolean): WalletStore {
+/** A throwaway store for the previews: two signers with deterministic ids. */
+private fun previewSignerStore(populated: Boolean): SignerStore {
     var counter = 0
-    val store = WalletStore(
+    val store = SignerStore(
         storage = PreviewKeyValueStore(),
         now = { 0L },
         newId = { "id-${++counter}" },
     )
+    if (!populated) return store
     val vector =
         "zpub6rFR7y4Q2AijBEqTUquhVz398htDFrtymD9xYYfG1m4wAcvPhXNfE3EfH1r1ADqtfSdVCToUG868" +
             "RvUUkgDKf31mGDtKsAYz2oz2AGutZYs"
-    val cold = store.add("Cold storage", vector)
+    store.add("Cold storage", vector)
     store.add("Savings", vector)
-    if (active) store.setActive(cold.id)
     return store
 }

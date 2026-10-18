@@ -7,6 +7,7 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * A tiny stand-in for electrs, used by the unit tests to drive
@@ -49,6 +50,12 @@ class MockElectrumServer(
     /** Every request the mock received, in arrival order. */
     val requests = CopyOnWriteArrayList<Map<String, Any?>>()
 
+    /** How many connections have been accepted, for "one connection per scan" tests. */
+    private val connectionCounter = AtomicInteger()
+
+    /** Connections accepted so far. */
+    val connections: Int get() = connectionCounter.get()
+
     /** Non-null when the mock's own worker thread blew up. */
     @Volatile
     var failure: Throwable? = null
@@ -66,6 +73,7 @@ class MockElectrumServer(
         try {
             while (!serverSocket.isClosed) {
                 val socket = serverSocket.accept()
+                connectionCounter.incrementAndGet()
                 clientSocket = socket
                 if (hangUpOnConnect) {
                     socket.close()
@@ -115,6 +123,56 @@ class MockElectrumServer(
         runCatching { clientSocket?.close() }
         runCatching { serverSocket.close() }
         worker.interrupt()
+    }
+
+    companion object {
+
+        /**
+         * A mock that answers the three `blockchain.scripthash.*` RPCs from
+         * scripted fixtures — the chain-layer counterpart to the handshake
+         * lambdas the client tests pass in.
+         *
+         * The fixtures are keyed by Electrum scripthash, which is the identity
+         * the protocol actually uses. Anything not in a fixture map is answered
+         * the way a server answers an address it has never seen: empty history,
+         * zero balance, no UTXOs. That single default is what makes the "empty
+         * wallet" and "unused address" cases one line instead of a special case.
+         *
+         * @param history per-scripthash `get_history` entries (see [historyEntry]).
+         * @param balances per-scripthash `(confirmed, unconfirmed)` satoshis.
+         * @param unspent per-scripthash `listunspent` entries (see [unspentEntry]).
+         */
+        fun scripted(
+            history: Map<String, List<Any?>> = emptyMap(),
+            balances: Map<String, Pair<Long, Long>> = emptyMap(),
+            unspent: Map<String, List<Any?>> = emptyMap(),
+        ): MockElectrumServer = MockElectrumServer { method, params, _ ->
+            val scripthash = params.firstOrNull() as? String ?: ""
+            when (method) {
+                "blockchain.scripthash.get_history" ->
+                    Reply.Result(history[scripthash] ?: emptyList<Any?>())
+
+                "blockchain.scripthash.get_balance" -> {
+                    val (confirmed, unconfirmed) = balances[scripthash] ?: (0L to 0L)
+                    Reply.Result(
+                        linkedMapOf<String, Any?>("confirmed" to confirmed, "unconfirmed" to unconfirmed),
+                    )
+                }
+
+                "blockchain.scripthash.listunspent" ->
+                    Reply.Result(unspent[scripthash] ?: emptyList<Any?>())
+
+                else -> Reply.Error(-32601, "unknown method $method")
+            }
+        }
+
+        /** One `get_history` fixture entry. The scanner only cares that it is non-empty. */
+        fun historyEntry(txHash: String, height: Int): Map<String, Any?> =
+            linkedMapOf("tx_hash" to txHash, "height" to height)
+
+        /** One `listunspent` fixture entry. */
+        fun unspentEntry(txHash: String, txPos: Int, height: Int, value: Long): Map<String, Any?> =
+            linkedMapOf("tx_hash" to txHash, "tx_pos" to txPos, "height" to height, "value" to value)
     }
 }
 

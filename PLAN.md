@@ -182,26 +182,65 @@ both projects reading the same spec.
 What exists right now, in this repository:
 
 - Android/Kotlin + Compose (Material 3) single-module project, dark theme,
-  Gradle Kotlin DSL, version catalog, state-based navigation (no nav library).
-- A home screen, top to bottom: **Server**, the **active signer** card,
-  **Import xpub**, **Select active xpub** and **Addresses**. The active signer is
-  persisted and drives the Addresses viewer; the old Receive/Send placeholders
-  are gone. Under the Server button the screen shows live server status —
-  connected / disconnected / checking — refreshed by a heartbeat while it is on
-  display.
+  Gradle Kotlin DSL, version catalog, state-based navigation (no nav library): a
+  `Screen` enum over a small back stack — push to navigate, pop to go back one
+  level, with each per-signer entry carrying its own signer id (NavStack.kt).
+- A home screen, top to bottom: **Server**, **Add signer** and **Signers**.
+  Under the Server button the screen shows live server status — connected /
+  disconnected / checking — refreshed by a heartbeat while it is on display.
+  Signers are a plain list: there is no "active signer". **Add signer** opens a
+  chooser — an intro naming both ways to pair, *Add watch-only xpub* leading to
+  the paste-and-validate form, and *Create hot wallet* shown disabled with a
+  *not available yet* tag, because seed generation on the phone is a capability
+  this build does not have. The Signers list shows every
+  saved signer oldest first, with its type badge and a head…tail key snippet, and
+  offers a confirm-gated remove per row. The
+  old active-signer card, **Select active xpub** picker and standalone
+  **Addresses** button are gone; the Addresses viewer is reopened under a signer.
+  The old Receive/Send placeholders are gone.
+- **Signer screens** (v0.1.0's first chain-data feature). Opening a signer shows
+  its **balance** — confirmed plus unconfirmed satoshis of that xpub, read from
+  the user's own Electrum server, with a visible loading state, a *Connect a
+  server* state when no endpoint is saved, and a retryable error when the server
+  does not answer. Under it: **UTXOs**, **Addresses**, and **Send**/**Receive**
+  disabled (coming soon). Fiat figures are **hardcoded placeholders** in
+  `PlaceholderPrices.kt` ($420.69/XBT, $81,000/BTC, both labelled on screen) —
+  this build makes no market-data request, adds no HTTP client and adds no
+  permission. The UTXO list is monospaced rows of amount, `txid:vout`, chain and
+  address index, and height. The address viewer's rows are annotated *used* /
+  *unused*, with the first unused highlighted. At the foot of the screen, under
+  the account key, a **Transactions** section lists every transaction touching
+  any scanned address (both chains), deduped by txid and ordered unconfirmed
+  first then by height descending, capped at the latest 50. It is folded from
+  the scan's own `get_history` answers — no extra RPC — and shows a truncated,
+  tap-to-copy txid with its height or *unconfirmed*; there is no direction
+  arrow, which `get_history`/`listunspent` cannot supply honestly.
+- **Chain layer** (`com.xbtwallet.app.chain/`, Android-free): Electrum
+  **scripthash** (`sha256(scriptPubKey)` reversed), P2WPKH script building, and a
+  **gap-limit scan** — receive (`0/i`) and change (`1/i`) walked in batches of 20
+  until a batch has no used address in it, then `blockchain.scripthash.get_balance`
+  summed over the used addresses for the headline number and
+  `blockchain.scripthash.listunspent` for the UTXO list. The three scripthash RPCs
+  share one connection per scan (`ElectrumClient.withChainSession`).
 - **Crypto** (`com.xbtwallet.app.crypto/`, Android-free): Base58Check, SHA-256 /
   RIPEMD-160 / HMAC-SHA512, bech32 + bech32m, secp256k1 public-point arithmetic,
   BIP-32 parsing and public-only child derivation, P2WPKH address building.
   Public keys only — there is no private-key, seed or signing code path.
-- **Storage** (`com.xbtwallet.app.data/`): a JSON xpub list in SharedPreferences
-  behind a `KeyValueStore` interface, so the store is JVM-testable, plus the id
-  of the active signer; and the Electrum server settings from the previous
-  iteration, behind a `ServerSettings` interface for the same reason.
+- **Storage** (`com.xbtwallet.app.data/`): a JSON signer list in
+  SharedPreferences behind a `KeyValueStore` interface, so the store is
+  JVM-testable. A signer is an id, a name and a type — `WatchOnlyXpub(xpub)`
+  today; there is no active-signer id and no seed storage. Older `wallets` blobs
+  are migrated to watch-only signers on first read. Plus the Electrum server
+  settings from the previous iteration, behind a `ServerSettings` interface for
+  the same reason.
 - **Networking**: a clean-room Electrum JSON-RPC client (direct TLS/TCP, no Tor
-  yet) used by the private-server screen and, via its quiet `server.ping` probe,
-  by the home screen's status heartbeat; no xpub data is fetched with it yet.
-- **Tests**: 102 JVM unit tests, green, including the official BIP-84 and BIP-173
-  vectors and the published RIPEMD-160 vectors.
+  yet) used by the private-server screen, via its quiet `server.ping` probe by
+  the home screen's status heartbeat, and via its scripthash RPCs by the signer
+  screens' balance and UTXO views.
+- **Tests**: 163 JVM unit tests, green, including the official BIP-84 and BIP-173
+  vectors, the published RIPEMD-160 vectors, an Electrum scripthash vector, the
+  gap-limit scan's stop rule (including the partly-used batch case), and the
+  transaction-history aggregation's dedupe and ordering rules.
 
-Not yet: chain data (balances, history, UTXOs), the receive QR flow, gap-limit
-scanning, descriptors/BIP-380 (the model still stores a bare xpub), and sending.
+Not yet: the receive QR flow, descriptors/BIP-380
+(the model still stores a bare xpub), Tor, precise/real fiat rates, and sending.

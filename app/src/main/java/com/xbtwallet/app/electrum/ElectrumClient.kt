@@ -1,5 +1,6 @@
 package com.xbtwallet.app.electrum
 
+import com.xbtwallet.app.chain.ChainQuery
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -47,10 +48,11 @@ class ElectrumException(message: String) : Exception(message)
  *
  * Written from the public Electrum protocol description: newline-delimited
  * JSON-RPC 2.0 requests carrying a monotonically increasing `id`, answered by
- * one JSON object per request. Only what this iteration needs is implemented —
- * `server.version`, `server.features` and `server.banner` — because the point
- * of this class is to prove the transport works against a private server
- * before it grows into the app's real chain backend.
+ * one JSON object per request. It speaks the three handshake methods the Server
+ * screen uses (`server.version`, `server.features`, `server.banner`), the quiet
+ * `server.ping` the home screen's heartbeat uses, and — through
+ * [withChainSession] — the three `blockchain.scripthash.*` queries the signer
+ * screen's balance and UTXO views are built on.
  *
  * The client is free of Android imports on purpose: it runs on the JVM and is
  * covered by unit tests that drive it against a mock Electrum responder
@@ -93,6 +95,59 @@ class ElectrumClient(
      * `error` all come back as `false`.
      */
     suspend fun ping(): Boolean = withContext(Dispatchers.IO) { runPing() }
+
+    /**
+     * Opens one connection to the server and runs [block] against it, exposing
+     * the scripthash queries as a [ChainQuery].
+     *
+     * This is the chain layer's entry point, and it exists for one reason: a
+     * gap-limit scan issues dozens of requests (one history call per derived
+     * address, a balance and a UTXO call per used one), and they all belong on
+     * *one* connection. The alternative — a connect/TLS/close per address — would
+     * make an ordinary account scan look like a port scan to the user's own
+     * server.
+     *
+     * [block] runs on the IO dispatcher and is **blocking**: it may call the
+     * [ChainQuery] methods, which block on the socket, and anything else it does
+     * (deriving addresses, summing balances) is likewise off the UI thread.
+     * Exceptions from the socket or the protocol propagate to the caller, which
+     * is what lets the signer screen show a real error instead of a zero balance
+     * that never loaded. The socket is closed when [block] returns or throws.
+     *
+     * No handshake is performed: the scripthash methods do not require one, and
+     * a balance is not the place to negotiate a protocol version. Nothing is
+     * written to [log] — this is a background read, not a user-visible
+     * connection test.
+     */
+    suspend fun <T> withChainSession(block: (ChainQuery) -> T): T =
+        withContext(Dispatchers.IO) { runChainSession(block) }
+
+    private fun <T> runChainSession(block: (ChainQuery) -> T): T {
+        var socket: Socket? = null
+        try {
+            require(server.host.isNotBlank()) { "host is empty" }
+            require(server.port in 1..65535) { "invalid port ${server.port}" }
+
+            val plain = Socket().also { socket = it }
+            plain.tcpNoDelay = true
+            plain.connect(InetSocketAddress(server.host, server.port), timeoutMillis)
+            plain.soTimeout = timeoutMillis
+
+            val transport: Socket = if (server.protocol == ElectrumProtocol.SSL) startTls(plain) else plain
+            val reader = BufferedReader(InputStreamReader(transport.getInputStream(), Charsets.UTF_8))
+            val writer = BufferedWriter(OutputStreamWriter(transport.getOutputStream(), Charsets.UTF_8))
+
+            // One id counter for the whole session, so a scan's requests are
+            // numbered 1..n on this connection and each answer maps to its ask.
+            var id = 0
+            val session = ChainRpcSession { method, params ->
+                rpc(++id, method, params, reader, writer, logger = {})
+            }
+            return block(session)
+        } finally {
+            runCatching { socket?.close() }
+        }
+    }
 
     private fun runPing(): Boolean {
         var socket: Socket? = null
