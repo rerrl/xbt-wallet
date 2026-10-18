@@ -1,17 +1,19 @@
 # xbt-wallet
 
-A SeedSigner-first, watch-only Android wallet for **XBT** (the Bitcoin BLAKE2b
-fork), built for GrapheneOS. Keys never touch the phone: the app is a
-coordinator that pairs with an air-gapped signer over animated QR.
-MIT licensed. See [PLAN.md](PLAN.md) for the full plan and roadmap.
+An **XBT / SeedSigner coordinator** — a SeedSigner-first, watch-only Android
+overview for **XBT** (the Bitcoin BLAKE2b fork), built for GrapheneOS. Keys
+never touch the phone: the app is a coordinator that pairs with an air-gapped
+signer over animated QR. It is a watch-only overview of balances and addresses,
+not a wallet. MIT licensed. See [PLAN.md](PLAN.md) for the full plan and
+roadmap.
 
 Status: **v0.1.0 in progress** — the skeleton plus the first three features:
 
-- **Import Wallet** — paste an account-level `xpub`/`ypub`/`zpub`, validated
+- **Import xpub** — paste an account-level `xpub`/`ypub`/`zpub`, validated
   clean-room (Base58Check, version bytes, compressed key, checksum) and stored
-  as one entry in the multi-wallet list.
+  as one entry in the saved-xpub list.
 - **Addresses** — browse derived native-segwit receive/change addresses per
-  wallet, with the derivation index shown and tap-to-copy.
+  xpub, with the derivation index shown and tap-to-copy.
 - **Private Electrum server** — enter host/port, pick SSL or TCP, hit *Test
   connection* and watch the Electrum JSON-RPC handshake in an on-screen log.
 
@@ -20,9 +22,9 @@ anywhere in this repository. Balances, history, the receive QR and sending are
 still missing, and there is no Tor in this iteration (direct IP connections
 only).
 
-## Import Wallet
+## Import xpub
 
-`Import Wallet` on the home screen takes a wallet name plus an account-level
+`Import xpub` on the home screen takes an xpub name plus an account-level
 extended public key. The key is validated against the public specifications:
 
 - **Base58Check** — alphabet, then the 4-byte double-SHA256 checksum.
@@ -33,17 +35,17 @@ extended public key. The key is validated against the public specifications:
 - **Key data** — must be a 33-byte compressed point that actually lies on the
   curve.
 
-This wallet is native-segwit single-sig, so whatever you paste is treated as a
+The app is native-segwit single-sig, so whatever you paste is treated as a
 **BIP-84-style account key** and every address is derived as P2WPKH (`bc1q…`).
 The screen says so, and it warns that a manual import carries no master
-fingerprint or derivation path. Wallets are stored as a JSON list (name, xpub,
+fingerprint or derivation path. xpubs are stored as a JSON list (name, xpub,
 timestamp) in `SharedPreferences` — a list keyed by id from day one, per
-PLAN.md's multi-wallet stance.
+PLAN.md's multi-xpub stance.
 
 ## Addresses
 
-`Addresses` (enabled once a wallet exists) shows the addresses derived from the
-selected wallet's account key: external chain `0/i` under the **Receive** tab
+`Addresses` (enabled once an xpub exists) shows the addresses derived from the
+selected xpub's account key: external chain `0/i` under the **Receive** tab
 and internal chain `1/i` under **Change**, both native segwit P2WPKH. Each row
 shows its derivation index; the first 20 per tab are listed, with *Show 20 more*
 to extend. Tap a row to copy the address. There is no gap-limit logic yet —
@@ -90,7 +92,7 @@ so it can be unit-tested on the JVM against a mock Electrum responder:
 
 Limitations of this iteration: no Tor, no certificate pinning (an untrusted or
 self-signed server certificate is rejected and reported in the log rather than
-accepted), and no wallet data is fetched yet — the connection is all it does.
+accepted), and no xpub data is fetched yet — the connection is all it does.
 
 ## Run in dev mode
 

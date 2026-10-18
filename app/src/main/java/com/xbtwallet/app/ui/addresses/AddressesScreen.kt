@@ -155,7 +155,7 @@ fun AddressesScreen(
                     modifier = Modifier.weight(1f),
                 )
                 if (onChangeWallet != null) {
-                    TextButton(onClick = onChangeWallet) { Text("Switch wallet") }
+                    TextButton(onClick = onChangeWallet) { Text("Switch xpub") }
                 }
             }
 
@@ -171,7 +171,7 @@ fun AddressesScreen(
 
             if (state.accountKey == null) {
                 Text(
-                    text = "This wallet's stored key could not be read. Delete and re-import it.",
+                    text = "This xpub's stored key could not be read. Delete and re-import it.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.error,
                 )
@@ -278,7 +278,7 @@ fun WalletPickerScreen(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onBack) { Text("\u2190 Back") }
                 Spacer(modifier = Modifier.width(4.dp))
-                Text("Choose a wallet", style = MaterialTheme.typography.titleLarge)
+                Text("Select xpub", style = MaterialTheme.typography.titleLarge)
             }
 
             Spacer(modifier = Modifier.height(12.dp))

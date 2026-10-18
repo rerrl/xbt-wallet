@@ -23,8 +23,8 @@ import com.xbtwallet.app.ui.theme.XbtWalletTheme
 /**
  * Home screen — the app's hub.
  *
- * Live actions: **Import Wallet** (paste an account xpub), **Addresses** (browse
- * derived addresses; enabled once at least one wallet exists) and **Server**
+ * Live actions: **Import xpub** (paste an account xpub), **Addresses** (browse
+ * derived addresses; enabled once at least one xpub exists) and **Server**
  * (private Electrum endpoint). Receive and Send stay disabled placeholders: they
  * need the signer round-trip and chain data, neither of which exists yet.
  *
@@ -49,7 +49,7 @@ fun HomeScreen(
             verticalArrangement = Arrangement.Center,
         ) {
             Text(
-                text = "xbt-wallet",
+                text = "XBT",
                 style = MaterialTheme.typography.headlineLarge,
                 color = MaterialTheme.colorScheme.primary,
             )
@@ -57,7 +57,7 @@ fun HomeScreen(
             Spacer(modifier = Modifier.height(12.dp))
 
             Text(
-                text = "SeedSigner-first XBT wallet \u2014 watch-only",
+                text = "SeedSigner coordinator \u2014 watch-only",
                 style = MaterialTheme.typography.bodyMedium,
                 textAlign = TextAlign.Center,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -69,7 +69,7 @@ fun HomeScreen(
                 onClick = onOpenImportWallet,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Import Wallet")
+                Text("Import xpub")
             }
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -88,9 +88,9 @@ fun HomeScreen(
 
             Text(
                 text = when (walletCount) {
-                    0 -> "No wallet imported yet \u2014 import an account xpub to begin."
-                    1 -> "1 wallet saved."
-                    else -> "$walletCount wallets saved."
+                    0 -> "No xpub imported yet \u2014 import an account xpub to begin."
+                    1 -> "1 xpub saved."
+                    else -> "$walletCount xpubs saved."
                 },
                 style = MaterialTheme.typography.bodySmall,
                 textAlign = TextAlign.Center,

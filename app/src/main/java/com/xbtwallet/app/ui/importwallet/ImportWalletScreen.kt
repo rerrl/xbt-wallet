@@ -87,7 +87,7 @@ class ImportWalletScreenState(
     /** Validates and, when everything checks out, stores the wallet. */
     fun import() {
         submitAttempted = true
-        nameError = if (name.isBlank()) "Give this wallet a name." else null
+        nameError = if (name.isBlank()) "Give this xpub a name." else null
         revalidate(showError = true)
 
         val key = parsedKey
@@ -166,7 +166,7 @@ fun ImportWalletScreen(
                 TextButton(onClick = onBack) { Text("\u2190 Back") }
                 Spacer(modifier = Modifier.width(4.dp))
                 Text(
-                    text = "Import wallet",
+                    text = "Import xpub",
                     style = MaterialTheme.typography.titleLarge,
                 )
             }
@@ -185,7 +185,7 @@ fun ImportWalletScreen(
             OutlinedTextField(
                 value = state.name,
                 onValueChange = state::onNameChange,
-                label = { Text("Wallet name") },
+                label = { Text("xpub name") },
                 placeholder = { Text("Cold storage") },
                 singleLine = true,
                 isError = state.nameError != null,
@@ -241,7 +241,7 @@ fun ImportWalletScreen(
                 onClick = state::import,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Import wallet")
+                Text("Import xpub")
             }
 
             Spacer(modifier = Modifier.height(24.dp))

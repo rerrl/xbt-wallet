@@ -8,8 +8,9 @@ change is wrong or this document gets updated first.
 
 ## 1. Vision
 
-**xbt-wallet is a SeedSigner-first, watch-only, mobile-first coordinator wallet
-for XBT** (the Bitcoin BLAKE2b fork), built for GrapheneOS before anything else.
+**xbt-wallet is a SeedSigner-first, watch-only, mobile-first XBT / SeedSigner
+coordinator** (the Bitcoin BLAKE2b fork), built for GrapheneOS before anything
+else. It manages xpubs, not wallets: it holds no keys and signs nothing.
 
 - **Watch-only coordinator.** The phone holds public keys only. Private keys are
   generated on, and never leave, a dedicated air-gapped signer (SeedSigner).
@@ -182,17 +183,17 @@ What exists right now, in this repository:
 
 - Android/Kotlin + Compose (Material 3) single-module project, dark theme,
   Gradle Kotlin DSL, version catalog, state-based navigation (no nav library).
-- A home screen with three live actions: **Import Wallet**, **Addresses** and
+- A home screen with three live actions: **Import xpub**, **Addresses** and
   **Server**; Receive and Send are still disabled placeholders.
 - **Crypto** (`com.xbtwallet.app.crypto/`, Android-free): Base58Check, SHA-256 /
   RIPEMD-160 / HMAC-SHA512, bech32 + bech32m, secp256k1 public-point arithmetic,
   BIP-32 parsing and public-only child derivation, P2WPKH address building.
   Public keys only — there is no private-key, seed or signing code path.
-- **Storage** (`com.xbtwallet.app.data/`): a JSON wallet list in
-  SharedPreferences behind a `KeyValueStore` interface, so the store is
-  JVM-testable; plus the Electrum server settings from the previous iteration.
+- **Storage** (`com.xbtwallet.app.data/`): a JSON xpub list in SharedPreferences
+  behind a `KeyValueStore` interface, so the store is JVM-testable; plus the
+  Electrum server settings from the previous iteration.
 - **Networking**: a clean-room Electrum JSON-RPC client (direct TLS/TCP, no Tor
-  yet) used by the private-server screen; no wallet data is fetched with it yet.
+  yet) used by the private-server screen; no xpub data is fetched with it yet.
 - **Tests**: 78 JVM unit tests, green, including the official BIP-84 and BIP-173
   vectors and the published RIPEMD-160 vectors.
 
