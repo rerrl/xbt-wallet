@@ -21,10 +21,13 @@ import com.xbtwallet.app.ui.home.HomeScreen
 import com.xbtwallet.app.ui.home.rememberHomeScreenState
 import com.xbtwallet.app.ui.server.ServerScreen
 import com.xbtwallet.app.ui.server.rememberServerScreenState
+import com.xbtwallet.app.ui.addresses.AddressesScreen
 import com.xbtwallet.app.ui.signers.AddSignerScreen
 import com.xbtwallet.app.ui.signers.ImportXpubScreen
+import com.xbtwallet.app.ui.signers.SignerChainState
 import com.xbtwallet.app.ui.signers.SignerDetailScreen
 import com.xbtwallet.app.ui.signers.SignersScreen
+import com.xbtwallet.app.ui.signers.UtxosScreen
 import com.xbtwallet.app.ui.signers.rememberImportXpubScreenState
 
 /**
@@ -43,7 +46,7 @@ import com.xbtwallet.app.ui.signers.rememberImportXpubScreenState
  * argument-taking screens arrive, this is the seam to generalise into a route
  * type with its own `Saver`.
  */
-enum class Screen { HOME, SERVER, SIGNERS, ADD_SIGNER, IMPORT_XPUB, SIGNER_DETAIL }
+enum class Screen { HOME, SERVER, SIGNERS, ADD_SIGNER, IMPORT_XPUB, SIGNER_DETAIL, SIGNER_UTXOS, SIGNER_ADDRESSES }
 
 /**
  * The app's navigation and its shared stores.
@@ -79,11 +82,33 @@ fun XbtWalletApp() {
 
     var screen by rememberSaveable { mutableStateOf(Screen.HOME) }
 
-    // The argument for Screen.SIGNER_DETAIL (see the Screen doc comment). Null
-    // when the detail screen is not the one being shown.
+    // The argument for the three signer screens (see the Screen doc comment).
+    // Null when no signer is open.
     var signerDetailId by rememberSaveable { mutableStateOf<String?>(null) }
 
-    BackHandler(enabled = screen != Screen.HOME) { screen = Screen.HOME }
+    // The open signer and its chain state. Resolved here, at the navigation
+    // level, for two reasons: the state must outlive a single screen (opening
+    // UTXOs from the detail screen must not cancel the scan in flight), and
+    // resolving through the store every recomposition is what makes a signer
+    // deleted underneath us fall back Home instead of rendering stale data.
+    val openSigner = signerDetailId?.let(signerStore::get)
+    val chainState = remember(openSigner?.id, serverStore) {
+        openSigner?.let { SignerChainState(signer = it, serverSettings = serverStore) }
+    }
+
+    // One scan per open signer. `load()` is a no-op once a scan has run or is
+    // running, so recomposition and screen changes cost nothing; the effect is
+    // re-created only when a different signer is opened (a new state object).
+    LaunchedEffect(chainState) { chainState?.load() }
+
+    // Back goes one step up the signer walk, not straight Home: from UTXOs or
+    // Addresses that is the signer, from anywhere else it is Home.
+    BackHandler(enabled = screen != Screen.HOME) {
+        screen = when (screen) {
+            Screen.SIGNER_UTXOS, Screen.SIGNER_ADDRESSES -> Screen.SIGNER_DETAIL
+            else -> Screen.HOME
+        }
+    }
 
     when (screen) {
         Screen.HOME -> {
@@ -156,13 +181,38 @@ fun XbtWalletApp() {
         }
 
         Screen.SIGNER_DETAIL -> {
-            val signer = signerDetailId?.let(signerStore::get)
-            if (signer == null) {
+            if (openSigner == null || chainState == null) {
                 // The id no longer resolves (the signer was removed, or a saved
                 // id went stale). Go Home rather than show an empty detail page.
                 LaunchedEffect(signerDetailId) { screen = Screen.HOME }
             } else {
-                SignerDetailScreen(signer = signer, onBack = { screen = Screen.HOME })
+                SignerDetailScreen(
+                    signer = openSigner,
+                    state = chainState,
+                    onOpenUtxos = { screen = Screen.SIGNER_UTXOS },
+                    onOpenAddresses = { screen = Screen.SIGNER_ADDRESSES },
+                    onBack = {
+                        signerDetailId = null
+                        screen = Screen.HOME
+                    },
+                )
+            }
+        }
+
+        Screen.SIGNER_UTXOS -> {
+            if (chainState == null) {
+                // Same rule as the detail screen: no signer, nothing to show.
+                LaunchedEffect(signerDetailId) { screen = Screen.HOME }
+            } else {
+                UtxosScreen(state = chainState, onBack = { screen = Screen.SIGNER_DETAIL })
+            }
+        }
+
+        Screen.SIGNER_ADDRESSES -> {
+            if (chainState == null) {
+                LaunchedEffect(signerDetailId) { screen = Screen.HOME }
+            } else {
+                AddressesScreen(state = chainState, onBack = { screen = Screen.SIGNER_DETAIL })
             }
         }
     }
