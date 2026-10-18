@@ -116,6 +116,9 @@ class AccountScanner(
             change = change,
             utxos = utxos,
             balance = balance,
+            // The transaction list is folded from the *same* get_history
+            // answers that decided which addresses were used — no extra RPC.
+            transactions = aggregateTransactions(receive + change),
         )
     }
 
@@ -136,7 +139,8 @@ class AccountScanner(
             var anyUsed = false
             for (index in batchStart until batchStart + gapLimit) {
                 val derived = derive(chain, index)
-                val used = query.getHistory(derived.scripthash).isNotEmpty()
+                val history = query.getHistory(derived.scripthash)
+                val used = history.isNotEmpty()
                 if (used) anyUsed = true
                 scanned += ScannedAddress(
                     chain = chain,
@@ -144,6 +148,7 @@ class AccountScanner(
                     address = derived.address,
                     scripthash = derived.scripthash,
                     used = used,
+                    history = history,
                 )
                 onScanned()
             }

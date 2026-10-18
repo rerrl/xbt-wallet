@@ -208,7 +208,13 @@ What exists right now, in this repository:
   this build makes no market-data request, adds no HTTP client and adds no
   permission. The UTXO list is monospaced rows of amount, `txid:vout`, chain and
   address index, and height. The address viewer's rows are annotated *used* /
-  *unused*, with the first unused highlighted.
+  *unused*, with the first unused highlighted. At the foot of the screen, under
+  the account key, a **Transactions** section lists every transaction touching
+  any scanned address (both chains), deduped by txid and ordered unconfirmed
+  first then by height descending, capped at the latest 50. It is folded from
+  the scan's own `get_history` answers — no extra RPC — and shows a truncated,
+  tap-to-copy txid with its height or *unconfirmed*; there is no direction
+  arrow, which `get_history`/`listunspent` cannot supply honestly.
 - **Chain layer** (`com.xbtwallet.app.chain/`, Android-free): Electrum
   **scripthash** (`sha256(scriptPubKey)` reversed), P2WPKH script building, and a
   **gap-limit scan** — receive (`0/i`) and change (`1/i`) walked in batches of 20
@@ -231,9 +237,10 @@ What exists right now, in this repository:
   yet) used by the private-server screen, via its quiet `server.ping` probe by
   the home screen's status heartbeat, and via its scripthash RPCs by the signer
   screens' balance and UTXO views.
-- **Tests**: 147 JVM unit tests, green, including the official BIP-84 and BIP-173
-  vectors, the published RIPEMD-160 vectors, an Electrum scripthash vector, and
-  the gap-limit scan's stop rule (including the partly-used batch case).
+- **Tests**: 163 JVM unit tests, green, including the official BIP-84 and BIP-173
+  vectors, the published RIPEMD-160 vectors, an Electrum scripthash vector, the
+  gap-limit scan's stop rule (including the partly-used batch case), and the
+  transaction-history aggregation's dedupe and ordering rules.
 
-Not yet: a transaction history screen, the receive QR flow, descriptors/BIP-380
+Not yet: the receive QR flow, descriptors/BIP-380
 (the model still stores a bare xpub), Tor, precise/real fiat rates, and sending.

@@ -111,6 +111,11 @@ data class DerivedAddress(
 
 /**
  * One address the gap-limit scan visited, plus what the server said about it.
+ *
+ * [history] is the raw `get_history` answer, kept rather than reduced to the
+ * [used] bit: it is the material the signer screen's transaction list is built
+ * from, and the scan already paid for it (one `get_history` per visited
+ * address). See [aggregateTransactions].
  */
 data class ScannedAddress(
     val chain: AddressChain,
@@ -119,6 +124,8 @@ data class ScannedAddress(
     val scripthash: String,
     /** Non-empty history at this address: coins have moved through it. */
     val used: Boolean,
+    /** The transactions touching this address, exactly as the server reported them. */
+    val history: List<HistoryEntry> = emptyList(),
 )
 
 /**
@@ -136,6 +143,12 @@ data class AccountSnapshot(
     val change: List<ScannedAddress>,
     val utxos: List<ScannedUtxo>,
     val balance: ScripthashBalance,
+    /**
+     * The account's transactions, deduped and ordered for display — folded out
+     * of the visited addresses' `get_history` answers (see
+     * [aggregateTransactions]). Empty until a scan has run.
+     */
+    val transactions: List<ScannedTransaction> = emptyList(),
 ) {
     /** Every address the scan visited, receive chain first. */
     val addresses: List<ScannedAddress> get() = receive + change

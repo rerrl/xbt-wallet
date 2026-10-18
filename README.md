@@ -24,7 +24,16 @@ signer-first restructure:
 - **Signer screen** — one signer's own screen: its **live balance** from your
   own Electrum server (sats first, then the coin amount and two clearly-marked
   placeholder fiat lines), then **UTXOs**, **Addresses**, and **Send**/**Receive**
-  shown disabled until the air-gapped signing flow exists.
+  shown disabled until the air-gapped signing flow exists, with the account's
+  **transaction history** at the foot of the screen.
+- **Transactions (on the signer screen)** — every transaction touching any
+  scanned address of the account (both chains), deduped by txid and ordered
+  *unconfirmed first, then newest block first*, capped at the latest 50 with a
+  note when there are more. Each row is a truncated, tap-to-copy txid and its
+  height (or *unconfirmed*). Folded out of the scan's own `get_history` answers,
+  so it costs no extra request; there is deliberately **no** incoming/outgoing
+  arrow, because neither `get_history` nor `listunspent` can tell a send from a
+  receive without fetching the transaction.
 - **UTXO list** — every spendable output the scan found: amount, outpoint,
   address chain/index, and confirmation height (or *unconfirmed*).
 - **Addresses viewer** — derived native-segwit receive/change addresses per
@@ -34,7 +43,7 @@ signer-first restructure:
   connection* and watch the Electrum JSON-RPC handshake in an on-screen log.
 
 All crypto is public-key only: no private key, seed or signing code exists
-anywhere in this repository. Transaction history, the receive QR and sending are
+anywhere in this repository. The receive QR and sending are
 still missing, there is no Tor in this iteration (direct IP connections only),
 and the two fiat figures on the signer screen are **hardcoded placeholders** —
 this build requests no price feed from anyone.
@@ -136,7 +145,8 @@ is written on the screen that owns it.
 
 Tapping a signer opens its own screen — the place every per-signer action lives,
 and the first screen that talks to the chain. Top to bottom: the signer's name
-and its *watch-only* badge, its **balance**, and the four actions.
+and its *watch-only* badge, its **balance**, the four actions, the account key,
+and the account's **transaction history**.
 
 **Balance** is this account's confirmed *plus* unconfirmed satoshis, read from
 your own Electrum server. The scan runs off the UI thread and the card shows
@@ -158,6 +168,17 @@ share the satoshi unit, the same balance as BTC at **$81,000/BTC**. Both live in
 one file (`PlaceholderPrices.kt`) with comments saying exactly what they are.
 There is no price API, no HTTP client and no new permission anywhere near this —
 the only traffic the app makes is Electrum RPCs to the server the user entered.
+
+At the foot of the screen, under the account key, a **Transactions** section
+shows every transaction that touched any scanned address of the account — both
+chains — deduped by txid and ordered **unconfirmed first, then newest block
+first**, capped at the latest 50 with a note when there are more. Each row is a
+truncated, tap-to-copy txid and its height, or *unconfirmed*. It costs nothing
+extra: the list is folded out of the same `get_history` answers the scan already
+made. There is deliberately **no** incoming/outgoing arrow: neither `get_history`
+nor `listunspent` can tell a send from a receive without fetching the
+transaction (a send with change looks exactly like a receive in `listunspent`),
+so the section says only what it can prove.
 
 ## Chain queries
 
@@ -230,7 +251,7 @@ same way — no Context, no socket — so the scan's rules are unit-tested again
 an in-memory fake and the RPCs separately against a mock server.
 
 ```bash
-./gradlew clean assembleDebug testDebugUnitTest   # 147 unit tests, all green
+./gradlew clean assembleDebug testDebugUnitTest   # 163 unit tests, all green
 ```
 
 ## Private Electrum server
@@ -262,8 +283,9 @@ wake lock, no new permission.
 
 Limitations of this iteration: no Tor, no certificate pinning (an untrusted or
 self-signed server certificate is rejected and reported in the log rather than
-accepted), no transaction history yet, and no testnet: an endpoint is assumed to
-serve the XBT chain.
+accepted), no testnet yet, and no transaction history is fetched for a signer
+beyond what the scan's own `get_history` answers carry: an endpoint is assumed
+to serve the XBT chain.
 
 ## Run in dev mode
 

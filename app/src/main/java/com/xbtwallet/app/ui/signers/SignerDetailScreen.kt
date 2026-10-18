@@ -43,7 +43,9 @@ import java.math.BigDecimal
  *     answer ("Connect a server"),
  *  3. the four actions: **UTXOs** and **Addresses** open their own screens;
  *     **Send** and **Receive** are shown disabled because they need the
- *     air-gapped signing flow that does not exist yet.
+ *     air-gapped signing flow that does not exist yet,
+ *  4. the **Transactions** list, under the account key: the same scan's
+ *     `get_history` answers, aggregated and deduped (see [TransactionsSection]).
  *
  * The screen owns no chain state of its own: [state] is created and driven by
  * the navigation layer so that the balance is scanned once per signer visit and
@@ -147,6 +149,12 @@ fun SignerDetailScreen(
                     )
                 }
             }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // 4. Transactions: what the scan's own get_history answers add up to,
+            // underneath the account key. Same scan, same server, no extra RPC.
+            TransactionsSection(state)
         }
     }
 }

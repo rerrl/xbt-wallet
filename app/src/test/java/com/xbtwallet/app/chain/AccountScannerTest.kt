@@ -43,6 +43,13 @@ class AccountScannerTest {
         private val usedChange: Set<Int> = emptySet(),
         private val balances: Map<Pair<AddressChain, Int>, ScripthashBalance> = emptyMap(),
         private val utxos: Map<Pair<AddressChain, Int>, List<ChainUtxo>> = emptyMap(),
+        /**
+         * Scripted `get_history` answers, by address. An address with an entry
+         * here is used even if it is not listed in [usedReceive]/[usedChange];
+         * an address in neither is unused. Addresses without an entry in this
+         * map that *are* in the used sets fall back to a single canned tx.
+         */
+        private val history: Map<Pair<AddressChain, Int>, List<HistoryEntry>> = emptyMap(),
     ) : ChainQuery {
 
         val historyCalls = mutableListOf<Pair<AddressChain, Int>>()
@@ -66,6 +73,7 @@ class AccountScannerTest {
         override fun getHistory(scripthash: String): List<HistoryEntry> {
             val address = key(scripthash)
             historyCalls += address
+            history[address]?.let { return it }
             return if (isUsed(address)) listOf(HistoryEntry(txHash = TXID, height = 800_000)) else emptyList()
         }
 
@@ -239,6 +247,41 @@ class AccountScannerTest {
         assertEquals((1..40).toList(), counts)
     }
 
+    @Test
+    fun `an empty account carries no transactions`() {
+        val scanner = scanner()
+        val snapshot = scanner.scan(FakeChainQuery(scanner))
+
+        assertEquals(emptyList<ScannedTransaction>(), snapshot.transactions)
+    }
+
+    @Test
+    fun `the scan aggregates get_history across both chains, deduped and unconfirmed first`() {
+        val scanner = scanner()
+        // Receive 0 and 1 and change 0 all carry history. TX_A is reported at
+        // both receive addresses — one transaction, one row. TX_D is in the
+        // mempool (height 0) and must sort above the confirmed ones.
+        val query = FakeChainQuery(
+            scanner,
+            usedReceive = setOf(0, 1),
+            usedChange = setOf(0),
+            history = mapOf(
+                (AddressChain.RECEIVE to 0) to listOf(
+                    HistoryEntry(txHash = TX_A, height = 800_000),
+                    HistoryEntry(txHash = TX_D, height = 0),
+                ),
+                (AddressChain.RECEIVE to 1) to listOf(HistoryEntry(txHash = TX_A, height = 800_000)),
+                (AddressChain.CHANGE to 0) to listOf(HistoryEntry(txHash = TX_B, height = 799_000)),
+            ),
+        )
+
+        val snapshot = scanner.scan(query)
+
+        assertEquals(listOf(TX_D, TX_A, TX_B), snapshot.transactions.map { it.txHash })
+        assertFalse(snapshot.transactions[0].confirmed)
+        assertTrue(snapshot.transactions[1].confirmed)
+    }
+
     private companion object {
         /** How far the fake can map a scripthash back to an index. */
         const val LOOKUP_RANGE = 200
@@ -247,5 +290,6 @@ class AccountScannerTest {
         const val TX_A = "00000000000000000000000000000000000000000000000000000000000000a1"
         const val TX_B = "00000000000000000000000000000000000000000000000000000000000000b2"
         const val TX_C = "00000000000000000000000000000000000000000000000000000000000000c3"
+        const val TX_D = "00000000000000000000000000000000000000000000000000000000000000d4"
     }
 }
