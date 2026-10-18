@@ -21,15 +21,22 @@ import androidx.compose.ui.unit.dp
 import com.xbtwallet.app.ui.theme.XbtWalletTheme
 
 /**
- * Home screen for the scaffold.
+ * Home screen — the app's hub.
  *
- * The wallet actions (load a watch-only xpub, receive, send) are inert
- * placeholders. "Server" is the first real entry point: it opens the private
- * Electrum server screen.
+ * Live actions: **Import Wallet** (paste an account xpub), **Addresses** (browse
+ * derived addresses; enabled once at least one wallet exists) and **Server**
+ * (private Electrum endpoint). Receive and Send stay disabled placeholders: they
+ * need the signer round-trip and chain data, neither of which exists yet.
+ *
+ * The screen is a pure function of [walletCount] plus callbacks — it owns no
+ * state, so it can be previewed and reasoned about without a running app.
  */
 @Composable
 fun HomeScreen(
-    onOpenServer: () -> Unit = {},
+    walletCount: Int,
+    onOpenImportWallet: () -> Unit,
+    onOpenAddresses: () -> Unit,
+    onOpenServer: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
@@ -50,7 +57,7 @@ fun HomeScreen(
             Spacer(modifier = Modifier.height(12.dp))
 
             Text(
-                text = "SeedSigner-first XBT wallet \u2014 scaffold v0",
+                text = "SeedSigner-first XBT wallet \u2014 watch-only",
                 style = MaterialTheme.typography.bodyMedium,
                 textAlign = TextAlign.Center,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -58,17 +65,41 @@ fun HomeScreen(
 
             Spacer(modifier = Modifier.height(40.dp))
 
-            // Placeholder actions: disabled on purpose, no functionality yet.
             Button(
-                onClick = {},
-                enabled = false,
+                onClick = onOpenImportWallet,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Load Wallet")
+                Text("Import Wallet")
             }
 
             Spacer(modifier = Modifier.height(12.dp))
 
+            // Only meaningful once a public key has been imported, so it stays
+            // disabled until then rather than opening an empty screen.
+            Button(
+                onClick = onOpenAddresses,
+                enabled = walletCount > 0,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Addresses")
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = when (walletCount) {
+                    0 -> "No wallet imported yet \u2014 import an account xpub to begin."
+                    1 -> "1 wallet saved."
+                    else -> "$walletCount wallets saved."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                textAlign = TextAlign.Center,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // Placeholder actions: still disabled on purpose.
             Button(
                 onClick = {},
                 enabled = false,
@@ -89,7 +120,6 @@ fun HomeScreen(
 
             Spacer(modifier = Modifier.height(28.dp))
 
-            // The first working action: private Electrum server setup.
             OutlinedButton(
                 onClick = onOpenServer,
                 modifier = Modifier.fillMaxWidth(),
@@ -113,6 +143,11 @@ fun HomeScreen(
 @Composable
 private fun HomeScreenPreview() {
     XbtWalletTheme {
-        HomeScreen()
+        HomeScreen(
+            walletCount = 2,
+            onOpenImportWallet = {},
+            onOpenAddresses = {},
+            onOpenServer = {},
+        )
     }
 }
