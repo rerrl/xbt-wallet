@@ -7,13 +7,19 @@ signer over animated QR. It is a watch-only overview of balances and addresses,
 not a wallet. MIT licensed. See [PLAN.md](PLAN.md) for the full plan and
 roadmap.
 
-Status: **v0.1.0 in progress** — the skeleton plus the first three features:
+Status: **v0.1.0 in progress** — the skeleton, the crypto layer, and the
+signer-first restructure:
 
-- **Import xpub** — paste an account-level `xpub`/`ypub`/`zpub`, validated
+- **Signers** — the app's unit of organisation. A signer is a name plus a
+  type, and today the only type is a watch-only xpub. Signers are a plain list
+  (there is no "active signer"), and everything that acts on one happens on
+  that signer's own screen.
+- **Add signer** — paste an account-level `xpub`/`ypub`/`zpub`, validated
   clean-room (Base58Check, version bytes, compressed key, checksum) and stored
-  as one entry in the saved-xpub list.
-- **Addresses** — browse derived native-segwit receive/change addresses per
-  xpub, with the derivation index shown and tap-to-copy.
+  as a watch-only signer.
+- **Addresses viewer** — derived native-segwit receive/change addresses per
+  account key, with the derivation index shown and tap-to-copy. It stays in the
+  code and is wired under a signer's own screen in the next card.
 - **Private Electrum server** — enter host/port, pick SSL or TCP, hit *Test
   connection* and watch the Electrum JSON-RPC handshake in an on-screen log.
 
@@ -24,8 +30,8 @@ only).
 
 ## Home screen
 
-Top to bottom: **Server** (private Electrum endpoint), the **active signer**
-card, **Import xpub**, **Select active xpub**, and **Addresses**.
+Top to bottom: **Server** (private Electrum endpoint), **Add signer**, and
+**Signers**.
 
 Under the Server button the screen shows the live server status: the hint
 *Connect to your own Electrum server* until an endpoint is saved, then a status
@@ -35,17 +41,17 @@ first reply. A saved endpoint is checked as soon as the screen appears and then
 once a minute while it stays on screen; see
 [Private Electrum server](#private-electrum-server).
 
-The active signer card shows the selected xpub's name and the first 16
-characters of its key, or *No active xpub* when nothing is selected. **Select
-active xpub** opens the picker (all saved xpubs by name, with the current one
-marked); **Addresses** is disabled until an xpub is active, and then opens the
-viewer for that xpub rather than asking again. The selection is stored next to
-the xpub list, so it survives a restart — and an id whose xpub was deleted reads
-back as "none" instead of pointing at something that is gone.
+**Add signer** opens the import screen (the real add-signer flow lands in the
+next card). **Signers** opens the list of saved signers — each shown by its name
+with a *watch-only* type badge — and tapping one opens that signer's own screen.
+There is deliberately no "active signer" any more: the old active-signer card,
+the **Select active xpub** picker and the standalone **Addresses** button are
+gone, and per-signer screens (addresses included) are reached by opening a
+signer instead.
 
-## Import xpub
+## Add signer
 
-`Import xpub` on the home screen takes an xpub name plus an account-level
+`Add signer` on the home screen takes a signer name plus an account-level
 extended public key. The key is validated against the public specifications:
 
 - **Base58Check** — alphabet, then the 4-byte double-SHA256 checksum.
@@ -59,20 +65,22 @@ extended public key. The key is validated against the public specifications:
 The app is native-segwit single-sig, so whatever you paste is treated as a
 **BIP-84-style account key** and every address is derived as P2WPKH (`bc1q…`).
 The screen says so, and it warns that a manual import carries no master
-fingerprint or derivation path. xpubs are stored as a JSON list (name, xpub,
-timestamp) in `SharedPreferences` — a list keyed by id from day one, per
-PLAN.md's multi-xpub stance — plus the id of the active signer, under its own
-key.
+fingerprint or derivation path. Signers are stored as a JSON list (id, name,
+type, xpub, timestamp) under the `signers` key in `SharedPreferences` — a list
+keyed by id from day one, per PLAN.md's multi-signer stance. An install that
+predates the signer rename had its xpubs under the old `wallets` key; the store
+converts that blob to watch-only signers on first read and writes it forward, so
+no saved xpub is lost.
 
 ## Addresses
 
-`Addresses` is enabled once an xpub is active, and shows the addresses derived
-from that xpub's account key: external chain `0/i` under the **Receive** tab
-and internal chain `1/i` under **Change**, both native segwit P2WPKH. Each row
-shows its derivation index; the first 20 per tab are listed, with *Show 20 more*
-to extend. Tap a row to copy the address. There is no gap-limit logic yet —
-nothing is fetched from the chain, so the wallet cannot tell which addresses
-have been used.
+The addresses viewer shows the addresses derived from a signer's account key:
+external chain `0/i` under the **Receive** tab and internal chain `1/i` under
+**Change**, both native segwit P2WPKH. Each row shows its derivation index; the
+first 20 per tab are listed, with *Show 20 more* to extend. Tap a row to copy
+the address. There is no gap-limit logic yet — nothing is fetched from the chain,
+so the wallet cannot tell which addresses have been used. The viewer stays in
+the tree and is wired under each signer's own screen in the next card.
 
 ## Crypto layer
 
@@ -95,7 +103,7 @@ asserted in `ExtendedPublicKeyTest`, along with the BIP-173 bech32 vectors and
 the published RIPEMD-160 vectors.
 
 ```bash
-./gradlew clean assembleDebug testDebugUnitTest   # 102 unit tests, all green
+./gradlew clean assembleDebug testDebugUnitTest   # 105 unit tests, all green
 ```
 
 ## Private Electrum server

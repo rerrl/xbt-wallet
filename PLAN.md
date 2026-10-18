@@ -183,24 +183,29 @@ What exists right now, in this repository:
 
 - Android/Kotlin + Compose (Material 3) single-module project, dark theme,
   Gradle Kotlin DSL, version catalog, state-based navigation (no nav library).
-- A home screen, top to bottom: **Server**, the **active signer** card,
-  **Import xpub**, **Select active xpub** and **Addresses**. The active signer is
-  persisted and drives the Addresses viewer; the old Receive/Send placeholders
-  are gone. Under the Server button the screen shows live server status —
-  connected / disconnected / checking — refreshed by a heartbeat while it is on
-  display.
+- A home screen, top to bottom: **Server**, **Add signer** and **Signers**.
+  Under the Server button the screen shows live server status — connected /
+  disconnected / checking — refreshed by a heartbeat while it is on display.
+  Signers are a plain list: there is no "active signer", and per-signer screens
+  (the real add-signer flow, a signer's addresses) arrive in the next card. The
+  old active-signer card, **Select active xpub** picker and standalone
+  **Addresses** button are gone; the Addresses viewer stays in the tree, to be
+  reopened under a signer. The old Receive/Send placeholders are gone.
 - **Crypto** (`com.xbtwallet.app.crypto/`, Android-free): Base58Check, SHA-256 /
   RIPEMD-160 / HMAC-SHA512, bech32 + bech32m, secp256k1 public-point arithmetic,
   BIP-32 parsing and public-only child derivation, P2WPKH address building.
   Public keys only — there is no private-key, seed or signing code path.
-- **Storage** (`com.xbtwallet.app.data/`): a JSON xpub list in SharedPreferences
-  behind a `KeyValueStore` interface, so the store is JVM-testable, plus the id
-  of the active signer; and the Electrum server settings from the previous
-  iteration, behind a `ServerSettings` interface for the same reason.
+- **Storage** (`com.xbtwallet.app.data/`): a JSON signer list in
+  SharedPreferences behind a `KeyValueStore` interface, so the store is
+  JVM-testable. A signer is an id, a name and a type — `WatchOnlyXpub(xpub)`
+  today; there is no active-signer id and no seed storage. Older `wallets` blobs
+  are migrated to watch-only signers on first read. Plus the Electrum server
+  settings from the previous iteration, behind a `ServerSettings` interface for
+  the same reason.
 - **Networking**: a clean-room Electrum JSON-RPC client (direct TLS/TCP, no Tor
   yet) used by the private-server screen and, via its quiet `server.ping` probe,
   by the home screen's status heartbeat; no xpub data is fetched with it yet.
-- **Tests**: 102 JVM unit tests, green, including the official BIP-84 and BIP-173
+- **Tests**: 105 JVM unit tests, green, including the official BIP-84 and BIP-173
   vectors and the published RIPEMD-160 vectors.
 
 Not yet: chain data (balances, history, UTXOs), the receive QR flow, gap-limit
