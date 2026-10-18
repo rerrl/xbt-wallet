@@ -2,10 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
-      Skeleton only: no permissions are requested yet.
-      Network access (tor-android / electrs-blake2b) and camera access (QR scanning)
-      will be added together with the features that need them.
+      Direct socket access to a user-supplied private Electrum server.
+      This is the only permission the app requests: no Tor, no camera, no
+      storage until the features that need them land.
     -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:allowBackup="false"

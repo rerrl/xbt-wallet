@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -20,14 +21,17 @@ import androidx.compose.ui.unit.dp
 import com.xbtwallet.app.ui.theme.XbtWalletTheme
 
 /**
- * Placeholder home screen for the scaffold.
+ * Home screen for the scaffold.
  *
- * Everything here is inert: the three buttons hint at the shape of the
- * v0.1.0 flow (load a watch-only xpub, receive, send) but are deliberately
- * disabled until the real features land.
+ * The wallet actions (load a watch-only xpub, receive, send) are inert
+ * placeholders. "Server" is the first real entry point: it opens the private
+ * Electrum server screen.
  */
 @Composable
-fun HomeScreen(modifier: Modifier = Modifier) {
+fun HomeScreen(
+    onOpenServer: () -> Unit = {},
+    modifier: Modifier = Modifier,
+) {
     Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
         Column(
             modifier = Modifier
@@ -82,6 +86,25 @@ fun HomeScreen(modifier: Modifier = Modifier) {
             ) {
                 Text("Send")
             }
+
+            Spacer(modifier = Modifier.height(28.dp))
+
+            // The first working action: private Electrum server setup.
+            OutlinedButton(
+                onClick = onOpenServer,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Server")
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "Connect to your own Electrum server",
+                style = MaterialTheme.typography.bodySmall,
+                textAlign = TextAlign.Center,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
