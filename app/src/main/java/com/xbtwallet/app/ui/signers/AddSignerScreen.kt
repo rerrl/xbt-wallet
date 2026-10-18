@@ -27,17 +27,20 @@ import com.xbtwallet.app.ui.theme.XbtWalletTheme
  * **Add signer** — the one way a signer enters the app.
  *
  * It is deliberately a fork and not a form: there are exactly two ways to pair
- * with a signer, the app is built around one of them, and naming both here is
- * what makes the watch-only stance legible rather than implied.
+ * with a signer, and both are named up front, in plain language, before either
+ * button. Naming them together is what makes the choice legible instead of
+ * implied — the screen opens by saying what each option is *for*, not by talking
+ * the user out of one of them.
  *
  * 1. **Add watch-only xpub** — the live path. It hands off to
  *    [ImportXpubScreen], which takes a name and an account xpub and stores a
  *    watch-only signer. Only a public key ever crosses this boundary.
- * 2. **Create hot wallet** — **disabled on purpose.** A signer whose seed would
- *    live on this phone is the one thing this app must never have (PLAN.md
- *    §2.1). The option is shown, greyed out and explained, rather than hidden:
- *    the user gets a straight answer about why the app will not hold their keys,
- *    and there is no seed generation code anywhere behind the button.
+ * 2. **Create hot wallet** — **not available yet.** Generating a seed on this
+ *    phone is a capability this build does not have, so the button is disabled
+ *    and carries a small *not available yet* tag. It is presented as the
+ *    convenience it will be (a hot wallet is cash in your pocket for small,
+ *    everyday amounts), not as something to be talked out of — and there is no
+ *    seed generation code anywhere behind the button.
  *
  * The screen owns no state; it renders two choices and forwards taps.
  *
@@ -66,11 +69,34 @@ fun AddSignerScreen(
                 Text(text = "Add signer", style = MaterialTheme.typography.titleLarge)
             }
 
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // The intro sits above both options: what each one is for, in the
+            // order the buttons below appear. No avoidance language — a hot
+            // wallet is a real thing this app intends to do, it just cannot do
+            // it yet.
+            Text(
+                text = "Two ways to pair this phone with your keys.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Text(
+                text = "Watch-only \u2014 a watch-only xpub is for use with your " +
+                    "SeedSigner, or any wallet you want to keep an eye on, without " +
+                    "the seed ever touching this phone.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = "How should this phone pair with your keys?",
-                style = MaterialTheme.typography.bodyMedium,
+                text = "Hot wallet \u2014 like cash in your pocket. Generate a seed " +
+                    "on this device for small, everyday amounts.",
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
@@ -96,8 +122,8 @@ fun AddSignerScreen(
 
             Spacer(modifier = Modifier.height(28.dp))
 
-            // 2. The path that does not exist, shown so it can be understood and
-            //    refused. There is no seed code behind this button — it is off.
+            // 2. The convenience path, not yet built. There is no seed code
+            //    behind this button — the tag says why, and nothing more.
             Button(
                 onClick = {},
                 enabled = false,
@@ -108,13 +134,15 @@ fun AddSignerScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            Text(
-                text = "Coming soon \u2014 generate a seed on this device. " +
-                    "A hot wallet puts a private key on the phone, which is exactly " +
-                    "what this coordinator is built to avoid.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                NotAvailableTag()
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Seed generation on this phone is not available yet.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
 
             Spacer(modifier = Modifier.height(28.dp))
 
@@ -135,6 +163,28 @@ fun AddSignerScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
         }
+    }
+}
+
+/**
+ * A small capability badge for an option this build cannot do yet.
+ *
+ * It is a plain chip rather than a sentence: the fact belongs next to the thing
+ * it qualifies, and a tag can be read at a glance where a paragraph cannot.
+ */
+@Composable
+private fun NotAvailableTag(modifier: Modifier = Modifier) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = MaterialTheme.shapes.small,
+        modifier = modifier,
+    ) {
+        Text(
+            text = "Not available yet",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+        )
     }
 }
 

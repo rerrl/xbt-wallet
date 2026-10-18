@@ -53,8 +53,8 @@ once a minute while it stays on screen; see
 [Private Electrum server](#private-electrum-server).
 
 **Add signer** opens the Add-signer chooser: **Add watch-only xpub** leads to the
-import form, and **Create hot wallet** is shown, greyed out, with the reason it
-does not exist yet. **Signers** opens the list of saved signers — each shown by
+import form, and **Create hot wallet** is shown, greyed out and tagged *Not
+available yet*. **Signers** opens the list of saved signers — each shown by
 its name, a *watch-only* type badge and a head…tail snippet of its key — and
 tapping one opens that signer's own screen. Each row has a **⋮** menu whose
 *Remove signer* asks for confirmation first. There is deliberately no "active
@@ -64,15 +64,19 @@ and the standalone **Addresses** button are gone, and per-signer screens
 
 ## Add signer
 
-`Add signer` is a fork, not a form — the two ways to pair with a signer are named
-side by side:
+`Add signer` is a fork, not a form — the screen opens with a plain-language
+intro naming both ways to pair with a signer, then shows the two buttons:
 
 - **Add watch-only xpub** — the live path. It takes a signer name plus an
-  account-level extended public key and stores a watch-only signer.
-- **Create hot wallet** — **disabled**. A signer whose seed would live on the
-  phone is the one thing this app must never have (PLAN.md §2.1), so the option
-  is shown with the explanation *Coming soon — generate a seed on this device*
-  rather than hidden. There is no seed generation code behind it.
+  account-level extended public key and stores a watch-only signer. The intro
+  says what it is for: a watch-only xpub is for use with your SeedSigner — or any
+  wallet you want to keep an eye on — without the seed ever touching this phone.
+- **Create hot wallet** — **not available yet**. Generating a seed on this phone
+  is a capability this build does not have, so the button is disabled and
+  carries a small *Not available yet* tag. The copy presents it as the
+  convenience it will be — *like cash in your pocket … for small, everyday
+  amounts* — not as something the app is talking you out of. There is no seed
+  generation code behind it.
 
 The pasted key is validated against the public specifications:
 

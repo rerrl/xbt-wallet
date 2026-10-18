@@ -187,9 +187,10 @@ What exists right now, in this repository:
   Under the Server button the screen shows live server status — connected /
   disconnected / checking — refreshed by a heartbeat while it is on display.
   Signers are a plain list: there is no "active signer". **Add signer** opens a
-  chooser — *Add watch-only xpub* leads to the paste-and-validate form, and
-  *Create hot wallet* is shown disabled, because a signer whose seed lives on the
-  phone is the one thing this app must never have. The Signers list shows every
+  chooser — an intro naming both ways to pair, *Add watch-only xpub* leading to
+  the paste-and-validate form, and *Create hot wallet* shown disabled with a
+  *not available yet* tag, because seed generation on the phone is a capability
+  this build does not have. The Signers list shows every
   saved signer oldest first, with its type badge and a head…tail key snippet, and
   offers a confirm-gated remove per row. The
   old active-signer card, **Select active xpub** picker and standalone
