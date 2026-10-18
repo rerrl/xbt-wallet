@@ -114,4 +114,98 @@ class WalletStoreTest {
         val b = store.add("Same", "xpubB")
         assertTrue(a.id != b.id)
     }
+
+    // --- active xpub -------------------------------------------------------
+    //
+    // The active signer is the home screen's whole state machine: exactly one
+    // saved xpub may be active, and "none" is a first-class value rather than a
+    // dangling id pointing at something that is not there any more.
+
+    @Test
+    fun `a fresh store has no active xpub`() {
+        val store = WalletStore(InMemoryStore())
+        assertNull(store.activeId())
+        assertNull(store.active())
+    }
+
+    @Test
+    fun `setting an active xpub persists across a new store instance`() {
+        val backing = InMemoryStore()
+        val store = newStore(backing)
+        val a = store.add("Cold storage", "zpub6xyz")
+        store.setActive(a.id)
+
+        val reloaded = WalletStore(backing)
+        assertEquals(a.id, reloaded.activeId())
+        assertEquals("Cold storage", reloaded.active()?.name)
+    }
+
+    @Test
+    fun `selecting a second xpub replaces the active one`() {
+        val backing = InMemoryStore()
+        val store = newStore(backing)
+        val a = store.add("A", "xpubA")
+        val b = store.add("B", "xpubB")
+
+        store.setActive(a.id)
+        store.setActive(b.id)
+
+        assertEquals(b.id, store.activeId())
+        assertEquals("B", WalletStore(backing).active()?.name)
+    }
+
+    @Test
+    fun `clearing the active xpub leaves nothing selected`() {
+        val backing = InMemoryStore()
+        val store = newStore(backing)
+        val a = store.add("A", "xpubA")
+        store.setActive(a.id)
+
+        store.setActive(null)
+
+        assertNull(store.activeId())
+        assertNull(WalletStore(backing).activeId())
+    }
+
+    @Test
+    fun `an active id that is not stored reads back as nothing selected`() {
+        val backing = InMemoryStore()
+        val store = newStore(backing)
+        store.add("A", "xpubA")
+        store.setActive("id-that-does-not-exist")
+
+        assertNull(store.activeId())
+        assertNull(store.active())
+        // And it stays unset: a stale id is never handed back after a restart.
+        assertNull(WalletStore(backing).activeId())
+    }
+
+    @Test
+    fun `deleting the active xpub unsets the selection`() {
+        val backing = InMemoryStore()
+        val store = newStore(backing)
+        val a = store.add("A", "xpubA")
+        val b = store.add("B", "xpubB")
+        store.setActive(a.id)
+
+        assertTrue(store.delete(a.id))
+
+        assertNull(store.activeId())
+        assertNull(WalletStore(backing).activeId())
+        // The other xpub is untouched by the deletion.
+        assertEquals(listOf(b), store.list())
+    }
+
+    @Test
+    fun `deleting another xpub leaves the active one selected`() {
+        val backing = InMemoryStore()
+        val store = newStore(backing)
+        val a = store.add("A", "xpubA")
+        val b = store.add("B", "xpubB")
+        store.setActive(b.id)
+
+        assertTrue(store.delete(a.id))
+
+        assertEquals(b.id, store.activeId())
+    }
 }

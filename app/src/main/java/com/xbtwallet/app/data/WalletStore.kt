@@ -58,6 +58,41 @@ class WalletStore(
 
     fun get(id: String): Wallet? = read().firstOrNull { it.id == id }
 
+    /**
+     * The id of the xpub currently selected as the active signer, or null when
+     * nothing is selected.
+     *
+     * A stored id that no longer matches a saved xpub (the entry was deleted, or
+     * the JSON was hand-edited) reads back as null instead of as a dangling
+     * reference: the UI is only ever in "one of my xpubs" or "none".
+     */
+    fun activeId(): String? {
+        val stored = rawActiveId() ?: return null
+        return stored.takeIf { id -> read().any { it.id == id } }
+    }
+
+    /** The active xpub itself, or null when none is selected. */
+    fun active(): Wallet? = activeId()?.let(::get)
+
+    /**
+     * Selects [id] as the active xpub; null clears the selection.
+     *
+     * An id that is not saved is refused by storing the empty string — storing
+     * the id itself would leave the app pointing at nothing until the next read,
+     * and the stored value would look valid to anything that skipped [activeId].
+     */
+    fun setActive(id: String?) {
+        val target = id?.takeIf { candidate -> read().any { it.id == candidate } }
+        storage.putString(ACTIVE_ID_KEY, target ?: "")
+    }
+
+    /**
+     * Raw stored active id, with the empty string (or absent key) meaning
+     * "none". Only [activeId] should use this — it does not check that the id
+     * still exists.
+     */
+    private fun rawActiveId(): String? = storage.getString(ACTIVE_ID_KEY)?.takeIf { it.isNotBlank() }
+
     /** Creates and persists a wallet, returning it so the caller has the new id. */
     fun add(name: String, xpub: String): Wallet {
         val wallet = Wallet(
@@ -76,6 +111,9 @@ class WalletStore(
         val remaining = current.filterNot { it.id == id }
         if (remaining.size == current.size) return false
         saveAll(remaining)
+        // Deleting the active xpub has to clear the selection too, or the app
+        // would come back from a restart showing an xpub that is gone.
+        if (rawActiveId() == id) storage.putString(ACTIVE_ID_KEY, "")
         return true
     }
 
@@ -128,5 +166,12 @@ class WalletStore(
     companion object {
         /** SharedPreferences key holding the whole wallet list. */
         const val STORAGE_KEY = "wallets"
+
+        /**
+         * SharedPreferences key holding the id of the active xpub. Kept out of
+         * the list blob on purpose: it is not part of an xpub's identity, and a
+         * separate key means a rewrite of the list never has to carry it.
+         */
+        const val ACTIVE_ID_KEY = "activeWalletId"
     }
 }

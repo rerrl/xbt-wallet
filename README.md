@@ -22,6 +22,19 @@ anywhere in this repository. Balances, history, the receive QR and sending are
 still missing, and there is no Tor in this iteration (direct IP connections
 only).
 
+## Home screen
+
+Top to bottom: **Server** (private Electrum endpoint), the **active signer**
+card, **Import xpub**, **Select active xpub**, and **Addresses**.
+
+The active signer card shows the selected xpub's name and the first 16
+characters of its key, or *No active xpub* when nothing is selected. **Select
+active xpub** opens the picker (all saved xpubs by name, with the current one
+marked); **Addresses** is disabled until an xpub is active, and then opens the
+viewer for that xpub rather than asking again. The selection is stored next to
+the xpub list, so it survives a restart — and an id whose xpub was deleted reads
+back as "none" instead of pointing at something that is gone.
+
 ## Import xpub
 
 `Import xpub` on the home screen takes an xpub name plus an account-level
@@ -40,12 +53,13 @@ The app is native-segwit single-sig, so whatever you paste is treated as a
 The screen says so, and it warns that a manual import carries no master
 fingerprint or derivation path. xpubs are stored as a JSON list (name, xpub,
 timestamp) in `SharedPreferences` — a list keyed by id from day one, per
-PLAN.md's multi-xpub stance.
+PLAN.md's multi-xpub stance — plus the id of the active signer, under its own
+key.
 
 ## Addresses
 
-`Addresses` (enabled once an xpub exists) shows the addresses derived from the
-selected xpub's account key: external chain `0/i` under the **Receive** tab
+`Addresses` is enabled once an xpub is active, and shows the addresses derived
+from that xpub's account key: external chain `0/i` under the **Receive** tab
 and internal chain `1/i` under **Change**, both native segwit P2WPKH. Each row
 shows its derivation index; the first 20 per tab are listed, with *Show 20 more*
 to extend. Tap a row to copy the address. There is no gap-limit logic yet —
@@ -73,7 +87,7 @@ asserted in `ExtendedPublicKeyTest`, along with the BIP-173 bech32 vectors and
 the published RIPEMD-160 vectors.
 
 ```bash
-./gradlew clean assembleDebug testDebugUnitTest   # 78 unit tests, all green
+./gradlew clean assembleDebug testDebugUnitTest   # 91 unit tests, all green
 ```
 
 ## Private Electrum server

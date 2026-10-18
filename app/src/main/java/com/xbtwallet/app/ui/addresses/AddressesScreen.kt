@@ -125,18 +125,17 @@ fun rememberAddressesScreenState(wallet: Wallet): AddressesScreenState =
     remember(wallet.id) { AddressesScreenState(wallet) }
 
 /**
- * Address viewer for one wallet.
+ * Address viewer for one xpub — the active signer, chosen on the home screen.
  *
  * Tabs switch between the receive and change chains; every row is a derived
  * `bc1q...` address with its index, and tapping one copies it. Only the first
- * page is shown until the user asks for more — the wallet has no chain data, so
- * it cannot tell which addresses are actually used.
+ * page is shown until the user asks for more — there is no chain data yet, so
+ * the app cannot tell which addresses are actually used.
  */
 @Composable
 fun AddressesScreen(
     state: AddressesScreenState,
     onBack: () -> Unit,
-    onChangeWallet: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
@@ -154,9 +153,6 @@ fun AddressesScreen(
                     style = MaterialTheme.typography.titleLarge,
                     modifier = Modifier.weight(1f),
                 )
-                if (onChangeWallet != null) {
-                    TextButton(onClick = onChangeWallet) { Text("Switch xpub") }
-                }
             }
 
             Spacer(modifier = Modifier.height(4.dp))
@@ -255,53 +251,4 @@ private fun AddressRow(row: DerivedAddress, onClick: () -> Unit) {
 private fun copyToClipboard(context: Context, address: String) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     clipboard.setPrimaryClip(ClipData.newPlainText("Bitcoin address", address))
-}
-
-/**
- * Wallet chooser, shown when more than one wallet is stored. Tapping a row goes
- * straight to that wallet's addresses.
- */
-@Composable
-fun WalletPickerScreen(
-    wallets: List<Wallet>,
-    onSelect: (Wallet) -> Unit,
-    onBack: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .padding(horizontal = 20.dp, vertical = 12.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onBack) { Text("\u2190 Back") }
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("Select xpub", style = MaterialTheme.typography.titleLarge)
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                items(wallets.size) { position ->
-                    val wallet = wallets[position]
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onSelect(wallet) }
-                            .padding(vertical = 12.dp),
-                    ) {
-                        Text(text = wallet.name, style = MaterialTheme.typography.bodyLarge)
-                        Text(
-                            text = wallet.xpub.take(20) + "\u2026",
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-        }
-    }
 }

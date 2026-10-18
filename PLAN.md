@@ -183,18 +183,21 @@ What exists right now, in this repository:
 
 - Android/Kotlin + Compose (Material 3) single-module project, dark theme,
   Gradle Kotlin DSL, version catalog, state-based navigation (no nav library).
-- A home screen with three live actions: **Import xpub**, **Addresses** and
-  **Server**; Receive and Send are still disabled placeholders.
+- A home screen, top to bottom: **Server**, the **active signer** card,
+  **Import xpub**, **Select active xpub** and **Addresses**. The active signer is
+  persisted and drives the Addresses viewer; the old Receive/Send placeholders
+  are gone.
 - **Crypto** (`com.xbtwallet.app.crypto/`, Android-free): Base58Check, SHA-256 /
   RIPEMD-160 / HMAC-SHA512, bech32 + bech32m, secp256k1 public-point arithmetic,
   BIP-32 parsing and public-only child derivation, P2WPKH address building.
   Public keys only — there is no private-key, seed or signing code path.
 - **Storage** (`com.xbtwallet.app.data/`): a JSON xpub list in SharedPreferences
-  behind a `KeyValueStore` interface, so the store is JVM-testable; plus the
-  Electrum server settings from the previous iteration.
+  behind a `KeyValueStore` interface, so the store is JVM-testable, plus the id
+  of the active signer; and the Electrum server settings from the previous
+  iteration.
 - **Networking**: a clean-room Electrum JSON-RPC client (direct TLS/TCP, no Tor
   yet) used by the private-server screen; no xpub data is fetched with it yet.
-- **Tests**: 78 JVM unit tests, green, including the official BIP-84 and BIP-173
+- **Tests**: 91 JVM unit tests, green, including the official BIP-84 and BIP-173
   vectors and the published RIPEMD-160 vectors.
 
 Not yet: chain data (balances, history, UTXOs), the receive QR flow, gap-limit
