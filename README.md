@@ -5,8 +5,29 @@ fork), built for GrapheneOS. Keys never touch the phone: the app is a
 coordinator that pairs with an air-gapped signer over animated QR.
 MIT licensed. See [PLAN.md](PLAN.md) for the full plan and roadmap.
 
-Status: **scaffold v0** — project skeleton and a placeholder home screen only.
-No network code, no crypto, no database yet.
+Status: **scaffold v0 + first feature** — project skeleton, a home screen, and a
+**private Electrum server** screen: enter host/port, pick SSL or TCP, hit *Test
+connection* and watch the Electrum JSON-RPC handshake in an on-screen log.
+Keys, crypto and the database are still missing, and there is no Tor in this
+iteration (direct IP connections only).
+
+## Private Electrum server
+
+`Server` on the home screen opens the server screen. It stores one endpoint
+(host, port, SSL/TCP) in `SharedPreferences` and tests it by connecting over
+TLS or plain TCP and running `server.version` (protocol 1.4), `server.features`
+and `server.banner` — every request and reply, plus any error, is appended to
+the connection log. The client lives in
+`app/src/main/java/com/xbtwallet/app/electrum/` and is free of Android imports
+so it can be unit-tested on the JVM against a mock Electrum responder:
+
+```bash
+./gradlew testDebugUnitTest   # 15 tests: client handshake, JSON, failure modes
+```
+
+Limitations of this iteration: no Tor, no certificate pinning (an untrusted or
+self-signed server certificate is rejected and reported in the log rather than
+accepted), and no wallet data is fetched yet — the connection is all it does.
 
 ## Run in dev mode
 
