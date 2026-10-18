@@ -186,7 +186,9 @@ What exists right now, in this repository:
 - A home screen, top to bottom: **Server**, the **active signer** card,
   **Import xpub**, **Select active xpub** and **Addresses**. The active signer is
   persisted and drives the Addresses viewer; the old Receive/Send placeholders
-  are gone.
+  are gone. Under the Server button the screen shows live server status —
+  connected / disconnected / checking — refreshed by a heartbeat while it is on
+  display.
 - **Crypto** (`com.xbtwallet.app.crypto/`, Android-free): Base58Check, SHA-256 /
   RIPEMD-160 / HMAC-SHA512, bech32 + bech32m, secp256k1 public-point arithmetic,
   BIP-32 parsing and public-only child derivation, P2WPKH address building.
@@ -194,10 +196,11 @@ What exists right now, in this repository:
 - **Storage** (`com.xbtwallet.app.data/`): a JSON xpub list in SharedPreferences
   behind a `KeyValueStore` interface, so the store is JVM-testable, plus the id
   of the active signer; and the Electrum server settings from the previous
-  iteration.
+  iteration, behind a `ServerSettings` interface for the same reason.
 - **Networking**: a clean-room Electrum JSON-RPC client (direct TLS/TCP, no Tor
-  yet) used by the private-server screen; no xpub data is fetched with it yet.
-- **Tests**: 91 JVM unit tests, green, including the official BIP-84 and BIP-173
+  yet) used by the private-server screen and, via its quiet `server.ping` probe,
+  by the home screen's status heartbeat; no xpub data is fetched with it yet.
+- **Tests**: 102 JVM unit tests, green, including the official BIP-84 and BIP-173
   vectors and the published RIPEMD-160 vectors.
 
 Not yet: chain data (balances, history, UTXOs), the receive QR flow, gap-limit

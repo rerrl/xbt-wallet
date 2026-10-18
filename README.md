@@ -27,6 +27,14 @@ only).
 Top to bottom: **Server** (private Electrum endpoint), the **active signer**
 card, **Import xpub**, **Select active xpub**, and **Addresses**.
 
+Under the Server button the screen shows the live server status: the hint
+*Connect to your own Electrum server* until an endpoint is saved, then a status
+dot with *Connected to `<host>:<port>`* (green) or *Server disconnected* (red) —
+and *Checking…* while a check is in flight, so nothing flashes red before the
+first reply. A saved endpoint is checked as soon as the screen appears and then
+once a minute while it stays on screen; see
+[Private Electrum server](#private-electrum-server).
+
 The active signer card shows the selected xpub's name and the first 16
 characters of its key, or *No active xpub* when nothing is selected. **Select
 active xpub** opens the picker (all saved xpubs by name, with the current one
@@ -87,7 +95,7 @@ asserted in `ExtendedPublicKeyTest`, along with the BIP-173 bech32 vectors and
 the published RIPEMD-160 vectors.
 
 ```bash
-./gradlew clean assembleDebug testDebugUnitTest   # 91 unit tests, all green
+./gradlew clean assembleDebug testDebugUnitTest   # 102 unit tests, all green
 ```
 
 ## Private Electrum server
@@ -101,8 +109,16 @@ the connection log. The client lives in
 so it can be unit-tested on the JVM against a mock Electrum responder:
 
 ```bash
-./gradlew testDebugUnitTest   # 15 tests: client handshake, JSON, failure modes
+./gradlew testDebugUnitTest   # 19 tests: client handshake, ping, JSON, failure modes
 ```
+
+The home screen reuses the same client for its heartbeat: `ElectrumClient.ping()`
+connects, sends one `server.ping` with no parameters and closes — the cheap
+probe, and one that writes nothing to the connection log. The home screen shows
+the result beside the Server button. The loop only runs while the home screen is
+on display (leaving it, or the process going to the background, cancels it) and
+re-checks immediately when the saved endpoint changes: no background service, no
+wake lock, no new permission.
 
 Limitations of this iteration: no Tor, no certificate pinning (an untrusted or
 self-signed server certificate is rejected and reported in the log rather than

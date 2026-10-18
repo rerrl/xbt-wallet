@@ -1,12 +1,18 @@
 package com.xbtwallet.app.ui.home
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -26,25 +32,65 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.xbtwallet.app.data.KeyValueStore
+import com.xbtwallet.app.data.ServerSettings
 import com.xbtwallet.app.data.Wallet
 import com.xbtwallet.app.data.WalletStore
+import com.xbtwallet.app.electrum.ElectrumClient
+import com.xbtwallet.app.electrum.ElectrumProtocol
+import com.xbtwallet.app.electrum.ElectrumServer
+import com.xbtwallet.app.ui.theme.XbtSuccessDark
 import com.xbtwallet.app.ui.theme.XbtWalletTheme
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+
+/** How the server indicator under the home screen's Server button reads. */
+enum class ServerStatus {
+    /** No endpoint saved yet — the screen shows the "connect your own server" hint. */
+    NOT_CONFIGURED,
+
+    /** A check is in flight and there is no answer to show yet. */
+    CHECKING,
+
+    /** The last check got an answer from the server. */
+    CONNECTED,
+
+    /** The last check could not reach the server. */
+    DISCONNECTED,
+}
 
 /**
- * State behind the Home screen: the saved xpubs and which one is the active
- * signer.
+ * State behind the Home screen: the saved xpubs, which one is the active
+ * signer, and whether the private Electrum server is reachable.
  *
  * This is the home screen's whole state machine, and it is deliberately plain
- * Kotlin: [WalletStore] owns persistence, this class owns the snapshot Compose
- * observes, and [HomeScreen] only renders. That split keeps the screen a pure
- * function of the state (easy to preview) and keeps the "what is active" rule
- * testable without a UI.
+ * Kotlin: [WalletStore] and [ServerSettings] own persistence, this class owns
+ * the snapshot Compose observes, and [HomeScreen] only renders. That split keeps
+ * the screen a pure function of the state (easy to preview) and keeps the
+ * "what is active" and "is the server up" rules testable without a UI.
  *
- * Nothing writes the store except through this class, so the in-memory snapshot
- * cannot drift from what is on disk.
+ * Nothing writes either store except through this class, so the in-memory
+ * snapshot cannot drift from what is on disk.
+ *
+ * The server check itself lives in [ElectrumClient] and is Android-free; the
+ * only Android involvement is the caller that starts and stops
+ * [runHeartbeat] while the home screen is on display (see `XbtWalletApp`).
+ *
+ * @param walletStore persistence for the xpub list and the active selection.
+ * @param serverSettings read access to the saved Electrum endpoint.
+ * @param ping one liveness check against an endpoint; injected so the rules
+ *   above can be tested on the JVM without a socket.
  */
 @Stable
-class HomeScreenState(private val walletStore: WalletStore) {
+class HomeScreenState(
+    private val walletStore: WalletStore,
+    private val serverSettings: ServerSettings,
+    private val ping: suspend (ElectrumServer) -> Boolean = { server ->
+        // The heartbeat must never write to the Server screen's log, so the
+        // client is built with a no-op logger.
+        ElectrumClient(server = server, log = {}).ping()
+    },
+) {
 
     /** Every saved xpub, oldest first. */
     var xpubs by mutableStateOf(walletStore.list())
@@ -83,9 +129,78 @@ class HomeScreenState(private val walletStore: WalletStore) {
         refresh()
     }
 
+    /**
+     * Whether the saved server answered the last check.
+     *
+     * Seeded from the store rather than left at a neutral value, so the first
+     * frame after the app starts already reads correctly: nothing saved shows
+     * the helper hint, and a saved endpoint shows "Checking…" while the first
+     * heartbeat runs — never a red "disconnected" before anything was tried.
+     */
+    var serverStatus by mutableStateOf(
+        if (configuredServer() == null) ServerStatus.NOT_CONFIGURED else ServerStatus.CHECKING,
+    )
+        private set
+
+    /** The saved endpoint as `host:port` for the status line, or null when none is saved. */
+    val serverLabel: String?
+        get() = configuredServer()?.let { "${it.host}:${it.port}" }
+
+    /**
+     * Identity of the saved endpoint. The home screen keys its heartbeat on
+     * this, so editing the server on the Server screen and coming back re-checks
+     * with the new settings instead of waiting out the old loop's next tick.
+     */
+    val serverKey: String
+        get() = configuredServer()?.let { "${it.host}:${it.port}:${it.protocol.name}" }.orEmpty()
+
+    /**
+     * Runs one check and reports the result.
+     *
+     * [showChecking] is true for the first check of a screen visit: the neutral
+     * "Checking…" replaces the previous answer, which is what stops the
+     * indicator flashing red before the first reply. Later heartbeats pass
+     * `false` and keep the last answer on screen while the next check is in
+     * flight, so a 60-second poll does not make the label blink.
+     */
+    suspend fun checkServerStatus(showChecking: Boolean = true): ServerStatus {
+        val server = configuredServer()
+        if (server == null) {
+            serverStatus = ServerStatus.NOT_CONFIGURED
+            return serverStatus
+        }
+        if (showChecking) serverStatus = ServerStatus.CHECKING
+        serverStatus = if (ping(server)) ServerStatus.CONNECTED else ServerStatus.DISCONNECTED
+        return serverStatus
+    }
+
+    /**
+     * The heartbeat: one check immediately, then another every [intervalMillis]
+     * until the caller cancels this coroutine.
+     *
+     * The caller is the composable that shows the home screen (`XbtWalletApp`),
+     * so the loop stops when the user leaves the screen or the process goes to
+     * the background. There is no service, no wake lock and no new permission
+     * behind this — deliberately, for a watch-only app.
+     */
+    suspend fun runHeartbeat(intervalMillis: Long = HEARTBEAT_INTERVAL_MILLIS) {
+        var first = true
+        while (currentCoroutineContext().isActive) {
+            checkServerStatus(showChecking = first)
+            first = false
+            delay(intervalMillis)
+        }
+    }
+
+    /** The saved endpoint, or null when the user has not entered one yet. */
+    private fun configuredServer(): ElectrumServer? = serverSettings.load().takeIf { it.host.isNotBlank() }
+
     companion object {
         /** Characters of an xpub shown on the signer card before the ellipsis. */
         const val SNIPPET_CHARS = 16
+
+        /** Gap between heartbeat checks while the home screen is on display. */
+        const val HEARTBEAT_INTERVAL_MILLIS: Long = 60_000L
     }
 }
 
@@ -97,8 +212,12 @@ class HomeScreenState(private val walletStore: WalletStore) {
  * which xpub is active.
  */
 @Composable
-fun rememberHomeScreenState(walletStore: WalletStore): HomeScreenState =
-    remember(walletStore) { HomeScreenState(walletStore) }
+fun rememberHomeScreenState(
+    walletStore: WalletStore,
+    serverSettings: ServerSettings,
+): HomeScreenState = remember(walletStore, serverSettings) {
+    HomeScreenState(walletStore, serverSettings)
+}
 
 /**
  * Home screen — the app's hub, and its statement of what the app is: a
@@ -110,6 +229,11 @@ fun rememberHomeScreenState(walletStore: WalletStore): HomeScreenState =
  * stays disabled until one is selected. Receive and Send are gone: importing an
  * xpub is the one way in, and the signer round-trip those would need does not
  * exist yet.
+ *
+ * Under the Server button the screen shows the live connection status: the
+ * "connect your own server" hint until an endpoint is saved, then a dot with
+ * *Connected to host:port* / *Server disconnected* — fed by the heartbeat the
+ * navigation layer runs while this screen is on display (see `XbtWalletApp`).
  *
  * The screen owns no state: it renders [state] and forwards taps.
  */
@@ -142,12 +266,9 @@ fun HomeScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            Text(
-                text = "Connect to your own Electrum server",
-                style = MaterialTheme.typography.bodySmall,
-                textAlign = TextAlign.Center,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            // Live server status replaces the old static hint here: the facts
+            // (configured? reachable?) are the state's, this only renders them.
+            ServerStatusLine(status = state.serverStatus, serverLabel = state.serverLabel)
 
             Spacer(modifier = Modifier.height(28.dp))
 
@@ -215,6 +336,58 @@ fun HomeScreen(
 }
 
 /**
+ * The one line under the Server button: the helper hint before anything is
+ * configured, otherwise a status dot and a short answer.
+ *
+ * Takes plain values rather than the state object so every state can be
+ * previewed without a store or a network.
+ */
+@Composable
+private fun ServerStatusLine(
+    status: ServerStatus,
+    serverLabel: String?,
+    modifier: Modifier = Modifier,
+) {
+    val (color, label) = when (status) {
+        ServerStatus.NOT_CONFIGURED ->
+            MaterialTheme.colorScheme.onSurfaceVariant to "Connect to your own Electrum server"
+        ServerStatus.CHECKING ->
+            MaterialTheme.colorScheme.onSurfaceVariant to "Checking\u2026"
+        ServerStatus.CONNECTED ->
+            XbtSuccessDark to "Connected to ${serverLabel.orEmpty()}"
+        ServerStatus.DISCONNECTED ->
+            MaterialTheme.colorScheme.error to "Server disconnected"
+    }
+
+    if (status == ServerStatus.NOT_CONFIGURED) {
+        // Nothing saved yet: the original hint, unchanged and dot-free — there
+        // is no connection state to report.
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            textAlign = TextAlign.Center,
+            color = color,
+            modifier = modifier,
+        )
+        return
+    }
+
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = modifier) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .background(color = color, shape = CircleShape),
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
  * The active-signer box: the selected xpub's name plus a shortened key, or a
  * placeholder explaining that nothing is selected.
  */
@@ -276,10 +449,22 @@ private class PreviewKeyValueStore : KeyValueStore {
     }
 }
 
+/** A host-less endpoint store, so a preview never tries to reach a server. */
+private class PreviewServerSettings : ServerSettings {
+    override fun load(): ElectrumServer = ElectrumServer(
+        host = "",
+        port = ElectrumProtocol.SSL.defaultPort,
+        protocol = ElectrumProtocol.SSL,
+    )
+}
+
 @Preview(showBackground = true, backgroundColor = 0xFF101418)
 @Composable
 private fun HomeScreenPreview() {
-    val previewState = rememberHomeScreenState(remember { previewHomeScreenStore(active = true) })
+    val previewState = rememberHomeScreenState(
+        remember { previewHomeScreenStore(active = true) },
+        remember { PreviewServerSettings() },
+    )
     XbtWalletTheme {
         HomeScreen(
             state = previewState,
@@ -294,7 +479,10 @@ private fun HomeScreenPreview() {
 @Preview(showBackground = true, backgroundColor = 0xFF101418)
 @Composable
 private fun HomeScreenEmptyPreview() {
-    val previewState = rememberHomeScreenState(remember { previewHomeScreenStore(active = false) })
+    val previewState = rememberHomeScreenState(
+        remember { previewHomeScreenStore(active = false) },
+        remember { PreviewServerSettings() },
+    )
     XbtWalletTheme {
         HomeScreen(
             state = previewState,
@@ -303,6 +491,23 @@ private fun HomeScreenEmptyPreview() {
             onSelectActiveXpub = {},
             onOpenAddresses = {},
         )
+    }
+}
+
+/** All four server-status renderings side by side, without a state or a socket. */
+@Preview(showBackground = true, backgroundColor = 0xFF101418)
+@Composable
+private fun ServerStatusLinePreview() {
+    XbtWalletTheme {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            ServerStatusLine(status = ServerStatus.NOT_CONFIGURED, serverLabel = null)
+            Spacer(modifier = Modifier.height(12.dp))
+            ServerStatusLine(status = ServerStatus.CHECKING, serverLabel = "192.168.1.10:50002")
+            Spacer(modifier = Modifier.height(12.dp))
+            ServerStatusLine(status = ServerStatus.CONNECTED, serverLabel = "192.168.1.10:50002")
+            Spacer(modifier = Modifier.height(12.dp))
+            ServerStatusLine(status = ServerStatus.DISCONNECTED, serverLabel = null)
+        }
     }
 }
 

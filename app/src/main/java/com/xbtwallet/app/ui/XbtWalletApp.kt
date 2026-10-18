@@ -1,6 +1,7 @@
 package com.xbtwallet.app.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalActivity
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -9,6 +10,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import com.xbtwallet.app.data.ServerSettingsStore
 import com.xbtwallet.app.data.SharedPreferencesKeyValueStore
 import com.xbtwallet.app.data.Wallet
@@ -48,20 +52,42 @@ fun XbtWalletApp() {
     val serverStore = remember(context) { ServerSettingsStore(context) }
     val walletStore = remember(context) { WalletStore(SharedPreferencesKeyValueStore(context)) }
 
-    val homeState = rememberHomeScreenState(walletStore)
+    val homeState = rememberHomeScreenState(walletStore, serverStore)
 
     var screen by rememberSaveable { mutableStateOf(Screen.HOME) }
 
     BackHandler(enabled = screen != Screen.HOME) { screen = Screen.HOME }
 
     when (screen) {
-        Screen.HOME -> HomeScreen(
-            state = homeState,
-            onOpenServer = { screen = Screen.SERVER },
-            onOpenImportXpub = { screen = Screen.IMPORT_WALLET },
-            onSelectActiveXpub = { screen = Screen.SELECT_XPUB },
-            onOpenAddresses = { screen = Screen.ADDRESSES },
-        )
+        Screen.HOME -> {
+            // The heartbeat is owned here, not inside HomeScreen: it has to run
+            // only while the home screen is on display. Leaving HOME drops this
+            // branch from composition and cancels the LaunchedEffect; going to
+            // the background cancels it via repeatOnLifecycle. Re-keying on the
+            // saved endpoint means editing the server and coming back re-checks
+            // with the new settings straight away. No service, no wake lock and
+            // no new permission is involved.
+            val lifecycleOwner = LocalActivity.current as? LifecycleOwner
+            val serverKey = homeState.serverKey
+            LaunchedEffect(lifecycleOwner, serverKey) {
+                if (lifecycleOwner == null) {
+                    // No activity (e.g. a preview): one check, no loop.
+                    homeState.checkServerStatus()
+                } else {
+                    lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                        homeState.runHeartbeat()
+                    }
+                }
+            }
+
+            HomeScreen(
+                state = homeState,
+                onOpenServer = { screen = Screen.SERVER },
+                onOpenImportXpub = { screen = Screen.IMPORT_WALLET },
+                onSelectActiveXpub = { screen = Screen.SELECT_XPUB },
+                onOpenAddresses = { screen = Screen.ADDRESSES },
+            )
+        }
 
         Screen.SERVER -> {
             val state = rememberServerScreenState(serverStore)
