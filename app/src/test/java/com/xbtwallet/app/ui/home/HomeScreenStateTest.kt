@@ -2,7 +2,7 @@ package com.xbtwallet.app.ui.home
 
 import com.xbtwallet.app.data.KeyValueStore
 import com.xbtwallet.app.data.ServerSettings
-import com.xbtwallet.app.data.WalletStore
+import com.xbtwallet.app.data.SignerStore
 import com.xbtwallet.app.electrum.ElectrumProtocol
 import com.xbtwallet.app.electrum.ElectrumServer
 import kotlinx.coroutines.cancelAndJoin
@@ -18,12 +18,13 @@ import org.junit.Test
 /**
  * HomeScreenState tests.
  *
- * The class exists so the home screen's rules — "the active signer is exactly
- * one of the saved xpubs, or none" and "the server indicator follows a real
- * check, never a guess" — are testable without a UI or an emulator. It is plain
- * Kotlin over a [WalletStore] and a [ServerSettings], so in-memory fakes drive
- * it here; the ping itself is injected, so no socket and no clock are involved
- * (except in the one test that runs the heartbeat loop, which is bounded).
+ * The class exists so the home screen's rules — "how many signers are saved"
+ * (a plain list, with no active selection) and "the server indicator follows a
+ * real check, never a guess" — are testable without a UI or an emulator. It is
+ * plain Kotlin over a [SignerStore] and a [ServerSettings], so in-memory fakes
+ * drive it here; the ping itself is injected, so no socket and no clock are
+ * involved (except in the one test that runs the heartbeat loop, which is
+ * bounded).
  */
 class HomeScreenStateTest {
 
@@ -49,7 +50,7 @@ class HomeScreenStateTest {
     }
 
     /**
-     * Wallet store + server settings + a scripted ping, wired into a state.
+     * Signer store + server settings + a scripted ping, wired into a state.
      *
      * [results] answers the pings in order (the last value repeats), so a test
      * can say "up, then down" without any real network.
@@ -60,7 +61,7 @@ class HomeScreenStateTest {
     ) {
         val backing = InMemoryStore()
         private var counter = 0
-        val store = WalletStore(
+        val store = SignerStore(
             storage = backing,
             now = { 0L },
             newId = { "id-${++counter}" },
@@ -87,78 +88,44 @@ class HomeScreenStateTest {
     }
 
     @Test
-    fun `a fresh state has no xpubs, no active signer and no server`() {
+    fun `a fresh state has no signers and no server`() {
         val fixture = Fixture()
-        assertEquals(emptyList<String>(), fixture.state.xpubs)
-        assertNull(fixture.state.activeId)
-        assertNull(fixture.state.active)
-        assertNull(fixture.state.activeSnippet)
+        assertEquals(emptyList<String>(), fixture.state.signers)
         assertEquals(ServerStatus.NOT_CONFIGURED, fixture.state.serverStatus)
     }
 
     @Test
-    fun `setActive marks the xpub active and shows its snippet`() {
+    fun `refresh picks up a signer written through the store`() {
         val fixture = Fixture()
-        val wallet = fixture.store.add("Cold storage", "zpub6rFR7y4Q2AijBEqTUquhVz")
+        fixture.store.add("Added elsewhere", "zpub6xyz")
 
-        fixture.state.refresh()
-        assertEquals(1, fixture.state.xpubs.size)
-        assertNull(fixture.state.activeId)
-
-        fixture.state.setActive(wallet)
-
-        assertEquals(wallet.id, fixture.state.activeId)
-        assertEquals("Cold storage", fixture.state.active?.name)
-        assertEquals("zpub6rFR7y4Q2Aij\u2026", fixture.state.activeSnippet)
-    }
-
-    @Test
-    fun `setActive replaces the previous selection`() {
-        val fixture = Fixture()
-        val a = fixture.store.add("A", "xpubA")
-        val b = fixture.store.add("B", "xpubB")
-
-        fixture.state.setActive(a)
-        fixture.state.setActive(b)
-
-        assertEquals(b.id, fixture.state.activeId)
-        assertEquals("B", fixture.state.active?.name)
-    }
-
-    @Test
-    fun `refresh picks up an xpub written through the store`() {
-        val fixture = Fixture()
-        fixture.store.add("Imported elsewhere", "zpub6xyz")
-
-        assertNull(fixture.state.active)
+        assertEquals(emptyList<String>(), fixture.state.signers.map { it.name })
         fixture.state.refresh()
 
-        assertEquals(listOf("Imported elsewhere"), fixture.state.xpubs.map { it.name })
+        assertEquals(listOf("Added elsewhere"), fixture.state.signers.map { it.name })
     }
 
     @Test
-    fun `an xpub deleted behind the state's back clears the selection on refresh`() {
+    fun `refresh drops a signer deleted behind the state's back`() {
         val fixture = Fixture()
-        val wallet = fixture.store.add("Temp", "zpub6xyz")
-        fixture.state.setActive(wallet)
-        assertEquals(wallet.id, fixture.state.activeId)
+        val signer = fixture.store.add("Temp", "zpub6xyz")
+        fixture.state.refresh()
+        assertEquals(1, fixture.state.signers.size)
 
-        fixture.store.delete(wallet.id)
+        fixture.store.delete(signer.id)
         fixture.state.refresh()
 
-        assertEquals(emptyList<String>(), fixture.state.xpubs)
-        assertNull(fixture.state.activeId)
-        assertNull(fixture.state.active)
+        assertEquals(emptyList<String>(), fixture.state.signers.map { it.name })
     }
 
     @Test
-    fun `a short xpub is not truncated`() {
+    fun `signers are a plain list, not a selection`() {
         val fixture = Fixture()
-        val wallet = fixture.store.add("Tiny", "xpub1")
+        fixture.store.add("A", "xpubA")
+        fixture.store.add("B", "xpubB")
+        fixture.state.refresh()
 
-        fixture.state.setActive(wallet)
-
-        assertEquals("xpub1", fixture.state.activeSnippet)
+        assertEquals(listOf("A", "B"), fixture.state.signers.map { it.name })
     }
 
     @Test

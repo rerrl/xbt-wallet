@@ -35,7 +35,8 @@ import android.widget.Toast
 import com.xbtwallet.app.crypto.ExtendedPublicKey
 import com.xbtwallet.app.crypto.Hashes
 import com.xbtwallet.app.crypto.SegwitAddress
-import com.xbtwallet.app.data.Wallet
+import com.xbtwallet.app.data.Signer
+import com.xbtwallet.app.data.SignerType
 
 /**
  * The two BIP-32 chains of an account. 0 is "external" (addresses handed out to
@@ -62,10 +63,13 @@ data class DerivedAddress(val index: Int, val address: String)
  * will have to move off the UI thread.
  */
 @Stable
-class AddressesScreenState(val wallet: Wallet) {
+class AddressesScreenState(val signer: Signer) {
+
+    /** The signer's account xpub, or null if this signer is not a watch-only xpub. */
+    private val xpub: String? = (signer.type as? SignerType.WatchOnlyXpub)?.xpub
 
     /** Parsed account key, or null if the stored xpub is unreadable. */
-    val accountKey: ExtendedPublicKey? = runCatching { ExtendedPublicKey.parse(wallet.xpub) }.getOrNull()
+    val accountKey: ExtendedPublicKey? = xpub?.let { runCatching { ExtendedPublicKey.parse(it) }.getOrNull() }
 
     var chain by mutableStateOf(AddressChain.RECEIVE)
         private set
@@ -119,13 +123,13 @@ class AddressesScreenState(val wallet: Wallet) {
     }
 }
 
-/** Remembers an [AddressesScreenState] for a wallet. */
+/** Remembers an [AddressesScreenState] for a signer. */
 @Composable
-fun rememberAddressesScreenState(wallet: Wallet): AddressesScreenState =
-    remember(wallet.id) { AddressesScreenState(wallet) }
+fun rememberAddressesScreenState(signer: Signer): AddressesScreenState =
+    remember(signer.id) { AddressesScreenState(signer) }
 
 /**
- * Address viewer for one xpub — the active signer, chosen on the home screen.
+ * Address viewer for one signer's account xpub.
  *
  * Tabs switch between the receive and change chains; every row is a derived
  * `bc1q...` address with its index, and tapping one copies it. Only the first
@@ -149,7 +153,7 @@ fun AddressesScreen(
                 TextButton(onClick = onBack) { Text("\u2190 Back") }
                 Spacer(modifier = Modifier.width(4.dp))
                 Text(
-                    text = state.wallet.name,
+                    text = state.signer.name,
                     style = MaterialTheme.typography.titleLarge,
                     modifier = Modifier.weight(1f),
                 )
