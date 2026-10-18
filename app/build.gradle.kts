@@ -62,6 +62,11 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
 
+    // Bundled Tor: the native tor daemon and the TorService that runs it. Used
+    // only when a `.onion` host is entered (see electrum/ElectrumTransport.kt);
+    // a clearnet wallet never starts it.
+    implementation(libs.tor.android)
+
     debugImplementation(libs.androidx.ui.tooling)
 
     // JVM unit tests: the Electrum client is Android-free on purpose so it can

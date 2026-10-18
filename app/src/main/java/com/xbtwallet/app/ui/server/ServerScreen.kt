@@ -46,6 +46,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import com.xbtwallet.app.data.ServerSettingsStore
 import com.xbtwallet.app.electrum.ElectrumClient
 import com.xbtwallet.app.electrum.ElectrumProtocol
+import com.xbtwallet.app.electrum.ElectrumRouting
 import com.xbtwallet.app.electrum.ElectrumServer
 import com.xbtwallet.app.ui.theme.XbtWalletTheme
 import kotlinx.coroutines.CoroutineScope
@@ -145,7 +146,13 @@ class ServerScreenState(
         appendLog("handshake: server.version ${ElectrumClient.PROTOCOL_VERSION}, then server.features, server.banner")
 
         val server = ElectrumServer(host = host, port = portNumber, protocol = protocol)
+        if (ElectrumRouting.isOnionHost(host)) {
+            appendLog("route: .onion host \u2014 the bundled Tor starts before the socket is dialled")
+        }
         scope.launch {
+            // The default transport routes `.onion` through the bundled Tor and
+            // everything else directly; this is the same client the signer scan
+            // uses, so both paths are one code path.
             val client = ElectrumClient(server = server, log = ::appendLog)
             val connected = client.testConnection()
             status = if (connected) ConnectionStatus.CONNECTED else ConnectionStatus.FAILED
@@ -187,8 +194,13 @@ fun rememberServerScreenState(store: ServerSettingsStore): ServerScreenState {
 
 /**
  * "Private Electrum" screen modeled on Sparrow/Shrike's UX: a single private
- * server (no server list, no public servers, no Tor in this iteration) and a
- * visible log of the handshake — the log is the point.
+ * server (no server list, no public servers) and a visible log of the handshake
+ * — the log is the point.
+ *
+ * Tor is not a toggle. A host ending in `.onion` is routed through the app's
+ * bundled Tor daemon automatically; a clearnet host is dialled directly. The
+ * log says which route was taken, and Tor's bootstrap progress appears in it
+ * while a cold start is in flight.
  */
 @Composable
 fun ServerScreen(
@@ -196,6 +208,7 @@ fun ServerScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val onion = ElectrumRouting.isOnionHost(state.host)
     Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
         Column(
             modifier = Modifier
@@ -215,7 +228,9 @@ fun ServerScreen(
             Spacer(modifier = Modifier.height(4.dp))
 
             Text(
-                text = "Direct connection only \u2014 no Tor in this build.",
+                text = "Enter a host or IP. An .onion address is routed through the " +
+                    "built-in Tor automatically \u2014 no Orbot needed; any other host is " +
+                    "dialled directly.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -226,10 +241,19 @@ fun ServerScreen(
                 value = state.host,
                 onValueChange = state::onHostChange,
                 label = { Text("Host or IP") },
-                placeholder = { Text("192.168.1.10") },
+                placeholder = { Text("192.168.1.10 or example.onion") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
+
+            if (onion) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Onion host \u2014 this connection goes through the bundled Tor.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF4CAF50),
+                )
+            }
 
             Spacer(modifier = Modifier.height(12.dp))
 
@@ -318,10 +342,14 @@ private fun StatusRow(state: ServerScreenState) {
             CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
             Spacer(modifier = Modifier.width(8.dp))
         }
+        val onion = ElectrumRouting.isOnionHost(state.host)
         val (label, color) = when (state.status) {
             ConnectionStatus.IDLE -> "Not tested yet" to MaterialTheme.colorScheme.onSurfaceVariant
-            ConnectionStatus.TESTING -> "Testing\u2026" to MaterialTheme.colorScheme.onSurfaceVariant
-            ConnectionStatus.CONNECTED -> "Connected" to Color(0xFF2E7D32)
+            ConnectionStatus.TESTING ->
+                (if (onion) "Bootstrapping Tor and testing\u2026" else "Testing\u2026") to
+                    MaterialTheme.colorScheme.onSurfaceVariant
+            ConnectionStatus.CONNECTED ->
+                (if (onion) "Connected through Tor" else "Connected") to Color(0xFF2E7D32)
             ConnectionStatus.FAILED -> "Failed \u2014 see log" to MaterialTheme.colorScheme.error
         }
         Text(

@@ -10,7 +10,6 @@ import java.io.IOException
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.ConnectException
-import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
@@ -58,6 +57,12 @@ class ElectrumException(message: String) : Exception(message)
  * covered by unit tests that drive it against a mock Electrum responder
  * (`app/src/test/.../MockElectrumServer.kt`).
  *
+ * **Transport.** Sockets are opened through an [ElectrumTransport]. The default,
+ * [RoutingTransport], sends `.onion` hosts through the app's bundled Tor SOCKS
+ * proxy and everything else directly (see [ElectrumRouting]); tests inject a
+ * fake transport, so the handshake, the routing decision and the bootstrap
+ * failure path are all exercised without a Tor daemon.
+ *
  * Note for future work: this is the seed of the app's chain backend — keep
  * protocol concerns here and UI concerns out.
  *
@@ -65,11 +70,16 @@ class ElectrumException(message: String) : Exception(message)
  * @param timeoutMillis connect timeout and per-read timeout, in milliseconds.
  * @param log receives one human-readable line per step; called from an IO
  *   thread, so implementations must be thread-safe.
+ * @param transport how the socket is opened. The default routes `.onion` hosts
+ *   through the bundled Tor and everything else directly; tests inject a fake
+ *   so the handshake and the routing decision can be exercised without a Tor
+ *   daemon (and without a network beyond loopback).
  */
 class ElectrumClient(
     private val server: ElectrumServer,
     private val timeoutMillis: Int = DEFAULT_TIMEOUT_MILLIS,
     private val log: (String) -> Unit,
+    private val transport: ElectrumTransport = RoutingTransport(),
 ) {
 
     /**
@@ -122,20 +132,19 @@ class ElectrumClient(
     suspend fun <T> withChainSession(block: (ChainQuery) -> T): T =
         withContext(Dispatchers.IO) { runChainSession(block) }
 
-    private fun <T> runChainSession(block: (ChainQuery) -> T): T {
+    private suspend fun <T> runChainSession(block: (ChainQuery) -> T): T {
         var socket: Socket? = null
         try {
             require(server.host.isNotBlank()) { "host is empty" }
             require(server.port in 1..65535) { "invalid port ${server.port}" }
 
-            val plain = Socket().also { socket = it }
-            plain.tcpNoDelay = true
-            plain.connect(InetSocketAddress(server.host, server.port), timeoutMillis)
-            plain.soTimeout = timeoutMillis
+            // A background read: nothing about the route or the bootstrap goes
+            // into the user-visible log.
+            val plain = transport.connect(server.host, server.port, timeoutMillis, log = {}).also { socket = it }
 
-            val transport: Socket = if (server.protocol == ElectrumProtocol.SSL) startTls(plain) else plain
-            val reader = BufferedReader(InputStreamReader(transport.getInputStream(), Charsets.UTF_8))
-            val writer = BufferedWriter(OutputStreamWriter(transport.getOutputStream(), Charsets.UTF_8))
+            val channel: Socket = if (server.protocol == ElectrumProtocol.SSL) startTls(plain) else plain
+            val reader = BufferedReader(InputStreamReader(channel.getInputStream(), Charsets.UTF_8))
+            val writer = BufferedWriter(OutputStreamWriter(channel.getOutputStream(), Charsets.UTF_8))
 
             // One id counter for the whole session, so a scan's requests are
             // numbered 1..n on this connection and each answer maps to its ask.
@@ -149,20 +158,18 @@ class ElectrumClient(
         }
     }
 
-    private fun runPing(): Boolean {
+    private suspend fun runPing(): Boolean {
         var socket: Socket? = null
         try {
             require(server.host.isNotBlank()) { "host is empty" }
             require(server.port in 1..65535) { "invalid port ${server.port}" }
 
-            val plain = Socket().also { socket = it }
-            plain.tcpNoDelay = true
-            plain.connect(InetSocketAddress(server.host, server.port), timeoutMillis)
-            plain.soTimeout = timeoutMillis
+            // Silent, like the rest of the heartbeat.
+            val plain = transport.connect(server.host, server.port, timeoutMillis, log = {}).also { socket = it }
 
-            val transport: Socket = if (server.protocol == ElectrumProtocol.SSL) startTls(plain) else plain
-            val reader = BufferedReader(InputStreamReader(transport.getInputStream(), Charsets.UTF_8))
-            val writer = BufferedWriter(OutputStreamWriter(transport.getOutputStream(), Charsets.UTF_8))
+            val channel: Socket = if (server.protocol == ElectrumProtocol.SSL) startTls(plain) else plain
+            val reader = BufferedReader(InputStreamReader(channel.getInputStream(), Charsets.UTF_8))
+            val writer = BufferedWriter(OutputStreamWriter(channel.getOutputStream(), Charsets.UTF_8))
 
             // `server.ping` takes no parameters and answers `result: null`, so
             // getting back here without an exception is the whole test.
@@ -177,29 +184,29 @@ class ElectrumClient(
         }
     }
 
-    private fun runHandshake(): Boolean {
+    private suspend fun runHandshake(): Boolean {
         var socket: Socket? = null
         try {
             require(server.host.isNotBlank()) { "host is empty" }
             require(server.port in 1..65535) { "invalid port ${server.port}" }
 
             log("> connecting to ${server.host}:${server.port} over ${server.protocol.label} (timeout ${timeoutMillis}ms)")
-            val plain = Socket().also { socket = it }
-            plain.tcpNoDelay = true
-            plain.connect(InetSocketAddress(server.host, server.port), timeoutMillis)
-            plain.soTimeout = timeoutMillis
+            // Where the connection is going: direct, or through the bundled Tor.
+            // Tor also logs its own bootstrap progress from here on.
+            log("> route: ${transport.describe(server.host)}")
+            val plain = transport.connect(server.host, server.port, timeoutMillis, log).also { socket = it }
             log("< tcp connected: ${plain.localSocketAddress} -> ${plain.remoteSocketAddress}")
 
-            val transport: Socket = if (server.protocol == ElectrumProtocol.SSL) startTls(plain) else plain
-            if (transport is SSLSocket) {
-                val session = transport.session
+            val channel: Socket = if (server.protocol == ElectrumProtocol.SSL) startTls(plain) else plain
+            if (channel is SSLSocket) {
+                val session = channel.session
                 log("< tls handshake ok: ${session.protocol}, ${session.cipherSuite}")
             } else {
                 log("< plain tcp: traffic is NOT encrypted")
             }
 
-            val reader = BufferedReader(InputStreamReader(transport.getInputStream(), Charsets.UTF_8))
-            val writer = BufferedWriter(OutputStreamWriter(transport.getOutputStream(), Charsets.UTF_8))
+            val reader = BufferedReader(InputStreamReader(channel.getInputStream(), Charsets.UTF_8))
+            val writer = BufferedWriter(OutputStreamWriter(channel.getOutputStream(), Charsets.UTF_8))
 
             var id = 0
 
@@ -226,6 +233,13 @@ class ElectrumClient(
         }
     }
 
+    /** Parses one JSON-RPC line, turning malformed JSON into an [IOException]. */
+    private fun parseReply(line: String, method: String): Any? = try {
+        MiniJson.parse(line)
+    } catch (error: JsonParseException) {
+        throw IOException("malformed JSON-RPC reply to '$method': ${error.message}")
+    }
+
     /**
      * Sends one request and returns its `result`, logging both directions.
      *
@@ -246,15 +260,22 @@ class ElectrumClient(
         writer.write("\n")
         writer.flush()
 
-        val line = reader.readLine()
+        // `blockchain.headers.subscribe` — the tip lookup the history rows use —
+        // makes the server push a `blockchain.headers.subscribe` *notification*
+        // whenever a block arrives. Notifications carry no `id`; reading one as
+        // the answer to the next request would desynchronise the session, so
+        // they are logged and skipped until the reply to this request arrives.
+        var line = reader.readLine()
             ?: throw IOException("peer closed the connection while waiting for the '$method' reply")
+        var parsed = parseReply(line, method)
+        while (parsed is Map<*, *> && parsed["id"] == null && parsed["method"] != null) {
+            logger("< (notification) $line")
+            line = reader.readLine()
+                ?: throw IOException("peer closed the connection while waiting for the '$method' reply")
+            parsed = parseReply(line, method)
+        }
         logger("< $line")
 
-        val parsed = try {
-            MiniJson.parse(line)
-        } catch (error: JsonParseException) {
-            throw IOException("malformed JSON-RPC reply to '$method': ${error.message}")
-        }
         val response = parsed as? Map<*, *>
             ?: throw IOException("unexpected JSON-RPC reply to '$method': $line")
 
@@ -311,6 +332,7 @@ class ElectrumClient(
             }
         }
         val hint = when (error) {
+            is TorBootstrapException -> "Tor is unavailable — ${error.message}"
             is UnknownHostException -> "DNS lookup failed for '${server.host}'"
             is SocketTimeoutException -> "timed out after ${timeoutMillis}ms"
             is ConnectException -> "connection refused"
