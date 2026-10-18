@@ -5,7 +5,7 @@ import android.content.Context
 /**
  * The Android side of [KeyValueStore]: one SharedPreferences file.
  *
- * Deliberately this small — all of the wallet logic lives in [WalletStore],
+ * Deliberately this small — all of the signer logic lives in [SignerStore],
  * which never sees a `Context`. `apply()` writes asynchronously, which is what
  * a settings-style write wants.
  */
