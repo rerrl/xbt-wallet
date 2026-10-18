@@ -50,6 +50,13 @@ class AccountScannerTest {
          * map that *are* in the used sets fall back to a single canned tx.
          */
         private val history: Map<Pair<AddressChain, Int>, List<HistoryEntry>> = emptyMap(),
+        /**
+         * Raw transaction hex by txid, for the transaction list. The scanner only
+         * asks for transactions of addresses that carry a scriptPubKey, so the
+         * fixtures that predate the net-amount work (no script) never fetch.
+         */
+        private val transactions: Map<String, String> = emptyMap(),
+        private val tipHeight: Int = 800_000,
     ) : ChainQuery {
 
         val historyCalls = mutableListOf<Pair<AddressChain, Int>>()
@@ -88,6 +95,11 @@ class AccountScannerTest {
             unspentCalls += address
             return utxos[address] ?: emptyList()
         }
+
+        override fun getTransaction(txHash: String): String =
+            transactions[txHash] ?: DEFAULT_TX_HEX
+
+        override fun getTipHeight(): Int = tipHeight
     }
 
     @Test
@@ -252,7 +264,7 @@ class AccountScannerTest {
         val scanner = scanner()
         val snapshot = scanner.scan(FakeChainQuery(scanner))
 
-        assertEquals(emptyList<ScannedTransaction>(), snapshot.transactions)
+        assertEquals(emptyList<TransactionRow>(), snapshot.transactions)
     }
 
     @Test
@@ -291,5 +303,15 @@ class AccountScannerTest {
         const val TX_B = "00000000000000000000000000000000000000000000000000000000000000b2"
         const val TX_C = "00000000000000000000000000000000000000000000000000000000000000c3"
         const val TX_D = "00000000000000000000000000000000000000000000000000000000000000d4"
+
+        /**
+         * A valid transaction for any txid the fake is asked about. Its output
+         * pays a script that is not the wallet's, so every row nets to zero —
+         * these tests are about the scan, not about the amounts.
+         */
+        val DEFAULT_TX_HEX: String = TestTransactions.build(
+            inputs = listOf(TXID to 0),
+            outputs = listOf(1_000L to "0014" + "99".repeat(20)),
+        )
     }
 }

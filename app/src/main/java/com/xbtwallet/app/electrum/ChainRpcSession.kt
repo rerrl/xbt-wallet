@@ -6,7 +6,10 @@ import com.xbtwallet.app.chain.HistoryEntry
 import com.xbtwallet.app.chain.ScripthashBalance
 
 /**
- * The three Electrum scripthash RPCs, decoded into the chain layer's types.
+ * The three Electrum scripthash RPCs, decoded into the chain layer's types,
+ * plus the two the transaction list needs: `blockchain.transaction.get` (the
+ * raw transaction whose net effect a row shows) and `blockchain.headers.subscribe`
+ * (the tip height confirmations are counted from).
  *
  * One instance is bound to one open connection: the constructor takes the
  * "send a request and give me its `result`" callback, which
@@ -65,6 +68,19 @@ class ChainRpcSession internal constructor(
                 satoshis = fields.long("value"),
             )
         }
+    }
+
+    override fun getTransaction(txHash: String): String {
+        val result = call("blockchain.transaction.get", listOf(txHash))
+        return result as? String
+            ?: throw ElectrumException("transaction.get did not answer with hex: ${MiniJson.encode(result)}")
+    }
+
+    override fun getTipHeight(): Int {
+        val result = call("blockchain.headers.subscribe", emptyList())
+        val fields = result as? Map<*, *>
+            ?: throw ElectrumException("headers.subscribe did not answer with an object: ${MiniJson.encode(result)}")
+        return fields.int("height")
     }
 
     private fun Map<*, *>.string(key: String): String = this[key] as? String

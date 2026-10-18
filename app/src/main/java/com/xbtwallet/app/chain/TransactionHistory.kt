@@ -8,22 +8,13 @@ package com.xbtwallet.app.chain
  * for its history — that is how it decides whether an address is *used*. Those
  * answers were thrown away once the used/unused bit was read. Keeping them and
  * aggregating them here gives a transaction list for the price of the scan that
- * was happening anyway: no new RPC, no second connection, no verbose
- * transaction fetch.
+ * was happening anyway: no extra address lookups and no second connection.
  *
- * **What it deliberately is not.** One transaction touches several of this
- * account's addresses (a payment in, then a spend of it with change), and the
- * same txid comes back from each of them, at the same height. [aggregateTransactions]
- * dedupes by txid so the user sees one row per transaction, not one per address.
- *
- * It is also not a *direction*: `get_history` says a transaction touched an
- * address, not whether value came in or went out. The only directional signal
- * available without fetching the transaction is `listunspent`, and that is not
- * enough to be honest with — a send that paid somebody and returned change to
- * one of our own addresses *also* shows up in `listunspent`, so an "incoming"
- * arrow derived from it would mislabel a spend. The card allows the arrow to be
- * omitted when it is not cheaply derivable, and it is not, so a row shows the
- * txid and its height and says nothing it cannot prove.
+ * **What it deliberately is not.** A *direction*. `get_history` says a
+ * transaction touched an address, not whether value came in or went out. This
+ * file only produces the deduped, ordered set of transactions; the net in/out
+ * amount and the confirmation count come from reading each transaction — see
+ * `buildTransactionRows` in `TransactionDetails.kt`.
  */
 
 /**
