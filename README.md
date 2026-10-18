@@ -21,16 +21,23 @@ signer-first restructure:
 - **Signers list** — every saved signer, oldest first, with its type badge and a
   head…tail key snippet; tap to open, **⋮** → *Remove signer* (with a confirm
   dialog) to delete.
+- **Signer screen** — one signer's own screen: its **live balance** from your
+  own Electrum server (sats first, then the coin amount and two clearly-marked
+  placeholder fiat lines), then **UTXOs**, **Addresses**, and **Send**/**Receive**
+  shown disabled until the air-gapped signing flow exists.
+- **UTXO list** — every spendable output the scan found: amount, outpoint,
+  address chain/index, and confirmation height (or *unconfirmed*).
 - **Addresses viewer** — derived native-segwit receive/change addresses per
-  account key, with the derivation index shown and tap-to-copy. It stays in the
-  code and is wired under a signer's own screen in the next card.
+  account key, now annotated with on-chain usage: *used*, *unused*, or the
+  highlighted *first unused*.
 - **Private Electrum server** — enter host/port, pick SSL or TCP, hit *Test
   connection* and watch the Electrum JSON-RPC handshake in an on-screen log.
 
 All crypto is public-key only: no private key, seed or signing code exists
-anywhere in this repository. Balances, history, the receive QR and sending are
-still missing, and there is no Tor in this iteration (direct IP connections
-only).
+anywhere in this repository. Transaction history, the receive QR and sending are
+still missing, there is no Tor in this iteration (direct IP connections only),
+and the two fiat figures on the signer screen are **hardcoded placeholders** —
+this build requests no price feed from anyone.
 
 ## Home screen
 
@@ -105,15 +112,79 @@ crashing. The screen keeps only the two bits of interaction state that belong to
 it (which row's menu is open, which signer is awaiting confirmation); the store
 is written on the screen that owns it.
 
+## Signer screen
+
+Tapping a signer opens its own screen — the place every per-signer action lives,
+and the first screen that talks to the chain. Top to bottom: the signer's name
+and its *watch-only* badge, its **balance**, and the four actions.
+
+**Balance** is this account's confirmed *plus* unconfirmed satoshis, read from
+your own Electrum server. The scan runs off the UI thread and the card shows
+what is happening at each stage: *Loading balance…* with a running
+"checked N addresses" count while the scan is in flight, the sats figure
+(`1,234,567 sats`) with the coin amount (`0.01234567 XBT`) when it lands, or an
+error with a **Retry** when the server could not be reached. With no server
+saved at all there is no error to show — the card says *Connect a server* and
+explains that balances come from the user's own server and nobody else's.
+
+Under the balance sit **UTXOs** and **Addresses** (each opens its own screen,
+see below) and **Send**/**Receive**, shown disabled with *coming soon*: sending
+is the air-gapped QR flow, which does not exist yet, and a wallet that offers a
+Send button that cannot send is a wallet that lies.
+
+Two fiat lines dress the same balance in hardcoded placeholder rates, each
+labelled as such: the XBT figure at **$420.69/XBT** and, because BTC and XBT
+share the satoshi unit, the same balance as BTC at **$81,000/BTC**. Both live in
+one file (`PlaceholderPrices.kt`) with comments saying exactly what they are.
+There is no price API, no HTTP client and no new permission anywhere near this —
+the only traffic the app makes is Electrum RPCs to the server the user entered.
+
+## Chain queries
+
+Under the signer screens is a small chain layer (`app/src/main/java/com/xbtwallet/app/chain/`),
+still Android-free:
+
+- **Scripthash** — Electrum indexes scripts by `sha256(scriptPubKey)` **reversed**,
+  as lowercase hex. That reversal is the classic "everything looks unused" bug,
+  so it is pinned by a vector test against BIP-84's first receiving address.
+- **Gap-limit scan** — the account key's receive (`0/i`) and change (`1/i`)
+  chains are walked in batches of 20, asking `blockchain.scripthash.get_history`
+  about each address and stopping after the first batch with no used address in
+  it (BIP-44's gap limit). The balance and the UTXO list are then read from the
+  *used* addresses only.
+- **Balance** is the sum of `blockchain.scripthash.get_balance` over those used
+  addresses — one source of truth, deliberately *not* the sum of the UTXO list,
+  so the headline number and the list can never disagree about themselves.
+
+The three RPCs (`get_history`, `get_balance`, `listunspent`) run over **one
+connection** per scan (`ElectrumClient.withChainSession`): an account scan is
+dozens of requests, and a connect/TLS/close per address would make an ordinary
+balance look like a port scan to the user's own server. The scan re-runs each
+time a signer is opened — there is no caching in this iteration, which is cheap
+enough and removes a whole class of stale-balance bugs.
+
+## UTXOs
+
+The UTXO screen lists what the scan found: one monospaced row per output, its
+amount in sats on top and its provenance underneath — `txid:vout` with the
+middle elided, the chain and address index it sits at, and the height it
+confirmed at (or *unconfirmed*). An empty account says so. There is no coin
+control, no freezing and no selection yet; those are v0.2.0.
+
 ## Addresses
 
 The addresses viewer shows the addresses derived from a signer's account key:
 external chain `0/i` under the **Receive** tab and internal chain `1/i` under
-**Change**, both native segwit P2WPKH. Each row shows its derivation index; the
-first 20 per tab are listed, with *Show 20 more* to extend. Tap a row to copy
-the address. There is no gap-limit logic yet — nothing is fetched from the chain,
-so the wallet cannot tell which addresses have been used. The viewer stays in
-the tree and is wired under each signer's own screen in the next card.
+**Change**, both native segwit P2WPKH. Each row shows its derivation index and,
+now, what the scan learned about it — *used*, *unused*, or the accent-marked
+*first unused*, which is the address the next receive would hand out. Tap a row
+to copy it.
+
+The list starts as exactly what the scan visited, which is a full unused batch
+past the last used address. **Show 20 more** derives further addresses on
+demand; those rows are marked *not scanned* rather than *unused*, because the
+app genuinely has not asked about them and a receive screen that guesses is how
+an address with history gets handed out twice.
 
 ## Crypto layer
 
@@ -133,10 +204,13 @@ and unit-tested on the JVM against published vectors:
 There is no function in that package that consumes a private key. The BIP-84
 test vector (`zpub6rFR7y4Q…` → `bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu`) is
 asserted in `ExtendedPublicKeyTest`, along with the BIP-173 bech32 vectors and
-the published RIPEMD-160 vectors.
+the published RIPEMD-160 vectors. The chain layer built on it
+(`com.xbtwallet.app.chain/`: scripthash, derivation, the gap-limit scan) is the
+same way — no Context, no socket — so the scan's rules are unit-tested against
+an in-memory fake and the RPCs separately against a mock server.
 
 ```bash
-./gradlew clean assembleDebug testDebugUnitTest   # 114 unit tests, all green
+./gradlew clean assembleDebug testDebugUnitTest   # 147 unit tests, all green
 ```
 
 ## Private Electrum server
@@ -150,8 +224,13 @@ the connection log. The client lives in
 so it can be unit-tested on the JVM against a mock Electrum responder:
 
 ```bash
-./gradlew testDebugUnitTest   # 19 tests: client handshake, ping, JSON, failure modes
+./gradlew testDebugUnitTest   # client handshake, ping, chain RPCs, JSON, failure modes
 ```
+
+The same client carries the three `blockchain.scripthash.*` queries the signer
+screen's balance and UTXOs are built from, over one connection per scan
+(`withChainSession`). Scripthash requests never touch the connection log — a
+background balance read is not a connection test.
 
 The home screen reuses the same client for its heartbeat: `ElectrumClient.ping()`
 connects, sends one `server.ping` with no parameters and closes — the cheap
@@ -163,7 +242,8 @@ wake lock, no new permission.
 
 Limitations of this iteration: no Tor, no certificate pinning (an untrusted or
 self-signed server certificate is rejected and reported in the log rather than
-accepted), and no xpub data is fetched yet — the connection is all it does.
+accepted), no transaction history yet, and no testnet: an endpoint is assumed to
+serve the XBT chain.
 
 ## Run in dev mode
 

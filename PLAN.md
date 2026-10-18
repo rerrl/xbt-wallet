@@ -191,11 +191,28 @@ What exists right now, in this repository:
   *Create hot wallet* is shown disabled, because a signer whose seed lives on the
   phone is the one thing this app must never have. The Signers list shows every
   saved signer oldest first, with its type badge and a head…tail key snippet, and
-  offers a confirm-gated remove per row. A signer's own detail screen (its
-  addresses, its full xpub) is the screen still to come. The
+  offers a confirm-gated remove per row. The
   old active-signer card, **Select active xpub** picker and standalone
-  **Addresses** button are gone; the Addresses viewer stays in the tree, to be
-  reopened under a signer. The old Receive/Send placeholders are gone.
+  **Addresses** button are gone; the Addresses viewer is reopened under a signer.
+  The old Receive/Send placeholders are gone.
+- **Signer screens** (v0.1.0's first chain-data feature). Opening a signer shows
+  its **balance** — confirmed plus unconfirmed satoshis of that xpub, read from
+  the user's own Electrum server, with a visible loading state, a *Connect a
+  server* state when no endpoint is saved, and a retryable error when the server
+  does not answer. Under it: **UTXOs**, **Addresses**, and **Send**/**Receive**
+  disabled (coming soon). Fiat figures are **hardcoded placeholders** in
+  `PlaceholderPrices.kt` ($420.69/XBT, $81,000/BTC, both labelled on screen) —
+  this build makes no market-data request, adds no HTTP client and adds no
+  permission. The UTXO list is monospaced rows of amount, `txid:vout`, chain and
+  address index, and height. The address viewer's rows are annotated *used* /
+  *unused*, with the first unused highlighted.
+- **Chain layer** (`com.xbtwallet.app.chain/`, Android-free): Electrum
+  **scripthash** (`sha256(scriptPubKey)` reversed), P2WPKH script building, and a
+  **gap-limit scan** — receive (`0/i`) and change (`1/i`) walked in batches of 20
+  until a batch has no used address in it, then `blockchain.scripthash.get_balance`
+  summed over the used addresses for the headline number and
+  `blockchain.scripthash.listunspent` for the UTXO list. The three scripthash RPCs
+  share one connection per scan (`ElectrumClient.withChainSession`).
 - **Crypto** (`com.xbtwallet.app.crypto/`, Android-free): Base58Check, SHA-256 /
   RIPEMD-160 / HMAC-SHA512, bech32 + bech32m, secp256k1 public-point arithmetic,
   BIP-32 parsing and public-only child derivation, P2WPKH address building.
@@ -208,10 +225,12 @@ What exists right now, in this repository:
   settings from the previous iteration, behind a `ServerSettings` interface for
   the same reason.
 - **Networking**: a clean-room Electrum JSON-RPC client (direct TLS/TCP, no Tor
-  yet) used by the private-server screen and, via its quiet `server.ping` probe,
-  by the home screen's status heartbeat; no xpub data is fetched with it yet.
-- **Tests**: 114 JVM unit tests, green, including the official BIP-84 and BIP-173
-  vectors and the published RIPEMD-160 vectors.
+  yet) used by the private-server screen, via its quiet `server.ping` probe by
+  the home screen's status heartbeat, and via its scripthash RPCs by the signer
+  screens' balance and UTXO views.
+- **Tests**: 147 JVM unit tests, green, including the official BIP-84 and BIP-173
+  vectors, the published RIPEMD-160 vectors, an Electrum scripthash vector, and
+  the gap-limit scan's stop rule (including the partly-used batch case).
 
-Not yet: chain data (balances, history, UTXOs), the receive QR flow, gap-limit
-scanning, descriptors/BIP-380 (the model still stores a bare xpub), and sending.
+Not yet: a transaction history screen, the receive QR flow, descriptors/BIP-380
+(the model still stores a bare xpub), Tor, precise/real fiat rates, and sending.
