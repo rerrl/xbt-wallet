@@ -79,6 +79,49 @@ class ElectrumClient(
      */
     suspend fun testConnection(): Boolean = withContext(Dispatchers.IO) { runHandshake() }
 
+    /**
+     * A cheap liveness probe: connect, send one `server.ping` RPC and close.
+     *
+     * This is what the home screen's heartbeat calls once a minute, so it is
+     * deliberately quieter than [testConnection]: one request instead of the
+     * three-method handshake, and nothing at all is written to the injected
+     * [log] — a per-minute poll must not fill a log the user is reading. The
+     * answer is simply "did the server answer".
+     *
+     * Like [testConnection] it never throws for network problems: a refused
+     * connection, a timeout, a TLS failure, a peer that hangs up and a JSON-RPC
+     * `error` all come back as `false`.
+     */
+    suspend fun ping(): Boolean = withContext(Dispatchers.IO) { runPing() }
+
+    private fun runPing(): Boolean {
+        var socket: Socket? = null
+        try {
+            require(server.host.isNotBlank()) { "host is empty" }
+            require(server.port in 1..65535) { "invalid port ${server.port}" }
+
+            val plain = Socket().also { socket = it }
+            plain.tcpNoDelay = true
+            plain.connect(InetSocketAddress(server.host, server.port), timeoutMillis)
+            plain.soTimeout = timeoutMillis
+
+            val transport: Socket = if (server.protocol == ElectrumProtocol.SSL) startTls(plain) else plain
+            val reader = BufferedReader(InputStreamReader(transport.getInputStream(), Charsets.UTF_8))
+            val writer = BufferedWriter(OutputStreamWriter(transport.getOutputStream(), Charsets.UTF_8))
+
+            // `server.ping` takes no parameters and answers `result: null`, so
+            // getting back here without an exception is the whole test.
+            rpc(id = 1, method = "server.ping", params = emptyList(), reader = reader, writer = writer, logger = {})
+            return true
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (error: Exception) {
+            return false
+        } finally {
+            runCatching { socket?.close() }
+        }
+    }
+
     private fun runHandshake(): Boolean {
         var socket: Socket? = null
         try {
@@ -128,23 +171,29 @@ class ElectrumClient(
         }
     }
 
-    /** Sends one request and returns its `result`, logging both directions. */
+    /**
+     * Sends one request and returns its `result`, logging both directions.
+     *
+     * [logger] is the client's own [log] by default; [runPing] passes a no-op
+     * so the heartbeat stays out of the user-visible log.
+     */
     private fun rpc(
         id: Int,
         method: String,
         params: List<Any?>,
         reader: BufferedReader,
         writer: BufferedWriter,
+        logger: (String) -> Unit = log,
     ): Any? {
         val request = MiniJson.encode(linkedMapOf<String, Any?>("id" to id, "method" to method, "params" to params))
-        log("> $request")
+        logger("> $request")
         writer.write(request)
         writer.write("\n")
         writer.flush()
 
         val line = reader.readLine()
             ?: throw IOException("peer closed the connection while waiting for the '$method' reply")
-        log("< $line")
+        logger("< $line")
 
         val parsed = try {
             MiniJson.parse(line)
