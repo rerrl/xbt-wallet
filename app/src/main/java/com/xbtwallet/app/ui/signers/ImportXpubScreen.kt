@@ -1,4 +1,4 @@
-package com.xbtwallet.app.ui.importwallet
+package com.xbtwallet.app.ui.signers
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -34,8 +34,8 @@ import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerStore
 
 /**
- * State behind the Add-signer screen (temporarily the old import screen): two
- * text fields, their inline errors, and the save action.
+ * State behind the watch-only xpub import screen: two text fields, their inline
+ * errors, and the save action.
  *
  * Kept out of the composable for two reasons. First, it is plain Kotlin and can
  * be exercised without a UI test. Second, the screen is re-composed constantly
@@ -44,7 +44,7 @@ import com.xbtwallet.app.data.SignerStore
  * object, not of how many times Compose happened to re-run the composable.
  */
 @Stable
-class ImportWalletScreenState(
+class ImportXpubScreenState(
     private val signerStore: SignerStore,
     private val onSaved: (Signer) -> Unit,
 ) {
@@ -125,7 +125,7 @@ class ImportWalletScreenState(
 }
 
 /**
- * Remembers an [ImportWalletScreenState] for the Add-signer screen.
+ * Remembers an [ImportXpubScreenState] for the import screen.
  *
  * The `onSaved` callback goes through [rememberUpdatedState] and the state
  * object is keyed only on `signerStore`: if the callback were a `remember` key,
@@ -133,27 +133,30 @@ class ImportWalletScreenState(
  * whatever the user had typed.
  */
 @Composable
-fun rememberImportWalletScreenState(
+fun rememberImportXpubScreenState(
     signerStore: SignerStore,
     onSaved: (Signer) -> Unit,
-): ImportWalletScreenState {
+): ImportXpubScreenState {
     val currentOnSaved by rememberUpdatedState(onSaved)
-    return remember(signerStore) { ImportWalletScreenState(signerStore) { signer -> currentOnSaved(signer) } }
+    return remember(signerStore) { ImportXpubScreenState(signerStore) { signer -> currentOnSaved(signer) } }
 }
 
 /**
- * Add a signer by pasting its account xpub.
+ * Add a signer by pasting its account xpub — the manual half of the Add-signer
+ * flow, reached from [AddSignerScreen]'s **Add watch-only xpub** button.
  *
- * This is the fallback paste path from PLAN.md §4; QR scanning (a SeedSigner
- * `crypto-account` export) is the primary path in the long run. The screen is
- * reached from the home screen's **Add signer** button — the real add-signer
- * flow lands in a follow-up card, which is why it still lives in the
- * `importwallet` package; the fields validate inline and it is refused until the
- * key parses.
+ * This is the fallback path from PLAN.md §4. The primary path is scanning a
+ * SeedSigner `crypto-account` QR export, which is a later feature — a code note
+ * for whoever builds it: swapping in a scanner means feeding the decoded string
+ * through this same state object, because the validation already lives behind
+ * [com.xbtwallet.app.crypto.validateXpubInput] and never touches a camera.
+ *
+ * The fields validate inline (via the shared [validateXpubInput] seam, not a
+ * copy of it) and the save is refused until the name is set and the key parses.
  */
 @Composable
-fun ImportWalletScreen(
-    state: ImportWalletScreenState,
+fun ImportXpubScreen(
+    state: ImportXpubScreenState,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -166,10 +169,10 @@ fun ImportWalletScreen(
                 .verticalScroll(rememberScrollState()),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onBack) { Text("← Back") }
+                TextButton(onClick = onBack) { Text("\u2190 Back") }
                 Spacer(modifier = Modifier.width(4.dp))
                 Text(
-                    text = "Add signer",
+                    text = "Add watch-only xpub",
                     style = MaterialTheme.typography.titleLarge,
                 )
             }
@@ -202,7 +205,7 @@ fun ImportWalletScreen(
                 value = state.xpub,
                 onValueChange = state::onXpubChange,
                 label = { Text("Account xpub / ypub / zpub") },
-                placeholder = { Text("zpub6rFR7y4Q2…") },
+                placeholder = { Text("zpub6rFR7y4Q2\u2026") },
                 minLines = 3,
                 maxLines = 6,
                 textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
@@ -214,7 +217,7 @@ fun ImportWalletScreen(
             state.recognisedVersion?.let { version ->
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "Recognised $version — treated as native segwit (bc1q… addresses).",
+                    text = "Recognised $version \u2014 treated as native segwit (bc1q\u2026 addresses).",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary,
                 )
@@ -230,7 +233,7 @@ fun ImportWalletScreen(
                 Text(
                     text = "Manual import carries no master fingerprint or derivation path. " +
                         "All three of xpub, ypub and zpub hold the same public key, so this " +
-                        "wallet derives native segwit P2WPKH (bc1q…) addresses from it " +
+                        "wallet derives native segwit P2WPKH (bc1q\u2026) addresses from it " +
                         "regardless of which you paste.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

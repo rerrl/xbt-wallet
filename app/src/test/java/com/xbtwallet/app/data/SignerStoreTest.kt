@@ -119,6 +119,89 @@ class SignerStoreTest {
         assertTrue(!store.delete(a.id))
     }
 
+    // --- list ordering + delete --------------------------------------------
+    //
+    // The Signers list screen shows signers in whatever order the store hands
+    // them back, so "oldest first, always" is a contract the UI leans on — and
+    // it has to survive both a delete and a round-trip through storage.
+
+    @Test
+    fun `list keeps insertion order, oldest first`() {
+        val backing = InMemoryStore()
+        val store = newStore(backing)
+        store.add("First", "xpub1")
+        store.add("Second", "xpub2")
+        store.add("Third", "xpub3")
+
+        assertEquals(listOf("First", "Second", "Third"), store.list().map { it.name })
+        // Order is a property of the stored list, not of the instance that
+        // wrote it: a fresh store over the same storage reads it back the same.
+        assertEquals(listOf("First", "Second", "Third"), SignerStore(backing).list().map { it.name })
+    }
+
+    @Test
+    fun `delete keeps the order of the signers that remain`() {
+        val backing = InMemoryStore()
+        val store = newStore(backing)
+        val a = store.add("A", "xpubA")
+        store.add("B", "xpubB")
+        val c = store.add("C", "xpubC")
+        val d = store.add("D", "xpubD")
+
+        // Remove from the middle, then from the front: what is left must still
+        // read in the order it was added.
+        assertTrue(store.delete(c.id))
+        assertTrue(store.delete(a.id))
+        assertEquals(listOf("B", "D"), store.list().map { it.name })
+        assertEquals(listOf("B", "D"), SignerStore(backing).list().map { it.name })
+
+        // And the surviving ids are the ones that were never touched.
+        assertEquals(listOf("B", "D"), store.list().map { it.name })
+        assertEquals(d.id, store.list().last().id)
+    }
+
+    @Test
+    fun `delete is persisted, not just dropped from memory`() {
+        val backing = InMemoryStore()
+        val store = newStore(backing)
+        val a = store.add("Keep", "xpubA")
+        val b = store.add("Drop", "xpubB")
+
+        assertTrue(store.delete(b.id))
+
+        val reloaded = SignerStore(backing)
+        assertEquals(listOf("Keep"), reloaded.list().map { it.name })
+        assertNull(reloaded.get(b.id))
+        assertEquals(a.id, reloaded.get(a.id)?.id)
+    }
+
+    @Test
+    fun `deleting every signer leaves the list empty and stays that way`() {
+        val backing = InMemoryStore()
+        val store = newStore(backing)
+        val a = store.add("A", "xpubA")
+        val b = store.add("B", "xpubB")
+
+        assertTrue(store.delete(a.id))
+        assertTrue(store.delete(b.id))
+
+        assertTrue(store.list().isEmpty())
+        // An empty list is written, not skipped: a fresh store must not
+        // resurrect anything.
+        assertTrue(SignerStore(backing).list().isEmpty())
+    }
+
+    @Test
+    fun `delete of an unknown id reports false and changes nothing`() {
+        val backing = InMemoryStore()
+        val store = newStore(backing)
+        store.add("A", "xpubA")
+        store.add("B", "xpubB")
+
+        assertTrue(!store.delete("not-a-real-id"))
+        assertEquals(listOf("A", "B"), store.list().map { it.name })
+    }
+
     @Test
     fun `names may repeat but ids never do`() {
         val backing = InMemoryStore()

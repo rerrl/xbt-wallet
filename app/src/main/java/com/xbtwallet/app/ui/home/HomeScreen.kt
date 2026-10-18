@@ -201,9 +201,10 @@ fun rememberHomeScreenState(
  * **Signers**. The old standalone "Import xpub", "Select active xpub" and
  * "Addresses" buttons are gone: xpubs are signers now, they live in a list
  * rather than behind an "active" selection, and everything that works on one
- * signer (addresses included) is reached by opening that signer. Those screens
- * arrive in the follow-up cards; for now Add signer shows the import screen and
- * Signers lists what is saved.
+ * signer (addresses included) is reached by opening that signer. **Add signer**
+ * now opens the signer chooser (watch-only xpub live, hot wallet disabled) and
+ * **Signers** the list of what is saved; a signer's own detail screen is the one
+ * screen still to come.
  *
  * Under the Server button the screen shows the live connection status: the
  * "connect your own server" hint until an endpoint is saved, then a dot with

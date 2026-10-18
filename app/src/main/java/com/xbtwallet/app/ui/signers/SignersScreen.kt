@@ -2,6 +2,7 @@ package com.xbtwallet.app.ui.signers
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -11,12 +12,22 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
@@ -25,24 +36,41 @@ import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerType
 
 /**
- * The list of saved signers.
+ * The list of saved signers — the app's inventory.
  *
- * This screen is the app's inventory, and it is deliberately plain: every signer
- * by the name the user gave it, with its type badge, and nothing selected,
- * nothing "active". Tapping one opens that signer (the detail screen is built in
- * a follow-up card; for now it is a stub), which is the only place a per-signer
- * action will ever live.
+ * Every signer is here by the name the user gave it, with its *watch-only* type
+ * badge and a head…tail snippet of its key. Nothing is selected and nothing is
+ * "active": tapping a row opens that signer's own screen, which is the only
+ * place a per-signer action lives.
  *
- * It is stateless — [signers] is passed in from the same [com.xbtwallet.app.ui.home.HomeScreenState]
- * the home screen counts, so both screens can never disagree about what is saved.
+ * The screen is otherwise stateless — [signers] is passed in from the same
+ * [com.xbtwallet.app.ui.home.HomeScreenState] the home screen counts, so the two
+ * screens can never disagree about what is saved. The only state it keeps is
+ * local to the interaction: which row's overflow menu is open, and which signer
+ * is waiting on a delete confirmation. Neither outlives the screen, and neither
+ * touches storage — removing a signer is [onDeleteSigner]'s job, on the screen
+ * that owns the store.
+ *
+ * Deletion is a two-step (menu → confirm dialog) on purpose: a watch-only xpub
+ * is the only record of an account on this phone, so a stray tap must not be
+ * able to lose it.
  */
 @Composable
 fun SignersScreen(
     signers: List<Signer>,
     onOpenSigner: (Signer) -> Unit,
+    onAddSigner: () -> Unit,
+    onDeleteSigner: (Signer) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // Which row's "⋮" menu is open, by signer id — one at a time.
+    var menuForId by remember { mutableStateOf<String?>(null) }
+
+    // Which signer is awaiting confirmation, by signer id. Saved across
+    // configuration changes so a rotation does not silently drop the question.
+    var confirmingDeleteId by rememberSaveable { mutableStateOf<String?>(null) }
+
     Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
         Column(
             modifier = Modifier
@@ -51,7 +79,7 @@ fun SignersScreen(
                 .padding(horizontal = 20.dp, vertical = 12.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onBack) { Text("← Back") }
+                TextButton(onClick = onBack) { Text("\u2190 Back") }
                 Spacer(modifier = Modifier.width(4.dp))
                 Text("Signers", style = MaterialTheme.typography.titleLarge)
             }
@@ -59,16 +87,32 @@ fun SignersScreen(
             Spacer(modifier = Modifier.height(8.dp))
 
             if (signers.isEmpty()) {
+                // The empty state does the explaining and offers the way out of
+                // itself, so an empty list is never a dead end.
                 Text(
-                    text = "No signers yet — add one from the home screen.",
+                    text = "No signers yet.",
                     style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Add a signer to watch an account: paste the account xpub " +
+                        "from your air-gapped signer and this phone can see it without " +
+                        "ever holding its keys.",
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Spacer(modifier = Modifier.height(16.dp))
+                Button(
+                    onClick = onAddSigner,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Add signer")
+                }
                 return@Column
             }
 
             Text(
-                text = "Tap a signer to open it.",
+                text = "Tap a signer to open it. Its xpub stays on this phone.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -76,48 +120,104 @@ fun SignersScreen(
             Spacer(modifier = Modifier.height(12.dp))
 
             LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                items(signers.size) { position ->
-                    val signer = signers[position]
-                    SignerRow(signer = signer, onClick = { onOpenSigner(signer) })
+                items(signers, key = { it.id }) { signer ->
+                    SignerRow(
+                        signer = signer,
+                        onClick = { onOpenSigner(signer) },
+                        menuOpen = menuForId == signer.id,
+                        onMenuOpenChange = { open -> menuForId = if (open) signer.id else null },
+                        onRemoveClick = {
+                            menuForId = null
+                            confirmingDeleteId = signer.id
+                        },
+                    )
                 }
             }
         }
     }
+
+    // Resolve the pending id against the current list at render time: if the
+    // signer went away underneath us, there is nothing to confirm and the dialog
+    // simply is not shown.
+    val pendingDelete = confirmingDeleteId?.let { id -> signers.firstOrNull { it.id == id } }
+    if (pendingDelete != null) {
+        AlertDialog(
+            onDismissRequest = { confirmingDeleteId = null },
+            title = { Text("Remove signer?") },
+            text = {
+                Text(
+                    "\u201c${pendingDelete.name}\u201d will be removed from this phone. " +
+                        "Only the public key is stored here, so nothing is deleted on " +
+                        "the signer itself \u2014 you can add it back any time.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmingDeleteId = null
+                        onDeleteSigner(pendingDelete)
+                    },
+                ) {
+                    Text("Remove")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmingDeleteId = null }) { Text("Cancel") }
+            },
+        )
+    }
 }
 
 @Composable
-private fun SignerRow(signer: Signer, onClick: () -> Unit) {
+private fun SignerRow(
+    signer: Signer,
+    onClick: () -> Unit,
+    menuOpen: Boolean,
+    onMenuOpenChange: (Boolean) -> Unit,
+    onRemoveClick: () -> Unit,
+) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(vertical = 10.dp),
+        modifier = Modifier.fillMaxWidth(),
     ) {
-        Column(modifier = Modifier.weight(1f)) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .clickable(onClick = onClick)
+                .padding(vertical = 10.dp),
+        ) {
             Text(text = signer.name, style = MaterialTheme.typography.bodyLarge)
             Spacer(modifier = Modifier.height(2.dp))
-            // Only the fingerprint of the key belongs in a list row; the full
-            // xpub lives on the signer's own screen.
+            // Only the ends of the key belong in a list row; the full xpub lives
+            // on the signer's own screen.
             Text(
-                text = shortXpub(signer),
+                text = (signer.type as? SignerType.WatchOnlyXpub)?.let { shortenedXpub(it.xpub) }.orEmpty(),
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Spacer(modifier = Modifier.width(12.dp))
+        Spacer(modifier = Modifier.width(8.dp))
         TypeBadge(label = signer.typeLabel)
+        Spacer(modifier = Modifier.width(4.dp))
+        Box {
+            // A text glyph rather than an icon dependency: one character keeps
+            // the row's trailing edge calm and adds nothing to the build.
+            TextButton(onClick = { onMenuOpenChange(true) }) {
+                Text("\u22ee", style = MaterialTheme.typography.titleMedium)
+            }
+            DropdownMenu(
+                expanded = menuOpen,
+                onDismissRequest = { onMenuOpenChange(false) },
+            ) {
+                DropdownMenuItem(
+                    text = { Text("Remove signer") },
+                    onClick = onRemoveClick,
+                )
+            }
+        }
     }
 }
-
-/** First [SNIPPET_CHARS] characters of a signer's key, plus an ellipsis. */
-private fun shortXpub(signer: Signer): String {
-    val xpub = (signer.type as? SignerType.WatchOnlyXpub)?.xpub ?: return ""
-    return if (xpub.length <= SNIPPET_CHARS) xpub else xpub.take(SNIPPET_CHARS) + "…"
-}
-
-private const val SNIPPET_CHARS = 16
 
 /** The little "watch-only" pill next to a signer's name. */
 @Composable

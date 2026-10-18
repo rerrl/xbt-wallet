@@ -19,12 +19,13 @@ import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerStore
 import com.xbtwallet.app.ui.home.HomeScreen
 import com.xbtwallet.app.ui.home.rememberHomeScreenState
-import com.xbtwallet.app.ui.importwallet.ImportWalletScreen
-import com.xbtwallet.app.ui.importwallet.rememberImportWalletScreenState
 import com.xbtwallet.app.ui.server.ServerScreen
 import com.xbtwallet.app.ui.server.rememberServerScreenState
+import com.xbtwallet.app.ui.signers.AddSignerScreen
+import com.xbtwallet.app.ui.signers.ImportXpubScreen
 import com.xbtwallet.app.ui.signers.SignerDetailScreen
 import com.xbtwallet.app.ui.signers.SignersScreen
+import com.xbtwallet.app.ui.signers.rememberImportXpubScreenState
 
 /**
  * Screens the app can show.
@@ -42,7 +43,7 @@ import com.xbtwallet.app.ui.signers.SignersScreen
  * argument-taking screens arrive, this is the seam to generalise into a route
  * type with its own `Saver`.
  */
-enum class Screen { HOME, SERVER, SIGNERS, ADD_SIGNER, SIGNER_DETAIL }
+enum class Screen { HOME, SERVER, SIGNERS, ADD_SIGNER, IMPORT_XPUB, SIGNER_DETAIL }
 
 /**
  * The app's navigation and its shared stores.
@@ -56,6 +57,12 @@ enum class Screen { HOME, SERVER, SIGNERS, ADD_SIGNER, SIGNER_DETAIL }
  *
  * There is no active-signer state any more: signers are a plain list, and
  * anything that acts on one acts inside that signer's own screen.
+ *
+ * **The add-signer walk.** [Screen.ADD_SIGNER] is the chooser, and its live
+ * branch steps to [Screen.IMPORT_XPUB] for the paste form; saving lands on
+ * [Screen.SIGNERS] so the new signer is immediately visible where the add most
+ * often starts. That is two edges rather than a wizard, which keeps every screen
+ * a plain `when` branch with one job.
  *
  * **Back handling:** every non-[Screen.HOME] destination returns to HOME. The
  * linear home → list → detail walk is short enough that a single back target is
@@ -119,17 +126,33 @@ fun XbtWalletApp() {
                 signerDetailId = signer.id
                 screen = Screen.SIGNER_DETAIL
             },
+            onAddSigner = { screen = Screen.ADD_SIGNER },
+            onDeleteSigner = { signer: Signer ->
+                // The one place a signer is removed: the screen that owns the
+                // store. Re-read through Home so the list (which renders
+                // Home's snapshot) drops the row immediately, and the detail
+                // screen's id — should it ever still be pointing at this
+                // signer — stops resolving (that branch goes Home).
+                signerStore.delete(signer.id)
+                homeState.refresh()
+            },
             onBack = { screen = Screen.HOME },
         )
 
-        Screen.ADD_SIGNER -> {
-            val state = rememberImportWalletScreenState(signerStore) { _: Signer ->
+        Screen.ADD_SIGNER -> AddSignerScreen(
+            onAddWatchOnly = { screen = Screen.IMPORT_XPUB },
+            onBack = { screen = Screen.HOME },
+        )
+
+        Screen.IMPORT_XPUB -> {
+            val state = rememberImportXpubScreenState(signerStore) { _: Signer ->
                 // Re-read through the store so Home and the Signers list show
-                // the new signer, then land back on Home.
+                // the new signer, then land on the list the signer just joined —
+                // which is where an add started from (the empty state's shortcut).
                 homeState.refresh()
-                screen = Screen.HOME
+                screen = Screen.SIGNERS
             }
-            ImportWalletScreen(state = state, onBack = { screen = Screen.HOME })
+            ImportXpubScreen(state = state, onBack = { screen = Screen.HOME })
         }
 
         Screen.SIGNER_DETAIL -> {
