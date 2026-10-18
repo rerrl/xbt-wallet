@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches XbtBackgroundDark in ui/theme/Color.kt. -->
+    <color name="xbt_background">#FF0B0E11</color>
+    <color name="ic_launcher_background">#FF101418</color>
+</resources>
