@@ -182,7 +182,9 @@ both projects reading the same spec.
 What exists right now, in this repository:
 
 - Android/Kotlin + Compose (Material 3) single-module project, dark theme,
-  Gradle Kotlin DSL, version catalog, state-based navigation (no nav library).
+  Gradle Kotlin DSL, version catalog, state-based navigation (no nav library): a
+  `Screen` enum over a small back stack — push to navigate, pop to go back one
+  level, with each per-signer entry carrying its own signer id (NavStack.kt).
 - A home screen, top to bottom: **Server**, **Add signer** and **Signers**.
   Under the Server button the screen shows live server status — connected /
   disconnected / checking — refreshed by a heartbeat while it is on display.

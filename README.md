@@ -62,6 +62,22 @@ signer" any more: the old active-signer card, the **Select active xpub** picker
 and the standalone **Addresses** button are gone, and per-signer screens
 (addresses included) are reached by opening a signer instead.
 
+## Navigation
+
+Screens are an enum and a `when` — no navigation library (PLAN.md §2.4) — over a
+small **back stack** that makes *back* mean exactly one thing: one level up.
+Navigating pushes a destination onto the stack; Android's back button pops it.
+
+- HOME → **Add signer** → the paste form → back → the chooser → back → HOME.
+- A signer's screen → **UTXOs** (or **Addresses**) → back → that signer's screen.
+
+Each stack entry carries its own argument, so a per-signer screen remembers
+*which* signer it is showing: opening UTXOs from one signer and backing out can
+never leave the app pointing at another. The stack survives a rotation, and back
+at HOME is left to the system (it leaves the app) rather than swallowed. Saving a
+new signer resets the walk to HOME → Signers, so back from the list does not
+return into a form that has already been submitted.
+
 ## Add signer
 
 `Add signer` is a fork, not a form — the screen opens with a plain-language
@@ -110,8 +126,8 @@ and offers an **Add signer** shortcut, so an empty list is never a dead end.
 Each row has a **⋮** menu with *Remove signer*, which opens a confirm dialog
 (name plus the fact that only the public key is stored here, so nothing is
 deleted on the signer itself). Deleting writes straight through the store and the
-list drops the row; if a screen was still pointing at the removed signer — a
-saved detail id — that screen stops resolving and falls back Home rather than
+list drops the row; if a screen was still pointing at the removed signer, its
+stack entry stops resolving and the app restarts at Home rather than
 crashing. The screen keeps only the two bits of interaction state that belong to
 it (which row's menu is open, which signer is awaiting confirmation); the store
 is written on the screen that owns it.
