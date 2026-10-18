@@ -14,9 +14,13 @@ signer-first restructure:
   type, and today the only type is a watch-only xpub. Signers are a plain list
   (there is no "active signer"), and everything that acts on one happens on
   that signer's own screen.
-- **Add signer** — paste an account-level `xpub`/`ypub`/`zpub`, validated
-  clean-room (Base58Check, version bytes, compressed key, checksum) and stored
-  as a watch-only signer.
+- **Add signer** — a chooser: *Add watch-only xpub* leads to the import form,
+  where an account-level `xpub`/`ypub`/`zpub` is validated clean-room
+  (Base58Check, version bytes, compressed key, checksum) and stored as a
+  watch-only signer. *Create hot wallet* is shown disabled — no seed code exists.
+- **Signers list** — every saved signer, oldest first, with its type badge and a
+  head…tail key snippet; tap to open, **⋮** → *Remove signer* (with a confirm
+  dialog) to delete.
 - **Addresses viewer** — derived native-segwit receive/change addresses per
   account key, with the derivation index shown and tap-to-copy. It stays in the
   code and is wired under a signer's own screen in the next card.
@@ -41,18 +45,29 @@ first reply. A saved endpoint is checked as soon as the screen appears and then
 once a minute while it stays on screen; see
 [Private Electrum server](#private-electrum-server).
 
-**Add signer** opens the import screen (the real add-signer flow lands in the
-next card). **Signers** opens the list of saved signers — each shown by its name
-with a *watch-only* type badge — and tapping one opens that signer's own screen.
-There is deliberately no "active signer" any more: the old active-signer card,
-the **Select active xpub** picker and the standalone **Addresses** button are
-gone, and per-signer screens (addresses included) are reached by opening a
-signer instead.
+**Add signer** opens the Add-signer chooser: **Add watch-only xpub** leads to the
+import form, and **Create hot wallet** is shown, greyed out, with the reason it
+does not exist yet. **Signers** opens the list of saved signers — each shown by
+its name, a *watch-only* type badge and a head…tail snippet of its key — and
+tapping one opens that signer's own screen. Each row has a **⋮** menu whose
+*Remove signer* asks for confirmation first. There is deliberately no "active
+signer" any more: the old active-signer card, the **Select active xpub** picker
+and the standalone **Addresses** button are gone, and per-signer screens
+(addresses included) are reached by opening a signer instead.
 
 ## Add signer
 
-`Add signer` on the home screen takes a signer name plus an account-level
-extended public key. The key is validated against the public specifications:
+`Add signer` is a fork, not a form — the two ways to pair with a signer are named
+side by side:
+
+- **Add watch-only xpub** — the live path. It takes a signer name plus an
+  account-level extended public key and stores a watch-only signer.
+- **Create hot wallet** — **disabled**. A signer whose seed would live on the
+  phone is the one thing this app must never have (PLAN.md §2.1), so the option
+  is shown with the explanation *Coming soon — generate a seed on this device*
+  rather than hidden. There is no seed generation code behind it.
+
+The pasted key is validated against the public specifications:
 
 - **Base58Check** — alphabet, then the 4-byte double-SHA256 checksum.
 - **Version bytes** — `xpub`, `ypub` and `zpub` are all accepted, because all
@@ -71,6 +86,24 @@ keyed by id from day one, per PLAN.md's multi-signer stance. An install that
 predates the signer rename had its xpubs under the old `wallets` key; the store
 converts that blob to watch-only signers on first read and writes it forward, so
 no saved xpub is lost.
+
+## Signers
+
+The **Signers** screen is the app's inventory. Every saved signer is listed
+oldest first, by the name the user gave it, with a *watch-only* type badge and a
+snippet of its key — the first 10 and last 6 characters, elided in the middle, so
+two keys are told apart at a glance without an xpub filling the row. Tapping a
+row opens that signer's own screen. When nothing is saved yet the screen says so
+and offers an **Add signer** shortcut, so an empty list is never a dead end.
+
+Each row has a **⋮** menu with *Remove signer*, which opens a confirm dialog
+(name plus the fact that only the public key is stored here, so nothing is
+deleted on the signer itself). Deleting writes straight through the store and the
+list drops the row; if a screen was still pointing at the removed signer — a
+saved detail id — that screen stops resolving and falls back Home rather than
+crashing. The screen keeps only the two bits of interaction state that belong to
+it (which row's menu is open, which signer is awaiting confirmation); the store
+is written on the screen that owns it.
 
 ## Addresses
 
@@ -103,7 +136,7 @@ asserted in `ExtendedPublicKeyTest`, along with the BIP-173 bech32 vectors and
 the published RIPEMD-160 vectors.
 
 ```bash
-./gradlew clean assembleDebug testDebugUnitTest   # 105 unit tests, all green
+./gradlew clean assembleDebug testDebugUnitTest   # 114 unit tests, all green
 ```
 
 ## Private Electrum server

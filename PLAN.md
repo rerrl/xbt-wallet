@@ -186,8 +186,13 @@ What exists right now, in this repository:
 - A home screen, top to bottom: **Server**, **Add signer** and **Signers**.
   Under the Server button the screen shows live server status — connected /
   disconnected / checking — refreshed by a heartbeat while it is on display.
-  Signers are a plain list: there is no "active signer", and per-signer screens
-  (the real add-signer flow, a signer's addresses) arrive in the next card. The
+  Signers are a plain list: there is no "active signer". **Add signer** opens a
+  chooser — *Add watch-only xpub* leads to the paste-and-validate form, and
+  *Create hot wallet* is shown disabled, because a signer whose seed lives on the
+  phone is the one thing this app must never have. The Signers list shows every
+  saved signer oldest first, with its type badge and a head…tail key snippet, and
+  offers a confirm-gated remove per row. A signer's own detail screen (its
+  addresses, its full xpub) is the screen still to come. The
   old active-signer card, **Select active xpub** picker and standalone
   **Addresses** button are gone; the Addresses viewer stays in the tree, to be
   reopened under a signer. The old Receive/Send placeholders are gone.
@@ -205,7 +210,7 @@ What exists right now, in this repository:
 - **Networking**: a clean-room Electrum JSON-RPC client (direct TLS/TCP, no Tor
   yet) used by the private-server screen and, via its quiet `server.ping` probe,
   by the home screen's status heartbeat; no xpub data is fetched with it yet.
-- **Tests**: 105 JVM unit tests, green, including the official BIP-84 and BIP-173
+- **Tests**: 114 JVM unit tests, green, including the official BIP-84 and BIP-173
   vectors and the published RIPEMD-160 vectors.
 
 Not yet: chain data (balances, history, UTXOs), the receive QR flow, gap-limit
