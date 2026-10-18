@@ -176,14 +176,25 @@ both projects reading the same spec.
 
 ---
 
-## 7. Scaffold status (v0)
+## 7. Build status (v0.1.0 in progress)
 
 What exists right now, in this repository:
 
 - Android/Kotlin + Compose (Material 3) single-module project, dark theme,
-  Gradle Kotlin DSL, version catalog.
-- A placeholder home screen: title, a "scaffold v0" line, and three disabled
-  placeholder buttons (Load Wallet / Receive / Send).
-- **No** network code, **no** crypto, **no** database. Nothing is wired up.
+  Gradle Kotlin DSL, version catalog, state-based navigation (no nav library).
+- A home screen with three live actions: **Import Wallet**, **Addresses** and
+  **Server**; Receive and Send are still disabled placeholders.
+- **Crypto** (`com.xbtwallet.app.crypto/`, Android-free): Base58Check, SHA-256 /
+  RIPEMD-160 / HMAC-SHA512, bech32 + bech32m, secp256k1 public-point arithmetic,
+  BIP-32 parsing and public-only child derivation, P2WPKH address building.
+  Public keys only — there is no private-key, seed or signing code path.
+- **Storage** (`com.xbtwallet.app.data/`): a JSON wallet list in
+  SharedPreferences behind a `KeyValueStore` interface, so the store is
+  JVM-testable; plus the Electrum server settings from the previous iteration.
+- **Networking**: a clean-room Electrum JSON-RPC client (direct TLS/TCP, no Tor
+  yet) used by the private-server screen; no wallet data is fetched with it yet.
+- **Tests**: 78 JVM unit tests, green, including the official BIP-84 and BIP-173
+  vectors and the published RIPEMD-160 vectors.
 
-Next step is v0.1.0 (§4).
+Not yet: chain data (balances, history, UTXOs), the receive QR flow, gap-limit
+scanning, descriptors/BIP-380 (the model still stores a bare xpub), and sending.

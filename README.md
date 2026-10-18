@@ -5,11 +5,74 @@ fork), built for GrapheneOS. Keys never touch the phone: the app is a
 coordinator that pairs with an air-gapped signer over animated QR.
 MIT licensed. See [PLAN.md](PLAN.md) for the full plan and roadmap.
 
-Status: **scaffold v0 + first feature** — project skeleton, a home screen, and a
-**private Electrum server** screen: enter host/port, pick SSL or TCP, hit *Test
-connection* and watch the Electrum JSON-RPC handshake in an on-screen log.
-Keys, crypto and the database are still missing, and there is no Tor in this
-iteration (direct IP connections only).
+Status: **v0.1.0 in progress** — the skeleton plus the first three features:
+
+- **Import Wallet** — paste an account-level `xpub`/`ypub`/`zpub`, validated
+  clean-room (Base58Check, version bytes, compressed key, checksum) and stored
+  as one entry in the multi-wallet list.
+- **Addresses** — browse derived native-segwit receive/change addresses per
+  wallet, with the derivation index shown and tap-to-copy.
+- **Private Electrum server** — enter host/port, pick SSL or TCP, hit *Test
+  connection* and watch the Electrum JSON-RPC handshake in an on-screen log.
+
+All crypto is public-key only: no private key, seed or signing code exists
+anywhere in this repository. Balances, history, the receive QR and sending are
+still missing, and there is no Tor in this iteration (direct IP connections
+only).
+
+## Import Wallet
+
+`Import Wallet` on the home screen takes a wallet name plus an account-level
+extended public key. The key is validated against the public specifications:
+
+- **Base58Check** — alphabet, then the 4-byte double-SHA256 checksum.
+- **Version bytes** — `xpub`, `ypub` and `zpub` are all accepted, because all
+  three encode the same secp256k1 public key; they differ only in which script
+  type the exporter had in mind. Private-key headers (`xprv`) and testnet
+  headers (`tpub`) are refused outright.
+- **Key data** — must be a 33-byte compressed point that actually lies on the
+  curve.
+
+This wallet is native-segwit single-sig, so whatever you paste is treated as a
+**BIP-84-style account key** and every address is derived as P2WPKH (`bc1q…`).
+The screen says so, and it warns that a manual import carries no master
+fingerprint or derivation path. Wallets are stored as a JSON list (name, xpub,
+timestamp) in `SharedPreferences` — a list keyed by id from day one, per
+PLAN.md's multi-wallet stance.
+
+## Addresses
+
+`Addresses` (enabled once a wallet exists) shows the addresses derived from the
+selected wallet's account key: external chain `0/i` under the **Receive** tab
+and internal chain `1/i` under **Change**, both native segwit P2WPKH. Each row
+shows its derivation index; the first 20 per tab are listed, with *Show 20 more*
+to extend. Tap a row to copy the address. There is no gap-limit logic yet —
+nothing is fetched from the chain, so the wallet cannot tell which addresses
+have been used.
+
+## Crypto layer
+
+Everything under `app/src/main/java/com/xbtwallet/app/crypto/` is Android-free
+and unit-tested on the JVM against published vectors:
+
+| File | What it does |
+| --- | --- |
+| `Base58.kt` | Base58 + Base58Check encode/decode |
+| `Hashes.kt`, `Ripemd160.kt` | SHA-256, HMAC-SHA512, RIPEMD-160 (`HASH160`) |
+| `Bech32.kt` | bech32 / bech32m (BIP-173, BIP-350) |
+| `Secp256k1.kt` | public point add/multiply, compressed (de)serialisation |
+| `ExtendedPublicKey.kt` | BIP-32 parsing + public child derivation (CKDpub) |
+| `SegwitAddress.kt` | `bc1q…` address building |
+| `XpubImport.kt` | validation seam + the inline error wording |
+
+There is no function in that package that consumes a private key. The BIP-84
+test vector (`zpub6rFR7y4Q…` → `bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu`) is
+asserted in `ExtendedPublicKeyTest`, along with the BIP-173 bech32 vectors and
+the published RIPEMD-160 vectors.
+
+```bash
+./gradlew clean assembleDebug testDebugUnitTest   # 78 unit tests, all green
+```
 
 ## Private Electrum server
 
