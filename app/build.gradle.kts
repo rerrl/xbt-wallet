@@ -54,6 +54,7 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
+    implementation(libs.kotlinx.coroutines.android)
 
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.ui)
@@ -62,4 +63,8 @@ dependencies {
     implementation(libs.androidx.material3)
 
     debugImplementation(libs.androidx.ui.tooling)
+
+    // JVM unit tests: the Electrum client is Android-free on purpose so it can
+    // be driven against a mock server here (see app/src/test).
+    testImplementation(libs.junit)
 }
