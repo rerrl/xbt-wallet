@@ -120,11 +120,15 @@ The pasted key is validated against the public specifications:
 The app is native-segwit single-sig, so whatever you paste is treated as a
 **BIP-84-style account key** and every address is derived as P2WPKH (`bc1q…`).
 A key on the signer's screen can also be **scanned**: the *Scan QR* button above
-the field reads it with ZXing (`zxing-android-embedded`, Apache-2.0, no Google
-dependency) and routes the payload — a bare key, or a `bitcoin:` URI with its
-scheme and parameters stripped — into that same field and the same validator, so
-a scan can never be accepted where a paste would be refused. Pasting works
-whether or not the camera permission is granted.
+the field opens a small camera **panel** right there on the import screen — not a
+full-screen capture activity, and always in portrait like the rest of the app —
+and routes the payload — a bare key, or a `bitcoin:` URI with its scheme and
+parameters stripped — into that same field and the same validator, so a scan can
+never be accepted where a paste would be refused. The camera is ZXing
+(`zxing-android-embedded`, Apache-2.0, no Google dependency) driving the
+library's `DecoratedBarcodeView` inside the app's own activity. Pasting works
+whether or not the camera permission is granted; a refusal says so and leaves the
+field usable.
 The screen says so, and it warns that a manual import carries no master
 fingerprint or derivation path. Signers are stored as a JSON list (id, name,
 type, xpub, timestamp) under the `signers` key in `SharedPreferences` — a list

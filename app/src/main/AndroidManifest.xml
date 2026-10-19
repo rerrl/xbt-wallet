@@ -29,10 +29,13 @@
       merged in; the app only needs to bind it, which MainActivity's TorGateway
       installation arranges. No Orbot, no cross-app intent.
 
-      The scan UI comes from com.journeyapps:zxing-android-embedded, whose
-      CaptureActivity is likewise merged in from the library's manifest; the
-      scanner is launched with the ScanContract result launcher from
-      ImportXpubScreen, so the app declares no activity of its own for it.
+      The scanner comes from com.journeyapps:zxing-android-embedded, but its
+      CaptureActivity is never launched: the camera is an embedded panel on the
+      import screen (ui/signers/XpubQrScanner.kt), built from the library's
+      DecoratedBarcodeView inside this app's own portrait activity. The library's
+      merged-in CaptureActivity entry is therefore unused, and the app declares
+      no activity of its own for scanning — in particular none with a
+      screenOrientation, so nothing here can force landscape.
     -->
 
     <application

@@ -14,9 +14,10 @@ junit = "4.13.2"
 # is fine for this app's 26. Pulls jtorctl for the Tor control connection.
 torAndroid = "0.4.9.6"
 # QR decoding for the xpub scanner. journeyapps' wrapper around the ZXing core
-# decoder; it supplies the CaptureActivity and the ScanContract launcher so this
-# app owns none of the camera plumbing. Chosen over CameraX + ML Kit because it
-# is Apache-2.0, pulls in no Google Play services (it is the same ZXing engine
+# decoder; this app embeds its DecoratedBarcodeView directly as a small portrait
+# panel on the import screen, so no activity of ours is involved and no
+# full-screen capture UI is ever launched. Chosen over CameraX + ML Kit because
+# it is Apache-2.0, pulls in no Google Play services (it is the same ZXing engine
 # that will decode the animated-QR PSBT frames later), and adds one artifact
 # instead of three. com.google.zxing:core comes along transitively.
 zxingEmbedded = "4.3.0"

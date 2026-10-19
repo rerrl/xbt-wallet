@@ -1,5 +1,7 @@
 package com.xbtwallet.app.ui.signers
 
+import android.Manifest
+import android.content.pm.PackageManager
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -30,8 +32,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.activity.compose.rememberLauncherForActivityResult
-import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import com.xbtwallet.app.crypto.XpubImport
 import com.xbtwallet.app.crypto.XpubScanRoute
 import com.xbtwallet.app.crypto.validateXpubInput
@@ -70,6 +73,26 @@ class ImportXpubScreenState(
     var recognisedVersion by mutableStateOf<String?>(null)
         private set
 
+    /**
+     * Whether the embedded scanner panel is on screen.
+     *
+     * The panel is part of this screen, not a separate activity, so "is the
+     * scanner up" is screen state like any other — and, being plain state, it is
+     * testable without a camera.
+     */
+    var showScanner by mutableStateOf(false)
+        private set
+
+    /**
+     * Whether the user refused the CAMERA permission.
+     *
+     * Kept so the screen can say why the button did nothing and offer a retry,
+     * without ever taking the paste path away: a wallet must be importable on a
+     * device whose camera is denied or absent.
+     */
+    var cameraDenied by mutableStateOf(false)
+        private set
+
     /** The parsed key, or null while the field is empty or invalid. */
     private var parsedKey: XpubImport.Valid? = null
 
@@ -87,6 +110,36 @@ class ImportXpubScreenState(
     fun onXpubChange(value: String) {
         xpub = value
         revalidate(showError = submitAttempted)
+    }
+
+    /**
+     * The CAMERA permission is held — either it was already granted or the
+     * system dialog just came back positive. Opens the embedded panel.
+     *
+     * Any earlier denial is cleared here so the hint disappears the moment the
+     * user gets the permission, rather than lingering behind a working scanner.
+     */
+    fun onCameraPermissionGranted() {
+        cameraDenied = false
+        showScanner = true
+    }
+
+    /**
+     * The user refused the camera. The panel never opens; the screen shows the
+     * paste-is-still-available hint instead.
+     */
+    fun onCameraPermissionDenied() {
+        cameraDenied = true
+    }
+
+    /**
+     * Dismisses the panel (Cancel, or the caller hiding it after a scan).
+     *
+     * Nothing in the field is touched: a cancelled scan must leave whatever the
+     * user had typed exactly as it was.
+     */
+    fun onScannerDismissed() {
+        showScanner = false
     }
 
     /** Validates and, when everything checks out, stores a new watch-only signer. */
@@ -158,6 +211,10 @@ fun rememberImportXpubScreenState(
  * which is also what makes the wallet usable when camera permission is refused
  * or the device has no camera.
  *
+ * Scanning is an embedded panel, not a screen of its own: [XpubQrScannerPanel]
+ * opens inline in this column, in portrait, and leaves the field visible below
+ * it. Nothing here launches the scanner library's full-screen activity.
+ *
  * The fields validate inline (via the shared [validateXpubInput] seam, not a
  * copy of it) and the save is refused until the name is set and the key parses.
  */
@@ -167,12 +224,31 @@ fun ImportXpubScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // The scanner is a result launcher, not a separate screen owned here: the
-    // library's CaptureActivity runs the camera and the library's scan flow asks
-    // for CAMERA itself. A cancelled scan reports null contents and is ignored,
-    // leaving whatever the user had already typed in the field.
-    val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
-        result.contents?.let { payload -> state.onXpubChange(XpubScanRoute.extract(payload)) }
+    val context = LocalContext.current
+
+    // CAMERA is asked for by this app, not by the scanner library: the panel is
+    // our own composable and it can only work with the permission in hand. A
+    // granted request opens the panel; a refusal is remembered so the screen can
+    // explain itself. The paste path below is untouched either way.
+    val scanPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) state.onCameraPermissionGranted() else state.onCameraPermissionDenied()
+    }
+
+    // "Scan QR" and "Try again" do the same thing: with the permission already
+    // held, open the panel at once (no pointless dialog); otherwise ask for it.
+    // The request is pending only for as long as the system dialog is up — its
+    // answer arrives in the launcher callback above — so no flag has to outlive
+    // it.
+    val pendingScanRequest: () -> Unit = {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            state.onCameraPermissionGranted()
+        } else {
+            scanPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
     }
 
     Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
@@ -217,24 +293,45 @@ fun ImportXpubScreen(
             Spacer(modifier = Modifier.height(16.dp))
 
             // Scanning and pasting fill the same field, so the button sits right
-            // on top of it rather than leading to a screen of its own.
+            // on top of it rather than leading to a screen of its own — and the
+            // scanner, when it opens, opens right here.
             OutlinedButton(
-                onClick = {
-                    scanLauncher.launch(
-                        ScanOptions().apply {
-                            setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                            setPrompt("Scan the account xpub QR")
-                            setBeepEnabled(false)
-                            setOrientationLocked(false)
-                        },
-                    )
-                },
+                onClick = pendingScanRequest,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("Scan QR")
             }
 
+            if (state.cameraDenied) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Camera permission is needed to scan \u2014 you can still paste the key below.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextButton(onClick = pendingScanRequest) { Text("Try again") }
+            }
+
             Spacer(modifier = Modifier.height(12.dp))
+
+            // The scanner is a panel inside this column, directly above the field
+            // it fills: portrait — nothing here locks orientation, so it inherits
+            // the activity's — small, and scrolled with the rest of the screen. A
+            // scan is routed by XpubScanRoute and lands in the field through the
+            // same onXpubChange a paste uses, so the camera can never accept a key
+            // the keyboard would refuse.
+            if (state.showScanner) {
+                XpubQrScannerPanel(
+                    onResult = { payload ->
+                        state.onXpubChange(XpubScanRoute.extract(payload))
+                        state.onScannerDismissed()
+                    },
+                    onCancel = state::onScannerDismissed,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+            }
 
             OutlinedTextField(
                 value = state.xpub,
