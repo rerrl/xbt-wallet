@@ -215,8 +215,10 @@ private fun TransactionRowItem(transaction: TransactionRow) {
 
 /**
  * The confirmation count as a small badge: red for unconfirmed, amber for the
- * shallow 1–5 range, green once a transaction is six blocks deep (labelled
- * `6+ confs`, because the exact depth stops mattering at that point).
+ * shallow 1–5 range, green once a transaction is six blocks deep. The text comes
+ * from [confirmationLabel] and carries the real depth up to 99, then caps at
+ * `100+ confs`, because past that the exact count stops mattering (and a wider
+ * badge would break the row).
  */
 @Composable
 private fun ConfirmationBadge(confirmations: Int) {
