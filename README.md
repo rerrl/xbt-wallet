@@ -41,10 +41,10 @@ signer-first restructure:
 - **Addresses viewer** — derived native-segwit receive/change addresses per
   account key, now annotated with on-chain usage: *used*, *unused*, or the
   highlighted *first unused*.
-- **Private Electrum server** — enter host/port, pick SSL or TCP, hit *Test
-  connection* and watch the Electrum JSON-RPC handshake in an on-screen log. A
-  host ending in `.onion` is routed through the app's **bundled Tor** (no Orbot);
-  any other host is dialled directly.
+- **Private Electrum server** — enter host/port, flip the **Use SSL** switch,
+  hit *Test connection* and watch the Electrum JSON-RPC handshake in an on-screen
+  log. A host ending in `.onion` is routed through the app's **bundled Tor** (no
+  Orbot); any other host is dialled directly.
 
 All crypto is public-key only: no private key, seed or signing code exists
 anywhere in this repository. The receive QR and sending are
@@ -119,6 +119,12 @@ The pasted key is validated against the public specifications:
 
 The app is native-segwit single-sig, so whatever you paste is treated as a
 **BIP-84-style account key** and every address is derived as P2WPKH (`bc1q…`).
+A key on the signer's screen can also be **scanned**: the *Scan QR* button above
+the field reads it with ZXing (`zxing-android-embedded`, Apache-2.0, no Google
+dependency) and routes the payload — a bare key, or a `bitcoin:` URI with its
+scheme and parameters stripped — into that same field and the same validator, so
+a scan can never be accepted where a paste would be refused. Pasting works
+whether or not the camera permission is granted.
 The screen says so, and it warns that a manual import carries no master
 fingerprint or derivation path. Signers are stored as a JSON list (id, name,
 type, xpub, timestamp) under the `signers` key in `SharedPreferences` — a list
