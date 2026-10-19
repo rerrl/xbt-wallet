@@ -13,14 +13,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -35,8 +34,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -46,13 +46,18 @@ import androidx.compose.foundation.text.KeyboardOptions
 import com.xbtwallet.app.data.ServerSettingsStore
 import com.xbtwallet.app.electrum.ElectrumClient
 import com.xbtwallet.app.electrum.ElectrumProtocol
+import com.xbtwallet.app.electrum.ElectrumRouting
 import com.xbtwallet.app.electrum.ElectrumServer
 import com.xbtwallet.app.ui.theme.XbtWalletTheme
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+/** How long the "Copied N lines" confirmation stays on screen. */
+private const val COPIED_NOTICE_MILLIS: Long = 2_000L
 
 /** Outcome of the most recent connection test. */
 enum class ConnectionStatus { IDLE, TESTING, CONNECTED, FAILED }
@@ -61,6 +66,9 @@ enum class ConnectionStatus { IDLE, TESTING, CONNECTED, FAILED }
  * State behind the Server screen: the endpoint being edited plus the scrolling
  * connection log. Held outside the composable so the log survives recomposition
  * while a test is running.
+ *
+ * Transport is one switch, not a protocol list — see [ServerSsl] for the rules
+ * that keep the port field in step with it.
  */
 @Stable
 class ServerScreenState(
@@ -76,8 +84,25 @@ class ServerScreenState(
     var port by mutableStateOf(stored.port.toString())
         private set
 
-    var protocol by mutableStateOf(stored.protocol)
+    /**
+     * The single transport decision the screen exposes, shown as a **Use SSL**
+     * switch. It is derived from the stored protocol and written back through
+     * [ServerSsl.protocolFor], so the persisted shape is unchanged.
+     */
+    var useSsl by mutableStateOf(ServerSsl.useSslFor(stored.protocol))
         private set
+
+    /**
+     * Whether [port] is the user's own number rather than the convention default
+     * for the current switch position. A custom port must not be rewritten when
+     * the transport changes.
+     */
+    var portCustomized by mutableStateOf(ServerSsl.isCustomPort(stored.port.toString(), useSsl))
+        private set
+
+    /** The protocol matching the switch — what is dialled and stored. */
+    val protocol: ElectrumProtocol
+        get() = ServerSsl.protocolFor(useSsl)
 
     /** One line per log entry, oldest first. */
     val log = mutableStateListOf<String>()
@@ -99,14 +124,18 @@ class ServerScreenState(
 
     fun onPortChange(value: String) {
         port = value.filter { it.isDigit() }.take(5)
+        portCustomized = ServerSsl.isCustomPort(port, useSsl)
         persist()
     }
 
-    /** Switches transport; the port follows along while it is still a default. */
-    fun onProtocolChange(value: ElectrumProtocol) {
-        val portWasDefault = port.toIntOrNull() == protocol.defaultPort
-        protocol = value
-        if (portWasDefault) port = value.defaultPort.toString()
+    /**
+     * Flips the transport. The port follows along only while it is still a
+     * convention default; a number the user typed is theirs and stays put.
+     */
+    fun onUseSslChange(value: Boolean) {
+        if (value == useSsl) return
+        if (!portCustomized) port = ServerSsl.portAfterToggle(port, value, wasCustom = false)
+        useSsl = value
         persist()
     }
 
@@ -124,6 +153,7 @@ class ServerScreenState(
 
         val host = host.trim()
         val portNumber = port.toIntOrNull()
+        val onionProblem = ElectrumRouting.onionAddressProblem(host)
         when {
             host.isEmpty() -> {
                 inputError = "Enter a host or IP address."
@@ -131,6 +161,18 @@ class ServerScreenState(
             }
             portNumber == null || portNumber !in 1..65535 -> {
                 inputError = "Enter a port between 1 and 65535."
+                return
+            }
+            onionProblem != null -> {
+                // Refused before Tor is even started: an address Tor cannot
+                // serve would come back as an opaque "SOCKS server general
+                // failure" from the proxy, which tells the user nothing.
+                inputError = null
+                log.clear()
+                appendLog("xbt-wallet \u2014 private Electrum connection test")
+                appendLog("target: $host:$portNumber (${protocol.label})")
+                appendLog("\u2717 connection test refused: $onionProblem")
+                status = ConnectionStatus.FAILED
                 return
             }
             else -> inputError = null
@@ -145,7 +187,13 @@ class ServerScreenState(
         appendLog("handshake: server.version ${ElectrumClient.PROTOCOL_VERSION}, then server.features, server.banner")
 
         val server = ElectrumServer(host = host, port = portNumber, protocol = protocol)
+        if (ElectrumRouting.isOnionHost(host)) {
+            appendLog("route: .onion host \u2014 the bundled Tor starts before the socket is dialled")
+        }
         scope.launch {
+            // The default transport routes `.onion` through the bundled Tor and
+            // everything else directly; this is the same client the signer scan
+            // uses, so both paths are one code path.
             val client = ElectrumClient(server = server, log = ::appendLog)
             val connected = client.testConnection()
             status = if (connected) ConnectionStatus.CONNECTED else ConnectionStatus.FAILED
@@ -166,7 +214,7 @@ class ServerScreenState(
         store.save(
             ElectrumServer(
                 host = host.trim(),
-                port = port.toIntOrNull() ?: protocol.defaultPort,
+                port = port.toIntOrNull() ?: ServerSsl.defaultPortFor(useSsl),
                 protocol = protocol,
             ),
         )
@@ -187,8 +235,13 @@ fun rememberServerScreenState(store: ServerSettingsStore): ServerScreenState {
 
 /**
  * "Private Electrum" screen modeled on Sparrow/Shrike's UX: a single private
- * server (no server list, no public servers, no Tor in this iteration) and a
- * visible log of the handshake — the log is the point.
+ * server (no server list, no public servers) and a visible log of the handshake
+ * — the log is the point.
+ *
+ * Tor is not a toggle. A host ending in `.onion` is routed through the app's
+ * bundled Tor daemon automatically; a clearnet host is dialled directly. The
+ * log says which route was taken, and Tor's bootstrap progress appears in it
+ * while a cold start is in flight.
  */
 @Composable
 fun ServerScreen(
@@ -196,6 +249,7 @@ fun ServerScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val onion = ElectrumRouting.isOnionHost(state.host)
     Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
         Column(
             modifier = Modifier
@@ -215,7 +269,9 @@ fun ServerScreen(
             Spacer(modifier = Modifier.height(4.dp))
 
             Text(
-                text = "Direct connection only \u2014 no Tor in this build.",
+                text = "Enter a host or IP. An .onion address is routed through the " +
+                    "built-in Tor automatically \u2014 no Orbot needed; any other host is " +
+                    "dialled directly.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -226,10 +282,29 @@ fun ServerScreen(
                 value = state.host,
                 onValueChange = state::onHostChange,
                 label = { Text("Host or IP") },
-                placeholder = { Text("192.168.1.10") },
+                placeholder = { Text("192.168.1.10 or example.onion") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
+
+            if (onion) {
+                Spacer(modifier = Modifier.height(6.dp))
+                val problem = ElectrumRouting.onionAddressProblem(state.host)
+                if (problem != null) {
+                    // Refused, not just warned: "Test connection" will not dial.
+                    Text(
+                        text = problem,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                } else {
+                    Text(
+                        text = "Onion host \u2014 this connection goes through the bundled Tor.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF4CAF50),
+                    )
+                }
+            }
 
             Spacer(modifier = Modifier.height(12.dp))
 
@@ -249,32 +324,21 @@ fun ServerScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "Protocol",
+                    text = "Use SSL",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Spacer(modifier = Modifier.width(12.dp))
-                ElectrumProtocol.entries.forEach { option ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.selectable(
-                            selected = state.protocol == option,
-                            role = Role.RadioButton,
-                            onClick = { state.onProtocolChange(option) },
-                        ),
-                    ) {
-                        RadioButton(
-                            selected = state.protocol == option,
-                            onClick = null,
-                        )
-                        Text(
-                            text = "${option.label} :${option.defaultPort}",
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                    }
-                }
+                Spacer(modifier = Modifier.weight(1f))
+                Switch(
+                    checked = state.useSsl,
+                    onCheckedChange = state::onUseSslChange,
+                )
             }
+            Text(
+                text = "TLS on the port you enter \u2014 works for a clearnet host and a " +
+                    ".onion alike.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
 
             state.inputError?.let { error ->
                 Spacer(modifier = Modifier.height(8.dp))
@@ -287,6 +351,15 @@ fun ServerScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
+            val clipboard = LocalClipboardManager.current
+            var copiedNotice by remember { mutableStateOf<String?>(null) }
+            LaunchedEffect(copiedNotice) {
+                if (copiedNotice != null) {
+                    delay(COPIED_NOTICE_MILLIS)
+                    copiedNotice = null
+                }
+            }
+
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Button(
                     onClick = state::testConnection,
@@ -298,6 +371,27 @@ fun ServerScreen(
                 TextButton(onClick = state::clearLog, enabled = state.log.isNotEmpty()) {
                     Text("Clear log")
                 }
+                Spacer(modifier = Modifier.width(4.dp))
+                TextButton(
+                    onClick = {
+                        // The whole log, timestamps included, in the order it is
+                        // shown — that is what a bug report needs.
+                        clipboard.setText(AnnotatedString(state.log.joinToString("\n")))
+                        copiedNotice = "Copied ${state.log.size} lines"
+                    },
+                    enabled = state.log.isNotEmpty(),
+                ) {
+                    Text("Copy log")
+                }
+            }
+
+            copiedNotice?.let { notice ->
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = notice,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF2E7D32),
+                )
             }
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -318,10 +412,14 @@ private fun StatusRow(state: ServerScreenState) {
             CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
             Spacer(modifier = Modifier.width(8.dp))
         }
+        val onion = ElectrumRouting.isOnionHost(state.host)
         val (label, color) = when (state.status) {
             ConnectionStatus.IDLE -> "Not tested yet" to MaterialTheme.colorScheme.onSurfaceVariant
-            ConnectionStatus.TESTING -> "Testing\u2026" to MaterialTheme.colorScheme.onSurfaceVariant
-            ConnectionStatus.CONNECTED -> "Connected" to Color(0xFF2E7D32)
+            ConnectionStatus.TESTING ->
+                (if (onion) "Bootstrapping Tor and testing\u2026" else "Testing\u2026") to
+                    MaterialTheme.colorScheme.onSurfaceVariant
+            ConnectionStatus.CONNECTED ->
+                (if (onion) "Connected through Tor" else "Connected") to Color(0xFF2E7D32)
             ConnectionStatus.FAILED -> "Failed \u2014 see log" to MaterialTheme.colorScheme.error
         }
         Text(

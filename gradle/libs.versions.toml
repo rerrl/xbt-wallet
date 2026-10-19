@@ -7,6 +7,20 @@ activityCompose = "1.11.0"
 composeBom = "2025.12.01"
 coroutines = "1.9.0"
 junit = "4.13.2"
+# Bundled Tor daemon (native tor + TorService), actively maintained by the
+# Guardian Project. 0.4.9.6 is the newest release whose AAR metadata allows
+# compileSdk 36: every later 0.4.9.x build requires compileSdk 37, and this
+# project builds against 36 (the maximum AGP 8.13 supports). minSdk 24, so it
+# is fine for this app's 26. Pulls jtorctl for the Tor control connection.
+torAndroid = "0.4.9.6"
+# QR decoding for the xpub scanner. journeyapps' wrapper around the ZXing core
+# decoder; this app embeds its DecoratedBarcodeView directly as a small portrait
+# panel on the import screen, so no activity of ours is involved and no
+# full-screen capture UI is ever launched. Chosen over CameraX + ML Kit because
+# it is Apache-2.0, pulls in no Google Play services (it is the same ZXing engine
+# that will decode the animated-QR PSBT frames later), and adds one artifact
+# instead of three. com.google.zxing:core comes along transitively.
+zxingEmbedded = "4.3.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -20,6 +34,8 @@ androidx-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-toolin
 androidx-material3 = { group = "androidx.compose.material3", name = "material3" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
+tor-android = { group = "info.guardianproject", name = "tor-android", version.ref = "torAndroid" }
+zxing-android-embedded = { group = "com.journeyapps", name = "zxing-android-embedded", version.ref = "zxingEmbedded" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

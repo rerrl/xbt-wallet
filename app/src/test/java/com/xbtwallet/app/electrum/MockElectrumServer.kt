@@ -32,8 +32,18 @@ class MockElectrumServer(
 
     /** What the mock should answer with. */
     sealed interface Reply {
-        /** `{"id":…,"result":<value>}` */
-        data class Result(val value: Any?) : Reply
+        /**
+         * `{"id":…,"result":<value>}`
+         *
+         * [precedingNotifications] are written as raw lines first — used to
+         * simulate the unsolicited notifications a subscription RPC (such as
+         * `blockchain.headers.subscribe`) produces, which a client must not
+         * mistake for the reply.
+         */
+        data class Result(
+            val value: Any?,
+            val precedingNotifications: List<String> = emptyList(),
+        ) : Reply
 
         /** `{"id":…,"error":{"code":…,"message":…}}` */
         data class Error(val code: Int, val message: String) : Reply
@@ -105,7 +115,13 @@ class MockElectrumServer(
                 val method = fields["method"] as? String ?: ""
                 val params = (fields["params"] as? List<*>)?.toList<Any?>() ?: emptyList()
                 val payload = when (val reply = respond(method, params, id)) {
-                    is Reply.Result -> linkedMapOf<String, Any?>("id" to id, "result" to reply.value)
+                    is Reply.Result -> {
+                        reply.precedingNotifications.forEach { line ->
+                            writer.write(line)
+                            writer.write("\n")
+                        }
+                        linkedMapOf<String, Any?>("id" to id, "result" to reply.value)
+                    }
                     is Reply.Error -> linkedMapOf<String, Any?>(
                         "id" to id,
                         "error" to linkedMapOf<String, Any?>("code" to reply.code, "message" to reply.message),
@@ -141,11 +157,18 @@ class MockElectrumServer(
          * @param history per-scripthash `get_history` entries (see [historyEntry]).
          * @param balances per-scripthash `(confirmed, unconfirmed)` satoshis.
          * @param unspent per-scripthash `listunspent` entries (see [unspentEntry]).
+         * @param transactions raw transaction hex, by txid — what
+         *   `blockchain.transaction.get` answers. A txid not listed is answered
+         *   as an RPC error, which is what a server does for a transaction it
+         *   does not know.
+         * @param tipHeight the height `blockchain.headers.subscribe` reports.
          */
         fun scripted(
             history: Map<String, List<Any?>> = emptyMap(),
             balances: Map<String, Pair<Long, Long>> = emptyMap(),
             unspent: Map<String, List<Any?>> = emptyMap(),
+            transactions: Map<String, String> = emptyMap(),
+            tipHeight: Int = 800_000,
         ): MockElectrumServer = MockElectrumServer { method, params, _ ->
             val scripthash = params.firstOrNull() as? String ?: ""
             when (method) {
@@ -161,6 +184,12 @@ class MockElectrumServer(
 
                 "blockchain.scripthash.listunspent" ->
                     Reply.Result(unspent[scripthash] ?: emptyList<Any?>())
+
+                "blockchain.transaction.get" -> transactions[scripthash]?.let { Reply.Result(it) }
+                    ?: Reply.Error(-32601, "unknown transaction $scripthash")
+
+                "blockchain.headers.subscribe" ->
+                    Reply.Result(linkedMapOf<String, Any?>("height" to tipHeight, "hex" to "00"))
 
                 else -> Reply.Error(-32601, "unknown method $method")
             }

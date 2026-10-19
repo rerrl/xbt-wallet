@@ -1,10 +1,6 @@
 package com.xbtwallet.app.ui.signers
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
-import android.widget.Toast
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -21,23 +17,31 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
-import com.xbtwallet.app.chain.ScannedTransaction
+import com.xbtwallet.app.chain.ConfirmationBucket
+import com.xbtwallet.app.chain.TransactionDirection
+import com.xbtwallet.app.chain.TransactionRow
+import com.xbtwallet.app.chain.confirmationBucket
+import com.xbtwallet.app.chain.confirmationLabel
 import kotlinx.coroutines.launch
 
 /**
  * The **Transactions** section on the signer detail screen.
  *
- * It renders the list [com.xbtwallet.app.chain.aggregateTransactions] built from
+ * It renders the list [com.xbtwallet.app.chain.buildTransactionRows] built from
  * the same gap-limit scan the balance above it comes from — same server, same
- * connection, no extra RPC and no second scan. Because the section is a
- * subordinate panel inside the scrollable detail screen, it does *not* use the
- * full-screen [ScanStateBody] gate: it mirrors the signer screen's phase machine
- * compactly instead. Loading is the scan's own progress, the empty case says so
- * plainly, and a failed scan shows the same kind of short error line the Retry
- * pattern uses rather than crashing or inventing an empty list.
+ * connection, no second scan. Because the section is a subordinate panel inside
+ * the scrollable detail screen, it does *not* use the full-screen [ScanStateBody]
+ * gate: it mirrors the signer screen's phase machine compactly instead. Loading
+ * is the scan's own progress, the empty case says so plainly, and a failed scan
+ * shows the same kind of short error line the Retry pattern uses rather than
+ * crashing or inventing an empty list.
+ *
+ * Each row is the wallet's net effect — value in minus value out, change
+ * excluded from the "out" side — with a confirmation badge; see
+ * [TransactionRowItem]. Rows are static: no tap target, no detail view.
  *
  * The list is capped at [MAX_TRANSACTIONS] rows, with a line saying so when the
  * account has more — a watch-only coordinator with years of history should not
@@ -111,7 +115,7 @@ private fun TransactionsFailed(state: SignerChainState) {
 }
 
 @Composable
-private fun TransactionsList(transactions: List<ScannedTransaction>) {
+private fun TransactionsList(transactions: List<TransactionRow>) {
     if (transactions.isEmpty()) {
         Text(
             text = "No transactions yet",
@@ -131,7 +135,7 @@ private fun TransactionsList(transactions: List<ScannedTransaction>) {
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        shown.forEach { transaction -> TransactionRow(transaction) }
+        shown.forEach { transaction -> TransactionRowItem(transaction) }
         if (transactions.size > shown.size) {
             Text(
                 text = "Showing the latest ${shown.size} of ${transactions.size} transactions.",
@@ -143,39 +147,42 @@ private fun TransactionsList(transactions: List<ScannedTransaction>) {
 }
 
 /**
- * One transaction: the truncated txid (monospace) with its confirmation under
- * it. Tapping copies the full txid — the same one-line platform clipboard call
- * the address viewer uses, no extra dependency.
+ * One transaction row: the wallet's net effect on the left (green when value
+ * came in, red when it went out), a confirmation badge on the right, and the
+ * truncated txid underneath in monospace.
  *
- * There is deliberately no incoming/outgoing arrow: neither `get_history` nor
- * `listunspent` can tell a send from a receive without fetching the transaction
- * (a send with change looks exactly like a receive in `listunspent`), and the
- * card says to omit an arrow that is not cheaply derivable. See
- * [com.xbtwallet.app.chain.aggregateTransactions].
+ * The row is deliberately **not** interactive. The previous iteration made it
+ * tap-to-copy; this one shows an amount, and a tap that copies a txid underneath
+ * a number a user might be trying to read is a trap. There is no detail view to
+ * expand into either — the card keeps rows at a glance.
  */
 @Composable
-private fun TransactionRow(transaction: ScannedTransaction) {
-    val context = LocalContext.current
+private fun TransactionRowItem(transaction: TransactionRow) {
+    val tint = when (transaction.direction) {
+        TransactionDirection.IN -> IncomingGreen
+        TransactionDirection.OUT -> OutgoingRed
+        TransactionDirection.NEUTRAL -> NeutralGrey
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable {
-                copyToClipboard(context, transaction.txHash)
-                Toast.makeText(context, "Transaction id copied", Toast.LENGTH_SHORT).show()
-            }
-            .padding(vertical = 4.dp),
+            .background(tint.copy(alpha = 0.10f), MaterialTheme.shapes.small)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
     ) {
-        Text(
-            text = shortenedMiddle(transaction.txHash),
-            style = MaterialTheme.typography.bodyMedium,
-            fontFamily = FontFamily.Monospace,
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = transactionAmountLabel(transaction.netSatoshis),
+                style = MaterialTheme.typography.bodyMedium,
+                fontFamily = FontFamily.Monospace,
+                color = tint,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            ConfirmationBadge(transaction.confirmations)
+        }
         Spacer(modifier = Modifier.height(2.dp))
         Text(
-            text = buildString {
-                append(if (transaction.confirmed) "height ${formatSats(transaction.height.toLong())}" else "unconfirmed")
-                append("   \u00b7   tap to copy")
-            },
+            text = shortenedMiddle(transaction.txHash),
             style = MaterialTheme.typography.bodySmall,
             fontFamily = FontFamily.Monospace,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -183,11 +190,34 @@ private fun TransactionRow(transaction: ScannedTransaction) {
     }
 }
 
+/**
+ * The confirmation count as a small badge: red for unconfirmed, amber for the
+ * shallow 1–5 range, green once a transaction is six blocks deep (labelled
+ * `6+ confs`, because the exact depth stops mattering at that point).
+ */
+@Composable
+private fun ConfirmationBadge(confirmations: Int) {
+    val color = when (confirmationBucket(confirmations)) {
+        ConfirmationBucket.UNCONFIRMED -> OutgoingRed
+        ConfirmationBucket.SHALLOW -> PendingAmber
+        ConfirmationBucket.SETTLED -> IncomingGreen
+    }
+    Text(
+        text = confirmationLabel(confirmations),
+        style = MaterialTheme.typography.labelSmall,
+        fontFamily = FontFamily.Monospace,
+        color = color,
+        modifier = Modifier
+            .background(color.copy(alpha = 0.14f), MaterialTheme.shapes.small)
+            .padding(horizontal = 6.dp, vertical = 2.dp),
+    )
+}
+
 /** How many transactions the section lays out before it stops and says so. */
 private const val MAX_TRANSACTIONS = 50
 
-/** Plain Android clipboard call — one line of platform, no extra Compose dependency. */
-private fun copyToClipboard(context: Context, txHash: String) {
-    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-    clipboard.setPrimaryClip(ClipData.newPlainText("Transaction id", txHash))
-}
+/** The row palette: in, out, and the amber of "mined but not settled". */
+private val IncomingGreen = Color(0xFF4CAF50)
+private val OutgoingRed = Color(0xFFFF6B6B)
+private val PendingAmber = Color(0xFFFFC107)
+private val NeutralGrey = Color(0xFFB6BCC4)

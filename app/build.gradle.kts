@@ -62,6 +62,19 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
 
+    // Bundled Tor: the native tor daemon and the TorService that runs it. Used
+    // only when a `.onion` host is entered (see electrum/ElectrumTransport.kt);
+    // a clearnet wallet never starts it.
+    implementation(libs.tor.android)
+
+    // QR scanning for the xpub import screen: ZXing's decoder plus journeyapps'
+    // DecoratedBarcodeView, embedded as a small portrait panel on the import
+    // screen (ui/signers/XpubQrScanner.kt) rather than launched as the library's
+    // full-screen CaptureActivity. Apache-2.0, and it drags in no Google Play
+    // services or ML Kit (see the module doc comment in
+    // gradle/libs.versions.toml). Used only to read a public xpub.
+    implementation(libs.zxing.android.embedded)
+
     debugImplementation(libs.androidx.ui.tooling)
 
     // JVM unit tests: the Electrum client is Android-free on purpose so it can

@@ -17,6 +17,9 @@ object Hashes {
 
     fun sha256(data: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(data)
 
+    /** Bitcoin's double SHA-256 — the hash a txid and a block hash are built from. */
+    fun sha256d(data: ByteArray): ByteArray = sha256(sha256(data))
+
     fun ripemd160(data: ByteArray): ByteArray = Ripemd160.digest(data)
 
     /** Bitcoin's HASH160: RIPEMD-160 of SHA-256 — the payload of a P2WPKH program. */

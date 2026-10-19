@@ -1,0 +1,303 @@
+package com.xbtwallet.app.chain
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * Net-effect and row tests: the arithmetic the signer screen's `+X in` /
+ * `-X out` rows depend on, and the confirmation bucketing behind their badges.
+ *
+ * The fixtures are built with [TestTransactions], so each test can describe a
+ * wallet's story directly:
+ *
+ *  - `fund` pays us 100 000 sats at receive address 0;
+ *  - `spend` spends that coin, paying 30 000 to a stranger and 69 000 back to
+ *    our own change address — a send that must read as "out 31 000" (the
+ *    payment plus the fee), never as "in 69 000" for the change.
+ */
+class TransactionDetailsTest {
+
+    // Two of this wallet's addresses, as scriptPubKeys.
+    private val receiveScript = TestTransactions.p2wpkhSpk("aa".repeat(20))
+    private val changeScript = TestTransactions.p2wpkhSpk("bb".repeat(20))
+    private val strangerScript = TestTransactions.p2wpkhSpk("cc".repeat(20))
+    private val walletScripts = setOf(receiveScript, changeScript)
+
+    private val foreignOutpoint = "ff".repeat(32) to 0
+
+    /** A funding transaction paying 100 000 sats to our receive address. */
+    private val fund: Pair<String, String> = TestTransactions.buildWithId(
+        inputs = listOf(foreignOutpoint),
+        outputs = listOf(100_000L to receiveScript),
+    )
+
+    /** A spend of that coin: 30 000 to a stranger, 69 000 back to our change address. */
+    private val spend: Pair<String, String> = TestTransactions.buildWithId(
+        inputs = listOf(fund.first to 0),
+        outputs = listOf(30_000L to strangerScript, 69_000L to changeScript),
+    )
+
+    // --- net effect -------------------------------------------------------
+
+    @Test
+    fun `a transaction that only pays us is entirely incoming`() {
+        val net = netEffect(
+            transaction = TransactionParser.parse(fund.second),
+            walletScripts = walletScripts,
+            walletOutputs = emptyMap(),
+        )
+        assertEquals(100_000L, net)
+        assertEquals(TransactionDirection.IN, rowFor(net).direction)
+    }
+
+    @Test
+    fun `a send with change is out by the payment plus the fee, not by the change`() {
+        // Our coin was created by `fund`, so its outpoint is ours and its value
+        // is known; the 69 000 change output comes back to us and cancels out,
+        // leaving -(30 000 + 1 000 fee).
+        val walletOutputs = mapOf("${fund.first}:0" to 100_000L)
+
+        val net = netEffect(
+            transaction = TransactionParser.parse(spend.second),
+            walletScripts = walletScripts,
+            walletOutputs = walletOutputs,
+        )
+
+        assertEquals(-31_000L, net)
+        assertEquals(TransactionDirection.OUT, rowFor(net).direction)
+    }
+
+    @Test
+    fun `a spend whose funding transaction we do not know is not guessed at`() {
+        // Without the funding output in the index the input cannot be valued, so
+        // only the change output counts. (In a real scan this cannot happen: the
+        // coin's funding transaction is in the address's history.)
+        val net = netEffect(
+            transaction = TransactionParser.parse(spend.second),
+            walletScripts = walletScripts,
+            walletOutputs = emptyMap(),
+        )
+        assertEquals(69_000L, net)
+    }
+
+    @Test
+    fun `a self-send nets to the fee only`() {
+        val selfSend = TestTransactions.build(
+            inputs = listOf(fund.first to 0),
+            outputs = listOf(99_000L to changeScript),
+        )
+        val net = netEffect(
+            transaction = TransactionParser.parse(selfSend),
+            walletScripts = walletScripts,
+            walletOutputs = mapOf("${fund.first}:0" to 100_000L),
+        )
+        assertEquals(-1_000L, net)
+        assertEquals(TransactionDirection.OUT, rowFor(net).direction)
+    }
+
+    @Test
+    fun `outputs to both chains are summed`() {
+        val bothChains = TestTransactions.build(
+            inputs = listOf(foreignOutpoint),
+            outputs = listOf(40_000L to receiveScript, 2_500L to changeScript, 9_999L to strangerScript),
+        )
+        val net = netEffect(
+            transaction = TransactionParser.parse(bothChains),
+            walletScripts = walletScripts,
+            walletOutputs = emptyMap(),
+        )
+        assertEquals(42_500L, net)
+    }
+
+    @Test
+    fun `a transaction that only moves value between our own addresses nets to zero`() {
+        // Balanced by construction: 100 000 in, 100 000 out to ourselves.
+        val move = TestTransactions.build(
+            inputs = listOf(fund.first to 0),
+            outputs = listOf(50_000L to receiveScript, 50_000L to changeScript),
+        )
+        val net = netEffect(
+            transaction = TransactionParser.parse(move),
+            walletScripts = walletScripts,
+            walletOutputs = mapOf("${fund.first}:0" to 100_000L),
+        )
+        assertEquals(0L, net)
+        assertEquals(TransactionDirection.NEUTRAL, rowFor(net).direction)
+    }
+
+    // --- confirmations ----------------------------------------------------
+
+    @Test
+    fun `confirmation buckets have exactly the card's boundaries`() {
+        assertEquals(ConfirmationBucket.UNCONFIRMED, confirmationBucket(0))
+        assertEquals(ConfirmationBucket.UNCONFIRMED, confirmationBucket(-1))
+
+        assertEquals(ConfirmationBucket.SHALLOW, confirmationBucket(1))
+        assertEquals(ConfirmationBucket.SHALLOW, confirmationBucket(5))
+
+        assertEquals(ConfirmationBucket.SETTLED, confirmationBucket(6))
+        assertEquals(ConfirmationBucket.SETTLED, confirmationBucket(100))
+    }
+
+    @Test
+    fun `confirmation labels read the way the row shows them`() {
+        assertEquals("Unconfirmed", confirmationLabel(0))
+        assertEquals("1 conf", confirmationLabel(1))
+        assertEquals("2 confs", confirmationLabel(2))
+        assertEquals("5 confs", confirmationLabel(5))
+        assertEquals("6+ confs", confirmationLabel(6))
+        assertEquals("6+ confs", confirmationLabel(1_000))
+    }
+
+    @Test
+    fun `confirmations are counted back from the tip`() {
+        assertEquals(0, confirmationsFor(height = 0, tipHeight = 800_000))
+        assertEquals(0, confirmationsFor(height = -1, tipHeight = 800_000))
+        assertEquals(1, confirmationsFor(height = 800_000, tipHeight = 800_000))
+        assertEquals(6, confirmationsFor(height = 799_995, tipHeight = 800_000))
+        // A lagging tip answer must not turn a mined transaction into 0 confs.
+        assertEquals(1, confirmationsFor(height = 800_010, tipHeight = 800_000))
+    }
+
+    // --- row building -----------------------------------------------------
+
+    @Test
+    fun `rows keep the scan's order and carry net amounts and confirmations`() {
+        val query = FakeTxQuery(
+            transactions = mapOf(fund.first to fund.second, spend.first to spend.second),
+            tipHeight = 800_010,
+        )
+        val rows = buildTransactionRows(
+            transactions = listOf(
+                ScannedTransaction(txHash = spend.first, height = 800_010),
+                ScannedTransaction(txHash = fund.first, height = 800_005),
+            ),
+            addresses = listOf(
+                address(AddressChain.RECEIVE, 0, receiveScript),
+                address(AddressChain.CHANGE, 0, changeScript),
+            ),
+            query = query,
+        )
+
+        assertEquals(listOf(spend.first, fund.first), rows.map { it.txHash })
+        assertEquals(-31_000L, rows[0].netSatoshis)
+        assertEquals(1, rows[0].confirmations)
+        assertEquals(100_000L, rows[1].netSatoshis)
+        assertEquals(6, rows[1].confirmations)
+        assertEquals("6+ confs", confirmationLabel(rows[1].confirmations))
+        assertEquals(TransactionDirection.IN, rows[1].direction)
+    }
+
+    @Test
+    fun `an unconfirmed transaction has no confirmations`() {
+        val query = FakeTxQuery(transactions = mapOf(fund.first to fund.second), tipHeight = 800_000)
+        val rows = buildTransactionRows(
+            transactions = listOf(ScannedTransaction(txHash = fund.first, height = 0)),
+            addresses = listOf(address(AddressChain.RECEIVE, 0, receiveScript)),
+            query = query,
+        )
+
+        assertEquals(0, rows.single().confirmations)
+        assertEquals("Unconfirmed", confirmationLabel(rows.single().confirmations))
+    }
+
+    @Test
+    fun `a spend outside the display window still has its funding transaction fetched`() {
+        // 55 transactions: the oldest 5 fall outside the 50-row cap. The newest
+        // row spends a coin created by the very first one, so that funding
+        // transaction must still be fetched — otherwise the spend would show as
+        // an incoming change payment instead of an outgoing send.
+        val funding = TestTransactions.buildWithId(
+            inputs = listOf(foreignOutpoint),
+            outputs = listOf(100_000L to receiveScript),
+        )
+        val filler = (0 until 54).map { index ->
+            TestTransactions.buildWithId(
+                inputs = listOf("11".repeat(31) + "%02x".format(index) to 0),
+                outputs = listOf(1_000L + index to strangerScript),
+            )
+        }
+        val spendAtTop = TestTransactions.buildWithId(
+            inputs = listOf(funding.first to 0),
+            outputs = listOf(30_000L to strangerScript, 69_000L to changeScript),
+        )
+
+        val displayOrder = listOf(spendAtTop) + filler.reversed() + listOf(funding)
+        val transactions = displayOrder.mapIndexed { index, (txid, _) ->
+            ScannedTransaction(txHash = txid, height = 800_000 - index)
+        }
+        val query = FakeTxQuery(
+            transactions = (displayOrder + funding).associate { it },
+            tipHeight = 800_010,
+        )
+
+        val rows = buildTransactionRows(
+            transactions = transactions,
+            addresses = listOf(
+                address(AddressChain.RECEIVE, 0, receiveScript),
+                address(AddressChain.CHANGE, 0, changeScript),
+            ),
+            query = query,
+        )
+
+        assertEquals(MAX_DETAILED_TRANSACTIONS, rows.size)
+        assertEquals(-31_000L, rows.first().netSatoshis)
+        assertTrue(
+            "the funding transaction outside the window must have been fetched",
+            query.fetched.contains(funding.first),
+        )
+    }
+
+    @Test
+    fun `an address set without scripts produces no rows rather than invented ones`() {
+        val query = FakeTxQuery(transactions = mapOf(fund.first to fund.second), tipHeight = 800_000)
+        val rows = buildTransactionRows(
+            transactions = listOf(ScannedTransaction(txHash = fund.first, height = 800_000)),
+            addresses = listOf(address(AddressChain.RECEIVE, 0, scriptPubKeyHex = "")),
+            query = query,
+        )
+
+        assertTrue(rows.isEmpty())
+        assertTrue("nothing should have been fetched", query.fetched.isEmpty())
+    }
+
+    // --- helpers ----------------------------------------------------------
+
+    private fun rowFor(netSatoshis: Long) = TransactionRow(
+        txHash = "00".repeat(32),
+        height = 800_000,
+        confirmations = 1,
+        netSatoshis = netSatoshis,
+    )
+
+    private fun address(chain: AddressChain, index: Int, scriptPubKeyHex: String) = ScannedAddress(
+        chain = chain,
+        index = index,
+        address = "bc1q-test-$index",
+        scripthash = "sh-test-$index",
+        used = true,
+        scriptPubKeyHex = scriptPubKeyHex,
+    )
+
+    /** A [ChainQuery] that serves transaction hex from a fixture map. */
+    private class FakeTxQuery(
+        private val transactions: Map<String, String>,
+        private val tipHeight: Int,
+    ) : ChainQuery {
+        val fetched = mutableListOf<String>()
+
+        override fun getHistory(scripthash: String): List<HistoryEntry> = emptyList()
+
+        override fun getBalance(scripthash: String): ScripthashBalance = ScripthashBalance.ZERO
+
+        override fun listUnspent(scripthash: String): List<ChainUtxo> = emptyList()
+
+        override fun getTransaction(txHash: String): String {
+            fetched += txHash
+            return transactions[txHash] ?: throw IllegalStateException("no fixture for $txHash")
+        }
+
+        override fun getTipHeight(): Int = tipHeight
+    }
+}

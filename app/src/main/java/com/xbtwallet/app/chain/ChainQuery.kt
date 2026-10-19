@@ -27,4 +27,22 @@ interface ChainQuery {
 
     /** Spendable outputs at this scripthash. */
     fun listUnspent(scripthash: String): List<ChainUtxo>
+
+    /**
+     * The raw, serialised transaction behind a txid, as lowercase hex — what
+     * [`blockchain.transaction.get`] answers.
+     *
+     * Needed only by the transaction list: a net in/out amount cannot be read
+     * off `get_history` (which says a tx touched an address, not which way value
+     * moved), so the row has to be computed from the transaction itself.
+     */
+    fun getTransaction(txHash: String): String
+
+    /**
+     * The current chain tip height, from [`blockchain.headers.subscribe`].
+     *
+     * Confirmations are relative to the tip, and `get_history` only reports the
+     * height a transaction was mined at.
+     */
+    fun getTipHeight(): Int
 }

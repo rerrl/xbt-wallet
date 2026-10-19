@@ -4,6 +4,7 @@ import com.xbtwallet.app.chain.AccountScanner
 import com.xbtwallet.app.chain.AddressChain
 import com.xbtwallet.app.chain.HistoryEntry
 import com.xbtwallet.app.chain.Scripthash
+import com.xbtwallet.app.chain.TestTransactions
 import com.xbtwallet.app.crypto.ExtendedPublicKey
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -125,14 +126,27 @@ class ChainRpcSessionTest {
         val scanner = AccountScanner(ExtendedPublicKey.parse(accountZpub))
         val funded = scanner.derive(AddressChain.RECEIVE, 0)
 
+        // The scan now also reads the transaction behind each history entry, so
+        // it can show a net in/out amount: one `blockchain.transaction.get` for
+        // the single transaction, plus one `blockchain.headers.subscribe` for
+        // the tip the confirmations count from. The transaction pays the funded
+        // address 5 000 sats from a coin this wallet does not own, which is the
+        // row's net effect.
+        val (fundingTxId, fundingTx) = TestTransactions.buildWithId(
+            inputs = listOf(UNRELATED_TXID to 0),
+            outputs = listOf(5_000L to funded.scriptPubKeyHex),
+        )
+
         MockElectrumServer.scripted(
-            history = mapOf(funded.scripthash to listOf<Any?>(MockElectrumServer.historyEntry(TXID, 800_000))),
+            history = mapOf(funded.scripthash to listOf<Any?>(MockElectrumServer.historyEntry(fundingTxId, 800_000))),
             balances = mapOf(funded.scripthash to (5_000L to 7L)),
             unspent = mapOf(
                 funded.scripthash to listOf<Any?>(
-                    MockElectrumServer.unspentEntry(TXID, txPos = 0, height = 800_000, value = 5_000),
+                    MockElectrumServer.unspentEntry(fundingTxId, txPos = 0, height = 800_000, value = 5_000),
                 ),
             ),
+            transactions = mapOf(fundingTxId to fundingTx),
+            tipHeight = 800_000,
         ).use { mock ->
             val snapshot = runBlocking {
                 client(mock.port).withChainSession { session -> scanner.scan(session) }
@@ -146,6 +160,8 @@ class ChainRpcSessionTest {
             assertEquals(60, methods.count { it == "blockchain.scripthash.get_history" })
             assertEquals(1, methods.count { it == "blockchain.scripthash.get_balance" })
             assertEquals(1, methods.count { it == "blockchain.scripthash.listunspent" })
+            assertEquals(1, methods.count { it == "blockchain.transaction.get" })
+            assertEquals(1, methods.count { it == "blockchain.headers.subscribe" })
 
             // ... and it is all one connection, which is the point of the
             // session API: a scan must not look like a port scan.
@@ -155,10 +171,48 @@ class ChainRpcSessionTest {
             assertEquals(1, snapshot.utxos.size)
             assertEquals(AddressChain.RECEIVE, snapshot.utxos.first().chain)
             assertEquals(0, snapshot.utxos.first().addressIndex)
+
+            // The transaction row: 5 000 in, mined at the tip, one confirmation.
+            val row = snapshot.transactions.single()
+            assertEquals(fundingTxId, row.txHash)
+            assertEquals(5_000L, row.netSatoshis)
+            assertEquals(1, row.confirmations)
+        }
+    }
+
+    @Test
+    fun `an unsolicited header notification is not mistaken for the reply`() {
+        // `blockchain.headers.subscribe` makes the server push a notification on
+        // every new block. One arriving between a request and its reply must be
+        // skipped, or the session would read it as the answer and desynchronise.
+        val notification =
+            "{\"jsonrpc\":\"2.0\",\"method\":\"blockchain.headers.subscribe\",\"params\":[{\"height\":800001,\"hex\":\"00\"}]}"
+
+        MockElectrumServer { method, _, _ ->
+            when (method) {
+                "blockchain.headers.subscribe" -> MockElectrumServer.Reply.Result(
+                    value = linkedMapOf<String, Any?>("height" to 800_000, "hex" to "00"),
+                    precedingNotifications = listOf(notification),
+                )
+                "blockchain.scripthash.get_history" -> MockElectrumServer.Reply.Result(emptyList<Any?>())
+                else -> MockElectrumServer.Reply.Error(-32601, "unknown method $method")
+            }
+        }.use { mock ->
+            val (tip, history) = runBlocking {
+                client(mock.port).withChainSession { session ->
+                    session.getTipHeight() to session.getHistory(unusedScripthash)
+                }
+            }
+
+            assertEquals(800_000, tip)
+            assertEquals(emptyList<HistoryEntry>(), history)
         }
     }
 
     private companion object {
         const val TXID = "1111111111111111111111111111111111111111111111111111111111111111"
+
+        /** An outpoint from a transaction this wallet has no history for. */
+        const val UNRELATED_TXID = "2222222222222222222222222222222222222222222222222222222222222222"
     }
 }

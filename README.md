@@ -28,25 +28,29 @@ signer-first restructure:
   **transaction history** at the foot of the screen.
 - **Transactions (on the signer screen)** — every transaction touching any
   scanned address of the account (both chains), deduped by txid and ordered
-  *unconfirmed first, then newest block first*, capped at the latest 50 with a
-  note when there are more. Each row is a truncated, tap-to-copy txid and its
-  height (or *unconfirmed*). Folded out of the scan's own `get_history` answers,
-  so it costs no extra request; there is deliberately **no** incoming/outgoing
-  arrow, because neither `get_history` nor `listunspent` can tell a send from a
-  receive without fetching the transaction.
+  *unconfirmed first, then newest block first*, capped at the latest 50. Each row
+  shows the wallet's **net effect** — `+0.00012345 XBT in` in green, `-0.00012345
+  XBT out` in red — plus a confirmation badge: red *Unconfirmed*, amber `N confs`
+  for 1–5, green `6+ confs`. The net amount is read from the transactions
+  themselves (the scan's `get_history` answers say a tx touched an address, not
+  which way value moved), so change returning to our own addresses is counted on
+  the incoming side and a send reads as `-(payment + fee)`. Rows are static: no
+  tap-to-copy and no detail view.
 - **UTXO list** — every spendable output the scan found: amount, outpoint,
   address chain/index, and confirmation height (or *unconfirmed*).
 - **Addresses viewer** — derived native-segwit receive/change addresses per
   account key, now annotated with on-chain usage: *used*, *unused*, or the
   highlighted *first unused*.
-- **Private Electrum server** — enter host/port, pick SSL or TCP, hit *Test
-  connection* and watch the Electrum JSON-RPC handshake in an on-screen log.
+- **Private Electrum server** — enter host/port, flip the **Use SSL** switch,
+  hit *Test connection* and watch the Electrum JSON-RPC handshake in an on-screen
+  log. A host ending in `.onion` is routed through the app's **bundled Tor** (no
+  Orbot); any other host is dialled directly.
 
 All crypto is public-key only: no private key, seed or signing code exists
 anywhere in this repository. The receive QR and sending are
-still missing, there is no Tor in this iteration (direct IP connections only),
-and the two fiat figures on the signer screen are **hardcoded placeholders** —
-this build requests no price feed from anyone.
+still missing, and the two fiat figures on the signer screen are **hardcoded
+placeholders** — this build requests no price feed from anyone. Tor is bundled
+for `.onion` endpoints only; clearnet connections to a LAN node stay direct.
 
 ## Home screen
 
@@ -115,6 +119,16 @@ The pasted key is validated against the public specifications:
 
 The app is native-segwit single-sig, so whatever you paste is treated as a
 **BIP-84-style account key** and every address is derived as P2WPKH (`bc1q…`).
+A key on the signer's screen can also be **scanned**: the *Scan QR* button above
+the field opens a small camera **panel** right there on the import screen — not a
+full-screen capture activity, and always in portrait like the rest of the app —
+and routes the payload — a bare key, or a `bitcoin:` URI with its scheme and
+parameters stripped — into that same field and the same validator, so a scan can
+never be accepted where a paste would be refused. The camera is ZXing
+(`zxing-android-embedded`, Apache-2.0, no Google dependency) driving the
+library's `DecoratedBarcodeView` inside the app's own activity. Pasting works
+whether or not the camera permission is granted; a refusal says so and leaves the
+field usable.
 The screen says so, and it warns that a manual import carries no master
 fingerprint or derivation path. Signers are stored as a JSON list (id, name,
 type, xpub, timestamp) under the `signers` key in `SharedPreferences` — a list
@@ -172,13 +186,24 @@ the only traffic the app makes is Electrum RPCs to the server the user entered.
 At the foot of the screen, under the account key, a **Transactions** section
 shows every transaction that touched any scanned address of the account — both
 chains — deduped by txid and ordered **unconfirmed first, then newest block
-first**, capped at the latest 50 with a note when there are more. Each row is a
-truncated, tap-to-copy txid and its height, or *unconfirmed*. It costs nothing
-extra: the list is folded out of the same `get_history` answers the scan already
-made. There is deliberately **no** incoming/outgoing arrow: neither `get_history`
-nor `listunspent` can tell a send from a receive without fetching the
-transaction (a send with change looks exactly like a receive in `listunspent`),
-so the section says only what it can prove.
+first**, capped at the latest 50. Each row is the wallet's **net effect** on the
+left and a confirmation badge on the right, with the truncated txid underneath:
+`+0.00012345 XBT in` in green when value arrived, `-0.00012345 XBT out` in red
+when it left, and a neutral amount when the two sides cancel (a self-send).
+The badge is red *Unconfirmed*, amber `N confs` for one to five, and green
+`6+ confs` from six blocks.
+
+The net amount is computed from the transactions themselves: the scan's
+`get_history` answers only say a tx touched an address, so the row fetches each
+displayed transaction (`blockchain.transaction.get`, on the same connection) and
+sums what it pays our scriptPubKeys minus what it spends of our own outputs. That
+is what makes change correct: a send that returns coins to one of our change
+addresses shows the change as incoming and the coin it came from as outgoing, so
+the row reads `-(payment + fee)` rather than pretending the change is a payment.
+Confirmations come from `blockchain.headers.subscribe` (the tip height) and the
+height `get_history` reported.
+
+Rows are static: no tap-to-copy and no detail view.
 
 ## Chain queries
 
@@ -197,8 +222,9 @@ still Android-free:
   addresses — one source of truth, deliberately *not* the sum of the UTXO list,
   so the headline number and the list can never disagree about themselves.
 
-The three RPCs (`get_history`, `get_balance`, `listunspent`) run over **one
-connection** per scan (`ElectrumClient.withChainSession`): an account scan is
+The three scripthash RPCs (`get_history`, `get_balance`, `listunspent`) run over
+**one connection** per scan (`ElectrumClient.withChainSession`), together with the
+transaction fetches and the tip lookup the history rows need: an account scan is
 dozens of requests, and a connect/TLS/close per address would make an ordinary
 balance look like a port scan to the user's own server. The scan re-runs each
 time a signer is opened — there is no caching in this iteration, which is cheap
@@ -251,7 +277,7 @@ same way — no Context, no socket — so the scan's rules are unit-tested again
 an in-memory fake and the RPCs separately against a mock server.
 
 ```bash
-./gradlew clean assembleDebug testDebugUnitTest   # 163 unit tests, all green
+./gradlew clean assembleDebug testDebugUnitTest   # 199 unit tests, all green
 ```
 
 ## Private Electrum server
@@ -269,9 +295,21 @@ so it can be unit-tested on the JVM against a mock Electrum responder:
 ```
 
 The same client carries the three `blockchain.scripthash.*` queries the signer
-screen's balance and UTXOs are built from, over one connection per scan
+screen's balance and UTXOs are built from, plus `blockchain.transaction.get` and
+`blockchain.headers.subscribe` for the history rows, over one connection per scan
 (`withChainSession`). Scripthash requests never touch the connection log — a
 background balance read is not a connection test.
+
+**Tor.** An endpoint whose host ends in `.onion` is dialled through the app's
+bundled Tor (`info.guardianproject:tor-android`, pinned to 0.4.9.6 — the newest
+release that supports this project's `compileSdk 36`): `MainActivity` installs an
+`AndroidTorBootstrap` in `TorGateway`, the client's default `RoutingTransport`
+picks Tor for onion hosts and a direct socket for everything else, and Tor's
+bootstrap progress (`bootstrapping 50% …`) plus a clear failure line appear in the
+same connection log as the handshake. Nothing changes about the handshake itself:
+protocol, port (50001/50002) and the SSL/TLS path are identical on both routes, so
+`.onion` + SSL works exactly as clearnet + SSL does. There is no Orbot dependency
+and no toggle.
 
 The home screen reuses the same client for its heartbeat: `ElectrumClient.ping()`
 connects, sends one `server.ping` with no parameters and closes — the cheap
@@ -281,11 +319,11 @@ on display (leaving it, or the process going to the background, cancels it) and
 re-checks immediately when the saved endpoint changes: no background service, no
 wake lock, no new permission.
 
-Limitations of this iteration: no Tor, no certificate pinning (an untrusted or
+Limitations of this iteration: no certificate pinning (an untrusted or
 self-signed server certificate is rejected and reported in the log rather than
-accepted), no testnet yet, and no transaction history is fetched for a signer
-beyond what the scan's own `get_history` answers carry: an endpoint is assumed
-to serve the XBT chain.
+accepted — the same rule applies over Tor), no testnet yet, and the transaction
+history is capped at the latest 50 rows (older ones are not fetched or shown).
+An endpoint is assumed to serve the XBT chain.
 
 ## Run in dev mode
 

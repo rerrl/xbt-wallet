@@ -28,9 +28,12 @@ import com.xbtwallet.app.crypto.SegwitAddress
  *
  * **What it costs.** One `get_history` per visited address, plus one
  * `get_balance` and one `listunspent` per *used* address. The nominal case — an
- * empty account — is 40 history calls (20 per chain) and nothing else. There is
- * no caching this round: the signer screen rescans when it opens, which is cheap
- * enough and avoids a stale-balance class of bug entirely.
+ * empty account — is 40 history calls (20 per chain) and nothing else. An
+ * account with history additionally costs one `blockchain.transaction.get` per
+ * displayed transaction (capped at [MAX_DETAILED_TRANSACTIONS]) plus one
+ * `blockchain.headers.subscribe` for the tip — see [buildTransactionRows]. There
+ * is no caching this round: the signer screen rescans when it opens, which is
+ * cheap enough and avoids a stale-balance class of bug entirely.
  *
  * **Balance.** The headline balance is the sum of `get_balance` over the used
  * addresses (confirmed + unconfirmed). The UTXO list is the same coins itemised
@@ -74,6 +77,9 @@ class AccountScanner(
             index = index,
             address = SegwitAddress.encodeP2wpkh(SegwitAddress.MAINNET_HRP, program),
             scripthash = Scripthash.ofP2wpkh(program),
+            // Carried alongside so a transaction's outputs can be matched without
+            // decoding a script back into an address.
+            scriptPubKeyHex = Scripthash.toHex(Scripthash.p2wpkhScript(program)),
         )
     }
 
@@ -117,8 +123,14 @@ class AccountScanner(
             utxos = utxos,
             balance = balance,
             // The transaction list is folded from the *same* get_history
-            // answers that decided which addresses were used — no extra RPC.
-            transactions = aggregateTransactions(receive + change),
+            // answers that decided which addresses were used, then the rows'
+            // net amounts are computed by fetching those transactions over this
+            // same connection (see [buildTransactionRows]).
+            transactions = buildTransactionRows(
+                transactions = aggregateTransactions(receive + change),
+                addresses = receive + change,
+                query = query,
+            ),
         )
     }
 
@@ -149,6 +161,7 @@ class AccountScanner(
                     scripthash = derived.scripthash,
                     used = used,
                     history = history,
+                    scriptPubKeyHex = derived.scriptPubKeyHex,
                 )
                 onScanned()
             }

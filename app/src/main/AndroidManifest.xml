@@ -2,11 +2,41 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
-      Direct socket access to a user-supplied private Electrum server.
-      This is the only permission the app requests: no Tor, no camera, no
-      storage until the features that need them land.
+      Direct socket access to a user-supplied private Electrum server, and to the
+      bundled Tor daemon's loopback SOCKS port when an `.onion` endpoint is used.
+      No storage, no location, no network state.
+
+      CAMERA is for one thing only: reading an account xpub QR code with the
+      signer's screen (ui/signers/ImportXpubScreen.kt). The code holds nothing
+      secret — an xpub is a public key — and manual pasting remains available
+      whether or not the permission is granted.
     -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!--
+      The camera is a convenience, not a requirement: the wallet is fully usable
+      on a device without one, by pasting the key instead. Declaring it
+      required="false" keeps the app installable there.
+    -->
+    <uses-feature
+        android:name="android.hardware.camera.any"
+        android:required="false" />
+
+    <!--
+      Tor runs inside the app (info.guardianproject:tor-android). Its
+      org.torproject.jni.TorService is declared by the library's own manifest and
+      merged in; the app only needs to bind it, which MainActivity's TorGateway
+      installation arranges. No Orbot, no cross-app intent.
+
+      The scanner comes from com.journeyapps:zxing-android-embedded, but its
+      CaptureActivity is never launched: the camera is an embedded panel on the
+      import screen (ui/signers/XpubQrScanner.kt), built from the library's
+      DecoratedBarcodeView inside this app's own portrait activity. The library's
+      merged-in CaptureActivity entry is therefore unused, and the app declares
+      no activity of its own for scanning — in particular none with a
+      screenOrientation, so nothing here can force landscape.
+    -->
 
     <application
         android:allowBackup="false"

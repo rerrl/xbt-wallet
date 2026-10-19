@@ -107,6 +107,12 @@ data class DerivedAddress(
     val index: Int,
     val address: String,
     val scripthash: String,
+    /**
+     * The address's scriptPubKey as lowercase hex — what a transaction's outputs
+     * are compared against to decide whether an output pays this wallet. The
+     * wallet only ever derives P2WPKH, so this is `0014<20-byte program>`.
+     */
+    val scriptPubKeyHex: String = "",
 )
 
 /**
@@ -126,6 +132,8 @@ data class ScannedAddress(
     val used: Boolean,
     /** The transactions touching this address, exactly as the server reported them. */
     val history: List<HistoryEntry> = emptyList(),
+    /** The address's scriptPubKey as lowercase hex (see [DerivedAddress.scriptPubKeyHex]). */
+    val scriptPubKeyHex: String = "",
 )
 
 /**
@@ -144,11 +152,11 @@ data class AccountSnapshot(
     val utxos: List<ScannedUtxo>,
     val balance: ScripthashBalance,
     /**
-     * The account's transactions, deduped and ordered for display — folded out
-     * of the visited addresses' `get_history` answers (see
-     * [aggregateTransactions]). Empty until a scan has run.
+     * The account's transactions, deduped, ordered for display, and carrying the
+     * wallet's net effect and confirmation count (see [buildTransactionRows]).
+     * Empty until a scan has run.
      */
-    val transactions: List<ScannedTransaction> = emptyList(),
+    val transactions: List<TransactionRow> = emptyList(),
 ) {
     /** Every address the scan visited, receive chain first. */
     val addresses: List<ScannedAddress> get() = receive + change
