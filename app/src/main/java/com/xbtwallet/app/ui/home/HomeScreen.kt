@@ -96,6 +96,9 @@ enum class ServerStatus {
  *   above can be tested on the JVM without a socket.
  * @param torStatus the current bundled-Tor state, injected for the same reason:
  *   the onion branch reads it instead of dialling, so a JVM test can drive it.
+ * @param now the wall clock, in epoch milliseconds, used to timestamp a
+ *   completed answer so a revisit can tell a fresh one from a stale one.
+ *   Injected so the staleness rule is testable without real waiting.
  */
 @Stable
 class HomeScreenState(
@@ -107,6 +110,7 @@ class HomeScreenState(
         ElectrumClient(server = server, log = {}).ping()
     },
     private val torStatus: () -> TorStatus = { TorGateway.status() },
+    private val now: () -> Long = System::currentTimeMillis,
 ) {
 
     /** Every saved signer, oldest first. */
@@ -128,11 +132,32 @@ class HomeScreenState(
      * frame after the app starts already reads correctly: nothing saved shows
      * the helper hint, and a saved endpoint shows "Connecting…" while the first
      * heartbeat runs — never a red "disconnected" before anything was tried.
+     *
+     * The state lives at the navigation level and is not rebuilt on a revisit,
+     * so once a check has completed this still holds the last **answer** and a
+     * return to home renders it instantly — it is never overwritten with
+     * "Connecting…" just because the screen was re-entered (see
+     * [shouldCheckOnEntry]).
      */
     var serverStatus by mutableStateOf(
         if (configuredServer() == null) ServerStatus.NOT_CONFIGURED else ServerStatus.CONNECTING,
     )
         private set
+
+    /**
+     * When the last real answer arrived (epoch millis), or null if no check has
+     * completed its dial yet. Only a completed ping counts: the not-configured,
+     * [ServerStatus.TOR_STARTING] and [ServerStatus.TOR_FAILED] results are
+     * short-circuits, not answers, so they never make the entry check look
+     * fresh.
+     */
+    private var lastAnswerAtMillis: Long? = null
+
+    /**
+     * The [serverKey] the last answer belongs to. A changed endpoint invalidates
+     * the remembered answer — it was about a different server.
+     */
+    private var lastAnswerServerKey: String? = null
 
     /**
      * How far Tor has got, in percent, while [serverStatus] is
@@ -147,16 +172,18 @@ class HomeScreenState(
      * with the new settings instead of waiting out the old loop's next tick.
      */
     val serverKey: String
-        get() = configuredServer()?.let { "${it.host}:${it.port}:${it.protocol.name}" }.orEmpty()
+        get() = configuredServer()?.let(::keyOf).orEmpty()
 
     /**
      * Runs one check and reports the result.
      *
-     * [showChecking] is true for the first check of a screen visit: the neutral
-     * "Connecting…" replaces the previous answer, which is what stops the
-     * indicator flashing red before the first reply. Later heartbeats pass
-     * `false` and keep the last answer on screen while the next check is in
-     * flight, so a 60-second poll does not make the label blink.
+     * [showChecking] is true only for the very first check of the app when no
+     * answer exists yet: the neutral "Connecting…" replaces the seed, which is
+     * what stops the indicator flashing red before the first reply. Every other
+     * check (later heartbeats, and an entry check that still had a remembered
+     * answer) passes `false` and keeps the last answer on screen while the next
+     * check is in flight, so a re-ping never makes the label blink or overwrite
+     * a known-good answer with "Connecting…".
      *
      * **Onion servers short-circuit.** When the saved host is an `.onion`, there
      * is nothing to ping until Tor is up, and a ping now would block on the
@@ -205,12 +232,26 @@ class HomeScreenState(
             onion -> ServerStatus.CONNECTED_VIA_TOR
             else -> ServerStatus.CONNECTED
         }
+        // A completed dial is an answer: remember it and which endpoint it was
+        // about, so a revisit within STALE_AFTER_MILLIS renders it without
+        // re-dialling.
+        lastAnswerServerKey = keyOf(server)
+        lastAnswerAtMillis = now()
         return serverStatus
     }
 
     /**
-     * The heartbeat: one check immediately, then another every [intervalMillis]
+     * The heartbeat: one check on entry, then another every [intervalMillis]
      * until the caller cancels this coroutine.
+     *
+     * The entry check is **skipped entirely** when a remembered answer is still
+     * fresh (see [shouldCheckOnEntry]): the last answer is already on screen, so
+     * returning to home within [STALE_AFTER_MILLIS] performs zero pings and
+     * never flashes "Connecting…". A stale answer, a changed endpoint, or no
+     * answer at all runs the check — with `showChecking` true only when nothing
+     * has ever answered, so a remembered answer is updated in place rather than
+     * blanked. Once on the screen the loop keeps its cadence: every later tick
+     * checks regardless of how recent the last answer was.
      *
      * The caller is the composable that shows the home screen (`XbtWalletApp`),
      * so the loop stops when the user leaves the screen or the process goes to
@@ -220,10 +261,31 @@ class HomeScreenState(
     suspend fun runHeartbeat(intervalMillis: Long = HEARTBEAT_INTERVAL_MILLIS) {
         var first = true
         while (currentCoroutineContext().isActive) {
-            checkServerStatus(showChecking = first)
+            if (!first || shouldCheckOnEntry()) {
+                checkServerStatus(showChecking = first && lastAnswerAtMillis == null)
+            }
             first = false
             delay(nextDelayMillis(serverStatus, intervalMillis))
         }
+    }
+
+    /**
+     * Whether the entry tick should dial at all.
+     *
+     * False — meaning "render what we already have and do nothing" — only when a
+     * real answer exists, it belongs to the current endpoint, and it is younger
+     * than [STALE_AFTER_MILLIS]. Everything else dials: no answer yet, an answer
+     * for a different endpoint (the Server screen was edited), an answer older
+     * than the stale window, or a Tor bootstrap short-circuit, which must keep
+     * being polled so the percentage moves and the moment Tor is ready is caught.
+     */
+    internal fun shouldCheckOnEntry(): Boolean {
+        val answeredAt = lastAnswerAtMillis ?: return true
+        if (lastAnswerServerKey != serverKey) return true
+        if (serverStatus == ServerStatus.TOR_STARTING || serverStatus == ServerStatus.TOR_FAILED) {
+            return true
+        }
+        return now() - answeredAt >= STALE_AFTER_MILLIS
     }
 
     /**
@@ -241,9 +303,19 @@ class HomeScreenState(
     /** The saved endpoint, or null when the user has not entered one yet. */
     private fun configuredServer(): ElectrumServer? = serverSettings.load().takeIf { it.host.isNotBlank() }
 
+    /** A stable identity for an endpoint, used to tie an answer to its server. */
+    private fun keyOf(server: ElectrumServer): String =
+        "${server.host}:${server.port}:${server.protocol.name}"
+
     companion object {
         /** Gap between heartbeat checks while the home screen is on display. */
         const val HEARTBEAT_INTERVAL_MILLIS: Long = 60_000L
+
+        /**
+         * How old a remembered answer may be before a return to home re-checks
+         * it. Younger than this, the answer is rendered as-is and no dial is paid.
+         */
+        const val STALE_AFTER_MILLIS: Long = 60_000L
 
         /** How often the heartbeat re-checks while Tor is bootstrapping. */
         const val TOR_POLL_INTERVAL_MILLIS: Long = 2_000L

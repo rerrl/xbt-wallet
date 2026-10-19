@@ -13,6 +13,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -56,12 +57,15 @@ class HomeScreenStateTest {
      * wired into a state.
      *
      * [results] answers the pings in order (the last value repeats), so a test
-     * can say "up, then down" without any real network.
+     * can say "up, then down" without any real network. [clock] is the fake
+     * epoch-millisecond wall clock the state reads for answer staleness, so a
+     * test can age a remembered answer without sleeping.
      */
     private class Fixture(
         server: ElectrumServer? = null,
         private val results: List<Boolean> = listOf(true),
         var tor: TorStatus = TorStatus.OFF,
+        var clock: Long = 0L,
     ) {
         val backing = InMemoryStore()
         private var counter = 0
@@ -95,7 +99,7 @@ class HomeScreenStateTest {
                 hold?.await()
                 results.getOrElse(call++) { results.last() }
             }
-            state = HomeScreenState(store, serverSettings, probe, torStatus = { tor })
+            state = HomeScreenState(store, serverSettings, probe, torStatus = { tor }, now = { clock })
         }
     }
 
@@ -349,6 +353,158 @@ class HomeScreenStateTest {
         assertEquals("10.0.0.2:50001:TCP", fixture.state.serverKey)
     }
 
+    // --- remembered answers: entry staleness ---------------------------------
+
+    @Test
+    fun `an entry tick is skipped only for a fresh answer about the same endpoint`() {
+        val fixture = Fixture(server = CLEARNET)
+
+        // Nothing has dialled yet: the entry tick must run.
+        assertTrue("no answer exists yet", fixture.state.shouldCheckOnEntry())
+
+        runBlocking { fixture.state.checkServerStatus() }
+
+        fixture.clock = 0
+        assertFalse("a just-answered endpoint needs no entry check", fixture.state.shouldCheckOnEntry())
+
+        fixture.clock = HomeScreenState.STALE_AFTER_MILLIS - 1
+        assertFalse("still fresh just under the window", fixture.state.shouldCheckOnEntry())
+
+        fixture.clock = HomeScreenState.STALE_AFTER_MILLIS
+        assertTrue("stale once the window elapses", fixture.state.shouldCheckOnEntry())
+
+        // The Server screen was edited: the remembered answer belongs to a
+        // different endpoint, so it must not suppress the recheck.
+        fixture.clock = 1_000
+        fixture.serverSettings.server = OTHER
+        assertTrue("a changed endpoint is not the remembered answer", fixture.state.shouldCheckOnEntry())
+    }
+
+    @Test
+    fun `a fresh answer is rendered instantly and the entry tick performs no ping`() {
+        val fixture = Fixture(server = CLEARNET)
+        runBlocking { fixture.state.checkServerStatus() }
+        assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
+        assertEquals(1, fixture.pinged.size)
+
+        // Coming back well within the stale window: zero dials, the last answer
+        // stays on screen.
+        fixture.clock = 10_000
+        runBlocking {
+            val heartbeat = launch { fixture.state.runHeartbeat(intervalMillis = 60_000) }
+            delay(200)
+            heartbeat.cancelAndJoin()
+        }
+
+        assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
+        assertEquals("a fresh answer must not be re-pinged on entry", 1, fixture.pinged.size)
+    }
+
+    @Test
+    fun `a stale answer is re-checked quietly on the next entry`() {
+        val fixture = Fixture(server = CLEARNET, results = listOf(true, false))
+        runBlocking { fixture.state.checkServerStatus() }
+        assertEquals(1, fixture.pinged.size)
+
+        // Older than the window: the entry tick dials again.
+        fixture.clock = HomeScreenState.STALE_AFTER_MILLIS + 1
+        runBlocking {
+            val heartbeat = launch { fixture.state.runHeartbeat(intervalMillis = 60_000) }
+            withTimeout(5_000) { while (fixture.pinged.size < 2) delay(5) }
+            heartbeat.cancelAndJoin()
+        }
+
+        // Quietly: the answer updates in place, it never flipped to CONNECTING.
+        assertEquals(2, fixture.pinged.size)
+        assertEquals(ServerStatus.DISCONNECTED, fixture.state.serverStatus)
+        assertEquals(
+            listOf(ServerStatus.CONNECTING, ServerStatus.CONNECTED),
+            fixture.statusDuringPing,
+        )
+    }
+
+    @Test
+    fun `no answer yet shows connecting while the first check is in flight`() {
+        val fixture = Fixture(server = CLEARNET, results = listOf(true))
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        fixture.hold = gate
+
+        runBlocking {
+            val heartbeat = launch { fixture.state.runHeartbeat(intervalMillis = 60_000) }
+            withTimeout(5_000) { while (fixture.pinged.isEmpty()) delay(5) }
+
+            assertEquals(ServerStatus.CONNECTING, fixture.state.serverStatus)
+
+            gate.complete(Unit)
+            withTimeout(5_000) { while (fixture.state.serverStatus != ServerStatus.CONNECTED) delay(5) }
+            heartbeat.cancelAndJoin()
+        }
+
+        assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
+    }
+
+    @Test
+    fun `a recheck in flight keeps the remembered answer, never reading connecting`() {
+        val fixture = Fixture(server = CLEARNET, results = listOf(true))
+        runBlocking { fixture.state.checkServerStatus() }
+        assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
+
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        fixture.hold = gate
+        runBlocking {
+            val check = launch { fixture.state.checkServerStatus(showChecking = false) }
+            withTimeout(5_000) { while (fixture.pinged.size < 2) delay(5) }
+
+            // The dial is in flight and the answer is still the last one: no
+            // "Connecting…" blink while a background recheck runs.
+            assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
+
+            gate.complete(Unit)
+            check.join()
+        }
+        assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
+    }
+
+    @Test
+    fun `a changed server after a fresh answer still pings on the next entry`() {
+        val fixture = Fixture(server = CLEARNET)
+        runBlocking { fixture.state.checkServerStatus() }
+        assertEquals(listOf(CLEARNET), fixture.pinged)
+
+        // Edited on the Server screen, still well within the stale window.
+        fixture.serverSettings.server = OTHER
+        fixture.clock = 5_000
+        runBlocking {
+            val heartbeat = launch { fixture.state.runHeartbeat(intervalMillis = 60_000) }
+            withTimeout(5_000) { while (fixture.pinged.size < 2) delay(5) }
+            heartbeat.cancelAndJoin()
+        }
+
+        assertEquals(listOf(CLEARNET, OTHER), fixture.pinged)
+    }
+
+    @Test
+    fun `a tor bootstrap keeps polling regardless of how fresh the last answer is`() {
+        val fixture = Fixture(server = ONION, results = listOf(true))
+        fixture.tor = TorStatus(TorPhase.READY, 100)
+        runBlocking { fixture.state.checkServerStatus() }
+        assertEquals(ServerStatus.CONNECTED_VIA_TOR, fixture.state.serverStatus)
+
+        // Tor restarts: the next tick reads the short-circuit state, which is not
+        // an answer and must keep being polled so the percentage moves.
+        fixture.tor = TorStatus(TorPhase.STARTING, 10)
+        runBlocking { fixture.state.checkServerStatus(showChecking = false) }
+        assertEquals(ServerStatus.TOR_STARTING, fixture.state.serverStatus)
+
+        fixture.clock = 1_000 // the remembered answer is still young
+        assertTrue("a Tor bootstrap must keep being polled", fixture.state.shouldCheckOnEntry())
+        assertEquals(
+            "Tor starting keeps the 2s cadence",
+            HomeScreenState.TOR_POLL_INTERVAL_MILLIS,
+            fixture.state.nextDelayMillis(fixture.state.serverStatus, 60_000),
+        )
+    }
+
     // --- heartbeat cadence --------------------------------------------------
 
     @Test
@@ -395,6 +551,13 @@ class HomeScreenStateTest {
     private companion object {
         val CLEARNET = ElectrumServer(
             host = "192.168.1.10",
+            port = 50002,
+            protocol = ElectrumProtocol.SSL,
+        )
+
+        /** A second clearnet endpoint, so a test can change the saved server. */
+        val OTHER = ElectrumServer(
+            host = "192.168.1.11",
             port = 50002,
             protocol = ElectrumProtocol.SSL,
         )
