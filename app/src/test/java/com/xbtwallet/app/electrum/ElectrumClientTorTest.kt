@@ -124,6 +124,8 @@ class ElectrumClientTorTest {
     @Test
     fun `a tor bootstrap failure is a clear error and the test fails`() {
         val failing = object : TorBootstrap {
+            override val status: TorStatus = TorStatus.OFF
+
             override suspend fun start(log: (String) -> Unit): TorProxy {
                 log("< tor: bootstrapping 0% (starting)")
                 throw TorBootstrapException("Tor did not finish bootstrapping within 120s (last status: bootstrap 40%)")
@@ -148,6 +150,8 @@ class ElectrumClientTorTest {
     fun `tor bootstrap progress is logged before the socket is dialled`() {
         val proxy = TorProxy(host = "127.0.0.1", port = closedLoopbackPort())
         val started = object : TorBootstrap {
+            override val status: TorStatus = TorStatus.OFF
+
             override suspend fun start(log: (String) -> Unit): TorProxy {
                 log("< tor: bootstrapping 50% (Loading relay descriptors)")
                 log("< tor: bootstrapping 100% (Done)")
@@ -198,6 +202,8 @@ class ElectrumClientTorTest {
         handshakeMock().use { mock ->
             TestSocksProxy(backendPort = mock.port).use { socks ->
                 val bootstrap = object : TorBootstrap {
+                    override val status: TorStatus = TorStatus.OFF
+
                     override suspend fun start(log: (String) -> Unit): TorProxy {
                         log("< tor: ready, socks proxy on 127.0.0.1:${socks.port}")
                         return TorProxy(host = "127.0.0.1", port = socks.port)

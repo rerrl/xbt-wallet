@@ -35,7 +35,11 @@ import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerStore
 import com.xbtwallet.app.electrum.ElectrumClient
 import com.xbtwallet.app.electrum.ElectrumProtocol
+import com.xbtwallet.app.electrum.ElectrumRouting
 import com.xbtwallet.app.electrum.ElectrumServer
+import com.xbtwallet.app.electrum.TorGateway
+import com.xbtwallet.app.electrum.TorPhase
+import com.xbtwallet.app.electrum.TorStatus
 import com.xbtwallet.app.ui.theme.XbtSuccessDark
 import com.xbtwallet.app.ui.theme.XbtWalletTheme
 import kotlinx.coroutines.currentCoroutineContext
@@ -47,11 +51,20 @@ enum class ServerStatus {
     /** No endpoint saved yet — the screen shows the "connect your own server" hint. */
     NOT_CONFIGURED,
 
-    /** A check is in flight and there is no answer to show yet. */
-    CHECKING,
+    /** The saved server is an onion and Tor is still bootstrapping. */
+    TOR_STARTING,
 
-    /** The last check got an answer from the server. */
+    /** The saved server is an onion and Tor gave up; there is nothing to ping. */
+    TOR_FAILED,
+
+    /** A check is in flight and there is no answer to show yet. */
+    CONNECTING,
+
+    /** The last check got an answer from a clearnet server. */
     CONNECTED,
+
+    /** The last check got an answer from a server reached through Tor. */
+    CONNECTED_VIA_TOR,
 
     /** The last check could not reach the server. */
     DISCONNECTED,
@@ -81,6 +94,8 @@ enum class ServerStatus {
  * @param serverSettings read access to the saved Electrum endpoint.
  * @param ping one liveness check against an endpoint; injected so the rules
  *   above can be tested on the JVM without a socket.
+ * @param torStatus the current bundled-Tor state, injected for the same reason:
+ *   the onion branch reads it instead of dialling, so a JVM test can drive it.
  */
 @Stable
 class HomeScreenState(
@@ -91,6 +106,7 @@ class HomeScreenState(
         // client is built with a no-op logger.
         ElectrumClient(server = server, log = {}).ping()
     },
+    private val torStatus: () -> TorStatus = { TorGateway.status() },
 ) {
 
     /** Every saved signer, oldest first. */
@@ -110,17 +126,20 @@ class HomeScreenState(
      *
      * Seeded from the store rather than left at a neutral value, so the first
      * frame after the app starts already reads correctly: nothing saved shows
-     * the helper hint, and a saved endpoint shows "Checking…" while the first
+     * the helper hint, and a saved endpoint shows "Connecting…" while the first
      * heartbeat runs — never a red "disconnected" before anything was tried.
      */
     var serverStatus by mutableStateOf(
-        if (configuredServer() == null) ServerStatus.NOT_CONFIGURED else ServerStatus.CHECKING,
+        if (configuredServer() == null) ServerStatus.NOT_CONFIGURED else ServerStatus.CONNECTING,
     )
         private set
 
-    /** The saved endpoint as `host:port` for the status line, or null when none is saved. */
-    val serverLabel: String?
-        get() = configuredServer()?.let { "${it.host}:${it.port}" }
+    /**
+     * How far Tor has got, in percent, while [serverStatus] is
+     * [ServerStatus.TOR_STARTING]. Zero in every other state.
+     */
+    var torProgressPercent by mutableStateOf(0)
+        private set
 
     /**
      * Identity of the saved endpoint. The home screen keys its heartbeat on
@@ -134,10 +153,18 @@ class HomeScreenState(
      * Runs one check and reports the result.
      *
      * [showChecking] is true for the first check of a screen visit: the neutral
-     * "Checking…" replaces the previous answer, which is what stops the
+     * "Connecting…" replaces the previous answer, which is what stops the
      * indicator flashing red before the first reply. Later heartbeats pass
      * `false` and keep the last answer on screen while the next check is in
      * flight, so a 60-second poll does not make the label blink.
+     *
+     * **Onion servers short-circuit.** When the saved host is an `.onion`, there
+     * is nothing to ping until Tor is up, and a ping now would block on the
+     * bootstrap mutex for the whole cold start. So the shared Tor status decides
+     * the answer instead: still bootstrapping reads as "Tor starting… N%" and a
+     * failed bootstrap reads as "Tor failed to start", both without a socket. A
+     * ready (or not-yet-asked) Tor falls through to a real dial, and a
+     * successful one is labelled "via Tor".
      */
     suspend fun checkServerStatus(showChecking: Boolean = true): ServerStatus {
         val server = configuredServer()
@@ -145,8 +172,32 @@ class HomeScreenState(
             serverStatus = ServerStatus.NOT_CONFIGURED
             return serverStatus
         }
-        if (showChecking) serverStatus = ServerStatus.CHECKING
-        serverStatus = if (ping(server)) ServerStatus.CONNECTED else ServerStatus.DISCONNECTED
+        val onion = ElectrumRouting.isOnionHost(server.host)
+        if (onion) {
+            val tor = torStatus()
+            torProgressPercent = tor.progressPercent
+            when (tor.phase) {
+                TorPhase.STARTING -> {
+                    serverStatus = ServerStatus.TOR_STARTING
+                    return serverStatus
+                }
+                TorPhase.FAILED -> {
+                    serverStatus = ServerStatus.TOR_FAILED
+                    return serverStatus
+                }
+                // OFF (nobody has started Tor yet) and READY both fall through to
+                // a real dial: the connection path starts Tor itself, so an OFF
+                // status here is not a dead end.
+                TorPhase.OFF, TorPhase.READY -> Unit
+            }
+        }
+        if (showChecking) serverStatus = ServerStatus.CONNECTING
+        val reachable = ping(server)
+        serverStatus = when {
+            !reachable -> ServerStatus.DISCONNECTED
+            onion -> ServerStatus.CONNECTED_VIA_TOR
+            else -> ServerStatus.CONNECTED
+        }
         return serverStatus
     }
 
@@ -164,9 +215,21 @@ class HomeScreenState(
         while (currentCoroutineContext().isActive) {
             checkServerStatus(showChecking = first)
             first = false
-            delay(intervalMillis)
+            delay(nextDelayMillis(serverStatus, intervalMillis))
         }
     }
+
+    /**
+     * How long the heartbeat waits before its next check.
+     *
+     * A Tor bootstrap takes tens of seconds and the status is a percentage that
+     * moves only while Tor is polled, so a 60-second heartbeat would show
+     * "Tor starting… 0%" for a minute. While the status is [ServerStatus.TOR_STARTING]
+     * the loop ticks at [TOR_POLL_INTERVAL_MILLIS] instead, so the line tracks the
+     * bootstrap and flips the moment Tor is ready.
+     */
+    internal fun nextDelayMillis(status: ServerStatus, intervalMillis: Long): Long =
+        if (status == ServerStatus.TOR_STARTING) TOR_POLL_INTERVAL_MILLIS else intervalMillis
 
     /** The saved endpoint, or null when the user has not entered one yet. */
     private fun configuredServer(): ElectrumServer? = serverSettings.load().takeIf { it.host.isNotBlank() }
@@ -174,6 +237,9 @@ class HomeScreenState(
     companion object {
         /** Gap between heartbeat checks while the home screen is on display. */
         const val HEARTBEAT_INTERVAL_MILLIS: Long = 60_000L
+
+        /** How often the heartbeat re-checks while Tor is bootstrapping. */
+        const val TOR_POLL_INTERVAL_MILLIS: Long = 2_000L
     }
 }
 
@@ -208,8 +274,12 @@ fun rememberHomeScreenState(
  *
  * Under the Server button the screen shows the live connection status: the
  * "connect your own server" hint until an endpoint is saved, then a dot with
- * *Connected to host:port* / *Server disconnected* — fed by the heartbeat the
- * navigation layer runs while this screen is on display (see `XbtWalletApp`).
+ * *Connected* / *Connected via Tor* / *Server disconnected* — fed by the
+ * heartbeat the navigation layer runs while this screen is on display (see
+ * `XbtWalletApp`). **No host is ever rendered**, in any state: which server the
+ * user chose is theirs, not something to put in a screenshot. While an onion
+ * server's Tor is coming up the line reads *Tor starting… N%* instead of
+ * guessing at a connection it cannot make yet.
  *
  * The screen owns no state: it renders [state] and forwards taps.
  */
@@ -243,7 +313,7 @@ fun HomeScreen(
 
             // Live server status: the facts (configured? reachable?) are the
             // state's, this only renders them.
-            ServerStatusLine(status = state.serverStatus, serverLabel = state.serverLabel)
+            ServerStatusLine(status = state.serverStatus, torProgressPercent = state.torProgressPercent)
 
             Spacer(modifier = Modifier.height(28.dp))
 
@@ -296,21 +366,29 @@ fun HomeScreen(
  * configured, otherwise a status dot and a short answer.
  *
  * Takes plain values rather than the state object so every state can be
- * previewed without a store or a network.
+ * previewed without a store or a network. It carries no host: the route-level
+ * answer ("Connected" / "Connected via Tor") is the whole point — the saved
+ * endpoint is never rendered, so it cannot leak into a screenshot.
  */
 @Composable
 private fun ServerStatusLine(
     status: ServerStatus,
-    serverLabel: String?,
+    torProgressPercent: Int,
     modifier: Modifier = Modifier,
 ) {
     val (color, label) = when (status) {
         ServerStatus.NOT_CONFIGURED ->
             MaterialTheme.colorScheme.onSurfaceVariant to "Connect to your own Electrum server"
-        ServerStatus.CHECKING ->
-            MaterialTheme.colorScheme.onSurfaceVariant to "Checking…"
+        ServerStatus.TOR_STARTING ->
+            MaterialTheme.colorScheme.onSurfaceVariant to "Tor starting\u2026 $torProgressPercent%"
+        ServerStatus.TOR_FAILED ->
+            MaterialTheme.colorScheme.error to "Tor failed to start"
+        ServerStatus.CONNECTING ->
+            MaterialTheme.colorScheme.onSurfaceVariant to "Connecting\u2026"
         ServerStatus.CONNECTED ->
-            XbtSuccessDark to "Connected to ${serverLabel.orEmpty()}"
+            XbtSuccessDark to "Connected"
+        ServerStatus.CONNECTED_VIA_TOR ->
+            XbtSuccessDark to "Connected via Tor"
         ServerStatus.DISCONNECTED ->
             MaterialTheme.colorScheme.error to "Server disconnected"
     }
@@ -395,19 +473,25 @@ private fun HomeScreenEmptyPreview() {
     }
 }
 
-/** All four server-status renderings side by side, without a state or a socket. */
+/** All seven server-status renderings side by side, without a state or a socket. */
 @Preview(showBackground = true, backgroundColor = 0xFF101418)
 @Composable
 private fun ServerStatusLinePreview() {
     XbtWalletTheme {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            ServerStatusLine(status = ServerStatus.NOT_CONFIGURED, serverLabel = null)
+            ServerStatusLine(status = ServerStatus.NOT_CONFIGURED, torProgressPercent = 0)
             Spacer(modifier = Modifier.height(12.dp))
-            ServerStatusLine(status = ServerStatus.CHECKING, serverLabel = "192.168.1.10:50002")
+            ServerStatusLine(status = ServerStatus.TOR_STARTING, torProgressPercent = 40)
             Spacer(modifier = Modifier.height(12.dp))
-            ServerStatusLine(status = ServerStatus.CONNECTED, serverLabel = "192.168.1.10:50002")
+            ServerStatusLine(status = ServerStatus.TOR_FAILED, torProgressPercent = 40)
             Spacer(modifier = Modifier.height(12.dp))
-            ServerStatusLine(status = ServerStatus.DISCONNECTED, serverLabel = null)
+            ServerStatusLine(status = ServerStatus.CONNECTING, torProgressPercent = 0)
+            Spacer(modifier = Modifier.height(12.dp))
+            ServerStatusLine(status = ServerStatus.CONNECTED, torProgressPercent = 0)
+            Spacer(modifier = Modifier.height(12.dp))
+            ServerStatusLine(status = ServerStatus.CONNECTED_VIA_TOR, torProgressPercent = 100)
+            Spacer(modifier = Modifier.height(12.dp))
+            ServerStatusLine(status = ServerStatus.DISCONNECTED, torProgressPercent = 0)
         }
     }
 }

@@ -5,13 +5,14 @@ import com.xbtwallet.app.data.ServerSettings
 import com.xbtwallet.app.data.SignerStore
 import com.xbtwallet.app.electrum.ElectrumProtocol
 import com.xbtwallet.app.electrum.ElectrumServer
+import com.xbtwallet.app.electrum.TorPhase
+import com.xbtwallet.app.electrum.TorStatus
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -22,9 +23,9 @@ import org.junit.Test
  * (a plain list, with no active selection) and "the server indicator follows a
  * real check, never a guess" — are testable without a UI or an emulator. It is
  * plain Kotlin over a [SignerStore] and a [ServerSettings], so in-memory fakes
- * drive it here; the ping itself is injected, so no socket and no clock are
- * involved (except in the one test that runs the heartbeat loop, which is
- * bounded).
+ * drive it here; the ping and the Tor status are both injected, so no socket and
+ * no clock are involved (except in the one test that runs the heartbeat loop,
+ * which is bounded).
  */
 class HomeScreenStateTest {
 
@@ -38,8 +39,9 @@ class HomeScreenStateTest {
 
     /**
      * A settable in-memory stand-in for the saved endpoint. A null host is what
-     * [ServerSettingsStore] returns when the user has never entered one, which
-     * is the "no server saved" case the home screen renders differently.
+     * [com.xbtwallet.app.data.ServerSettingsStore] returns when the user has
+     * never entered one, which is the "no server saved" case the home screen
+     * renders differently.
      */
     private class FakeServerSettings(var server: ElectrumServer? = null) : ServerSettings {
         override fun load(): ElectrumServer = server ?: ElectrumServer(
@@ -50,7 +52,8 @@ class HomeScreenStateTest {
     }
 
     /**
-     * Signer store + server settings + a scripted ping, wired into a state.
+     * Signer store + server settings + a scripted ping + a scripted Tor status,
+     * wired into a state.
      *
      * [results] answers the pings in order (the last value repeats), so a test
      * can say "up, then down" without any real network.
@@ -58,6 +61,7 @@ class HomeScreenStateTest {
     private class Fixture(
         server: ElectrumServer? = null,
         private val results: List<Boolean> = listOf(true),
+        var tor: TorStatus = TorStatus.OFF,
     ) {
         val backing = InMemoryStore()
         private var counter = 0
@@ -83,7 +87,7 @@ class HomeScreenStateTest {
                 statusDuringPing += state.serverStatus
                 results.getOrElse(call++) { results.last() }
             }
-            state = HomeScreenState(store, serverSettings, probe)
+            state = HomeScreenState(store, serverSettings, probe, torStatus = { tor })
         }
     }
 
@@ -129,57 +133,106 @@ class HomeScreenStateTest {
     }
 
     @Test
-    fun `a saved server starts out as checking, never as disconnected`() {
-        val fixture = Fixture(server = SERVER)
+    fun `a saved server starts out as connecting, never as disconnected`() {
+        val fixture = Fixture(server = CLEARNET)
 
         // Seeded from the store, so the first frame after launch already reads
-        // "Checking…" instead of showing a red dot that nothing justified.
-        assertEquals(ServerStatus.CHECKING, fixture.state.serverStatus)
+        // "Connecting…" instead of showing a red dot that nothing justified.
+        assertEquals(ServerStatus.CONNECTING, fixture.state.serverStatus)
         assertTrue("nothing should have been checked yet", fixture.pinged.isEmpty())
-        assertEquals("192.168.1.10:50002", fixture.state.serverLabel)
     }
 
     @Test
-    fun `a successful check reports connected against the saved endpoint`() {
-        val fixture = Fixture(server = SERVER)
+    fun `a successful check against a clearnet server reports connected`() {
+        val fixture = Fixture(server = CLEARNET)
 
         val status = runBlocking { fixture.state.checkServerStatus() }
 
         assertEquals(ServerStatus.CONNECTED, status)
         assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
-        assertEquals(listOf(SERVER), fixture.pinged)
-        assertEquals(listOf(ServerStatus.CHECKING), fixture.statusDuringPing)
+        assertEquals(listOf(CLEARNET), fixture.pinged)
+        assertEquals(listOf(ServerStatus.CONNECTING), fixture.statusDuringPing)
     }
 
     @Test
     fun `a failed check reports disconnected`() {
-        val fixture = Fixture(server = SERVER, results = listOf(false))
+        val fixture = Fixture(server = CLEARNET, results = listOf(false))
 
         val status = runBlocking { fixture.state.checkServerStatus() }
 
         assertEquals(ServerStatus.DISCONNECTED, status)
         assertEquals(ServerStatus.DISCONNECTED, fixture.state.serverStatus)
-        // The label stays: the Home screen keeps the host on the failed line.
-        assertEquals("192.168.1.10:50002", fixture.state.serverLabel)
     }
 
     @Test
-    fun `the first check shows checking in flight, later checks keep the last answer`() {
-        val fixture = Fixture(server = SERVER, results = listOf(true, false))
+    fun `the first check shows connecting in flight, later checks keep the last answer`() {
+        val fixture = Fixture(server = CLEARNET, results = listOf(true, false))
 
         runBlocking {
             fixture.state.checkServerStatus() // first check of the screen visit
             fixture.state.checkServerStatus(showChecking = false) // a later heartbeat
         }
 
-        // In flight: "Checking…" then the previous answer — never blank, never a
+        // In flight: "Connecting…" then the previous answer — never blank, never a
         // sign flip, which is what keeps a 60-second poll from blinking.
         assertEquals(
-            listOf(ServerStatus.CHECKING, ServerStatus.CONNECTED),
+            listOf(ServerStatus.CONNECTING, ServerStatus.CONNECTED),
             fixture.statusDuringPing,
         )
         assertEquals(ServerStatus.DISCONNECTED, fixture.state.serverStatus)
         assertEquals(2, fixture.pinged.size)
+    }
+
+    // --- onion servers and Tor ---------------------------------------------
+
+    @Test
+    fun `an onion server still bootstrapping reads as tor starting, with no ping`() {
+        val fixture = Fixture(server = ONION)
+        fixture.tor = TorStatus(TorPhase.STARTING, 40)
+
+        val status = runBlocking { fixture.state.checkServerStatus() }
+
+        // A ping here would block on the Tor bootstrap mutex for the whole cold
+        // start, so the shared Tor status answers instead.
+        assertEquals(ServerStatus.TOR_STARTING, status)
+        assertEquals(40, fixture.state.torProgressPercent)
+        assertTrue("must not dial while Tor is bootstrapping", fixture.pinged.isEmpty())
+    }
+
+    @Test
+    fun `an onion server whose tor failed reads as tor failed, with no ping`() {
+        val fixture = Fixture(server = ONION)
+        fixture.tor = TorStatus(TorPhase.FAILED, 40)
+
+        val status = runBlocking { fixture.state.checkServerStatus() }
+
+        assertEquals(ServerStatus.TOR_FAILED, status)
+        assertEquals(40, fixture.state.torProgressPercent)
+        assertTrue("nothing to dial once Tor has given up", fixture.pinged.isEmpty())
+    }
+
+    @Test
+    fun `an onion server with tor ready and a reachable server reads as connected via tor`() {
+        val fixture = Fixture(server = ONION, results = listOf(true))
+        fixture.tor = TorStatus(TorPhase.READY, 100)
+
+        val status = runBlocking { fixture.state.checkServerStatus() }
+
+        assertEquals(ServerStatus.CONNECTED_VIA_TOR, status)
+        assertEquals(listOf(ONION), fixture.pinged)
+        assertEquals(100, fixture.state.torProgressPercent)
+    }
+
+    @Test
+    fun `an onion server whose tor failed to reach the server reads as disconnected`() {
+        // Tor is up but the server behind the onion is not answering: that is a
+        // server problem, not a Tor one.
+        val fixture = Fixture(server = ONION, results = listOf(false))
+        fixture.tor = TorStatus(TorPhase.READY, 100)
+
+        val status = runBlocking { fixture.state.checkServerStatus() }
+
+        assertEquals(ServerStatus.DISCONNECTED, status)
     }
 
     @Test
@@ -190,7 +243,6 @@ class HomeScreenStateTest {
 
         assertEquals(ServerStatus.NOT_CONFIGURED, status)
         assertTrue("there is nothing to ping without an endpoint", fixture.pinged.isEmpty())
-        assertNull(fixture.state.serverLabel)
     }
 
     @Test
@@ -208,12 +260,36 @@ class HomeScreenStateTest {
         // The home screen keys its heartbeat on this, so the change re-checks
         // with the new settings instead of waiting out the old loop.
         assertEquals("10.0.0.2:50001:TCP", fixture.state.serverKey)
-        assertEquals("10.0.0.2:50001", fixture.state.serverLabel)
+    }
+
+    // --- heartbeat cadence --------------------------------------------------
+
+    @Test
+    fun `the heartbeat polls faster while tor is bootstrapping, and at the interval otherwise`() {
+        val fixture = Fixture()
+        val minute = 60_000L
+
+        assertEquals(
+            "Tor starting must tick fast so the percentage moves",
+            2_000L,
+            fixture.state.nextDelayMillis(ServerStatus.TOR_STARTING, minute),
+        )
+        // Every other state waits out the caller's interval unchanged.
+        listOf(
+            ServerStatus.NOT_CONFIGURED,
+            ServerStatus.TOR_FAILED,
+            ServerStatus.CONNECTING,
+            ServerStatus.CONNECTED,
+            ServerStatus.CONNECTED_VIA_TOR,
+            ServerStatus.DISCONNECTED,
+        ).forEach { status ->
+            assertEquals(status.name, minute, fixture.state.nextDelayMillis(status, minute))
+        }
     }
 
     @Test
     fun `the heartbeat checks immediately and keeps polling until cancelled`() {
-        val fixture = Fixture(server = SERVER)
+        val fixture = Fixture(server = CLEARNET)
 
         runBlocking {
             val heartbeat = launch { fixture.state.runHeartbeat(intervalMillis = 25) }
@@ -230,10 +306,17 @@ class HomeScreenStateTest {
     }
 
     private companion object {
-        val SERVER = ElectrumServer(
+        val CLEARNET = ElectrumServer(
             host = "192.168.1.10",
             port = 50002,
             protocol = ElectrumProtocol.SSL,
+        )
+
+        /** A well-formed-looking onion host; routing only cares about the suffix. */
+        val ONION = ElectrumServer(
+            host = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuv.onion",
+            port = 50001,
+            protocol = ElectrumProtocol.TCP,
         )
     }
 }

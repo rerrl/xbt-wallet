@@ -6,9 +6,13 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
 import android.os.SystemClock
+import androidx.compose.runtime.State
+import androidx.compose.runtime.mutableStateOf
 import com.xbtwallet.app.electrum.TorBootstrap
 import com.xbtwallet.app.electrum.TorBootstrapException
+import com.xbtwallet.app.electrum.TorPhase
 import com.xbtwallet.app.electrum.TorProxy
+import com.xbtwallet.app.electrum.TorStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
@@ -68,6 +72,22 @@ class AndroidTorBootstrap(
     @Volatile
     private var connection: ServiceConnection? = null
 
+    /**
+     * The live bootstrap state, as Compose state so a screen can observe it.
+     *
+     * This file is the one place in the Tor stack that is allowed an Android
+     * import, so it is also where the observable flavour of [status] lives: the
+     * screens render a status line, and a `State<TorStatus>` lets them recompose
+     * when it changes without polling. [status] reads the same value for callers
+     * (the home screen's check) that only want one snapshot.
+     */
+    private val _status = mutableStateOf(TorStatus.OFF)
+
+    /** The bootstrap state as observable Compose state. */
+    val observableStatus: State<TorStatus> get() = _status
+
+    override val status: TorStatus get() = _status.value
+
     override suspend fun start(log: (String) -> Unit): TorProxy {
         ready?.let {
             log("< tor: already running, socks proxy ${it.host}:${it.port}")
@@ -83,52 +103,71 @@ class AndroidTorBootstrap(
     }
 
     private suspend fun bootstrapTor(log: (String) -> Unit): TorProxy {
-        val deadline = SystemClock.elapsedRealtime() + timeoutMillis
-        val tor = service ?: bindTorService(log)
-        log("< tor: starting the bundled Tor daemon (this can take up to ${timeoutMillis / 1000}s)")
+        // Entry point of a bootstrap (first call, or a retry after a failure):
+        // from here until either READY or FAILED the status is STARTING, so the
+        // home screen shows a progress line instead of pinging a server it
+        // cannot reach through a Tor that is not up yet.
+        _status.value = TorStatus(TorPhase.STARTING, 0)
+        try {
+            val deadline = SystemClock.elapsedRealtime() + timeoutMillis
+            val tor = service ?: bindTorService(log)
+            log("< tor: starting the bundled Tor daemon (this can take up to ${timeoutMillis / 1000}s)")
 
-        var lastTenth = -1
-        var lastPhase = "starting"
-        while (SystemClock.elapsedRealtime() < deadline) {
-            val socksPort = runCatching { tor.socksPort }.getOrDefault(0)
-            val phase = runCatching { tor.getInfo("status/bootstrap-phase") }.getOrNull()
-            val circuitEstablished = runCatching { tor.getInfo("status/circuit-established") }.getOrNull()
+            var lastTenth = -1
+            var lastPhase = "starting"
+            while (SystemClock.elapsedRealtime() < deadline) {
+                val socksPort = runCatching { tor.socksPort }.getOrDefault(0)
+                val phase = runCatching { tor.getInfo("status/bootstrap-phase") }.getOrNull()
+                val circuitEstablished = runCatching { tor.getInfo("status/circuit-established") }.getOrNull()
 
-            val progress = PROGRESS.find(phase.orEmpty())?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
-            lastPhase = describePhase(phase, progress, circuitEstablished)
+                val progress = PROGRESS.find(phase.orEmpty())?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+                lastPhase = describePhase(phase, progress, circuitEstablished)
 
-            if (socksPort > 0 && (circuitEstablished?.trim() == "1" || progress >= 100)) {
-                // tor opens the SOCKS listener before the daemon is actually
-                // able to answer through it, so "port exists" is not "usable".
-                // Probe the listener for real: a connect that completes is the
-                // only proof that the port this app will dial is the port tor
-                // is listening on (9050 could equally belong to another app).
-                if (socksListenerReachable(socksPort)) {
-                    log("< tor: SOCKS listener ${SOCKS_HOST}:$socksPort accepted a probe connection")
-                    val proxy = TorProxy(host = SOCKS_HOST, port = socksPort)
-                    ready = proxy
-                    log("< tor: ready, socks proxy on ${proxy.host}:${proxy.port}")
-                    runCatching { tor.getInfo("net/listeners/socks") }.getOrNull()
-                        ?.let { log("< tor: net/listeners/socks: $it") }
-                    runCatching { tor.getInfo("version") }.getOrNull()
-                        ?.let { log("< tor: version: $it") }
-                    return proxy
+                // Publish each new percentage so the UI tracks the bootstrap
+                // rather than freezing on the value it saw first.
+                if (progress != _status.value.progressPercent) {
+                    _status.value = TorStatus(TorPhase.STARTING, progress)
                 }
-                lastPhase = "SOCKS listener on $socksPort is not accepting connections yet"
+
+                if (socksPort > 0 && (circuitEstablished?.trim() == "1" || progress >= 100)) {
+                    // tor opens the SOCKS listener before the daemon is actually
+                    // able to answer through it, so "port exists" is not "usable".
+                    // Probe the listener for real: a connect that completes is the
+                    // only proof that the port this app will dial is the port tor
+                    // is listening on (9050 could equally belong to another app).
+                    if (socksListenerReachable(socksPort)) {
+                        log("< tor: SOCKS listener ${SOCKS_HOST}:$socksPort accepted a probe connection")
+                        val proxy = TorProxy(host = SOCKS_HOST, port = socksPort)
+                        ready = proxy
+                        _status.value = TorStatus(TorPhase.READY, 100)
+                        log("< tor: ready, socks proxy on ${proxy.host}:${proxy.port}")
+                        runCatching { tor.getInfo("net/listeners/socks") }.getOrNull()
+                            ?.let { log("< tor: net/listeners/socks: $it") }
+                        runCatching { tor.getInfo("version") }.getOrNull()
+                            ?.let { log("< tor: version: $it") }
+                        return proxy
+                    }
+                    lastPhase = "SOCKS listener on $socksPort is not accepting connections yet"
+                }
+
+                val tenth = progress / 10
+                if (tenth != lastTenth) {
+                    log("< tor: bootstrapping $progress%${summarySuffix(phase)}")
+                    lastTenth = tenth
+                }
+
+                delay(pollIntervalMillis)
             }
 
-            val tenth = progress / 10
-            if (tenth != lastTenth) {
-                log("< tor: bootstrapping $progress%${summarySuffix(phase)}")
-                lastTenth = tenth
-            }
-
-            delay(pollIntervalMillis)
+            throw TorBootstrapException(
+                "Tor did not finish bootstrapping within ${timeoutMillis / 1000}s (last status: $lastPhase)",
+            )
+        } catch (failure: TorBootstrapException) {
+            // Remember how far it got, so the phase stops reading STARTING once
+            // the bootstrap has given up and a screen can honestly say it failed.
+            _status.value = TorStatus(TorPhase.FAILED, _status.value.progressPercent)
+            throw failure
         }
-
-        throw TorBootstrapException(
-            "Tor did not finish bootstrapping within ${timeoutMillis / 1000}s (last status: $lastPhase)",
-        )
     }
 
     /**

@@ -117,6 +117,31 @@ object ElectrumRouting {
 /** The local SOCKS endpoint of a running Tor daemon. */
 data class TorProxy(val host: String, val port: Int)
 
+/**
+ * Where the bundled Tor is in its bootstrap, as a UI can render it.
+ *
+ * The phases are the ones a user can actually act on: [OFF] is "nobody asked
+ * for Tor yet", [STARTING] is "wait, this really does take half a minute",
+ * [READY] is "go", and [FAILED] is the only one worth a Retry. Reporting this
+ * as its own value — rather than letting each screen infer readiness from
+ * whether a dial failed — is what lets the home screen say *Tor starting… 40%*
+ * instead of a red "disconnected" that blames the server for Tor's cold start.
+ */
+enum class TorPhase { OFF, STARTING, READY, FAILED }
+
+/**
+ * A snapshot of Tor's bootstrap state, with the percentage Tor itself reports
+ * while [phase] is [TorPhase.STARTING]. [progressPercent] is 100 once ready and
+ * is left at the last known value on failure, so the UI can explain how far it
+ * got.
+ */
+data class TorStatus(val phase: TorPhase, val progressPercent: Int) {
+    companion object {
+        /** Nobody has started Tor; the state every screen sees until someone asks. */
+        val OFF: TorStatus = TorStatus(TorPhase.OFF, 0)
+    }
+}
+
 /** Raised when the bundled Tor cannot be started or is not configured. */
 class TorBootstrapException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
@@ -135,6 +160,17 @@ class TorBootstrapException(message: String, cause: Throwable? = null) : Excepti
  */
 interface TorBootstrap {
     suspend fun start(log: (String) -> Unit): TorProxy
+
+    /**
+     * The current bootstrap state, as a plain snapshot read.
+     *
+     * Non-suspending on purpose: the UI wants to render this on every frame
+     * (the home screen polls it while a status line is on screen), and a
+     * suspension point there would either block composition or force a second
+     * coroutine per frame. Implementations expose their latest value; nobody
+     * waits on this.
+     */
+    val status: TorStatus
 }
 
 /**
@@ -162,6 +198,12 @@ object TorGateway {
     /** The installed bootstrap. */
     fun require(): TorBootstrap = bootstrap
         ?: throw TorBootstrapException("Tor is not available in this build, so .onion servers cannot be reached")
+
+    /**
+     * The installed bootstrap's current state, or [TorStatus.OFF] when none is
+     * installed. A build without Tor reads as "off", never as a failure.
+     */
+    fun status(): TorStatus = bootstrap?.status ?: TorStatus.OFF
 }
 
 /**
