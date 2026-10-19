@@ -34,38 +34,34 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
-import com.xbtwallet.app.chain.AccountSnapshot
 import com.xbtwallet.app.chain.AddressChain
-import com.xbtwallet.app.ui.signers.ScanStateBody
+import com.xbtwallet.app.chain.DerivedAddress
 import com.xbtwallet.app.ui.signers.ScannedFromBanner
 import com.xbtwallet.app.ui.signers.SignerChainState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** One rendered row: the address, and what the scan knows about it. */
-private data class AddressRowModel(
-    val index: Int,
-    val address: String,
-    /** `true` used, `false` unused, `null` beyond the range the scan visited. */
-    val used: Boolean?,
-)
-
 /**
- * Address viewer for one signer — the old viewer, now annotated with chain data.
+ * Address viewer for one signer — derived on device, annotated by the scan.
  *
  * Receive and Change are the account's two BIP-32 chains; each row is a derived
- * `bc1q...` address with its index, and tapping one copies it. What is new is
- * the right-hand tag: the gap-limit scan has asked the server about each
- * address, so the screen can say **used**, **unused**, or — for the one address
- * about to be handed out — **first unused**, which is highlighted.
+ * `bc1q...` address with its index, and tapping one copies it. Deriving an
+ * address is pure local crypto ([SignerChainState.scanner] over the account
+ * xpub), so the list appears **instantly**, in every scan phase: LOADING,
+ * NO_SERVER, ERROR and READY all render the same rows, because none of them
+ * change the arithmetic.
  *
- * The list starts as exactly what the scan visited: a full unused batch past the
- * last used address, which is the gap limit. "Show more" derives further
- * addresses on demand *in a coroutine on the default dispatcher*, so even that
- * derivation stays off the UI thread; those rows are marked **not scanned**
- * rather than **unused**, because the app genuinely has not asked about them,
- * and a receive screen that guesses is how an address with history gets handed
- * out twice.
+ * The scan is an annotation, never a gate. Where a cached or completed snapshot
+ * already knows an address's status, the right-hand tag says **used**,
+ * **unused**, or **first unused** (highlighted — the address the next receive
+ * hands out) from the moment the screen opens; a fresh scan re-labels those
+ * rows in place. Rows past the range the scan visited are **not scanned**: the
+ * app genuinely has not asked the server about them, and a screen that guessed
+ * "unused" is how an address with history gets handed out twice.
+ *
+ * "Show more" grows the page by [PAGE_SIZE] and the derivation effect fills the
+ * new tail *in a coroutine on the default dispatcher*, so even that work stays
+ * off the UI thread.
  */
 @Composable
 fun AddressesScreen(
@@ -75,26 +71,34 @@ fun AddressesScreen(
 ) {
     var chain by remember { mutableStateOf(AddressChain.RECEIVE) }
 
-    // Rows beyond the scanned range, requested by "Show more". The count is the
-    // intent; the addresses themselves are derived by the effect below, off the
-    // UI thread, and reset whenever the tab or the scan changes.
-    var extraCount by remember(chain) { mutableStateOf(0) }
-    var extraAddresses by remember(chain) { mutableStateOf(emptyList<String>()) }
+    // How many pages of locally derived addresses the user has asked for. One
+    // page is on screen from the start; "Show more" adds one at a time. Keyed on
+    // the tab so each chain keeps its own page count, and switching tabs derives
+    // that chain independently.
+    var pageCount by remember(chain) { mutableStateOf(1) }
+    var derived by remember(chain) { mutableStateOf(emptyList<DerivedAddress>()) }
     var deriving by remember(chain) { mutableStateOf(false) }
 
-    LaunchedEffect(chain, extraCount, state.snapshot) {
-        val scannedSize = state.snapshot?.addresses(chain)?.size ?: 0
+    // What the scan has answered about this chain, if anything. Empty until a
+    // (cached or fresh) snapshot exists — the derivation below is not.
+    val scanned = state.snapshot?.addresses(chain) ?: emptyList()
+
+    // The scan may have visited further than the current page; always derive at
+    // least as far as it went so no scanned row is ever truncated.
+    val target = maxOf(scanned.size, pageCount * PAGE_SIZE)
+
+    LaunchedEffect(chain, pageCount, state.snapshot, state.accountKey) {
         val scanner = state.scanner
-        if (extraCount == 0 || scanner == null) {
-            extraAddresses = emptyList()
+        if (scanner == null) {
+            derived = emptyList()
             deriving = false
             return@LaunchedEffect
         }
         deriving = true
         // Key derivation is a few elliptic-curve operations per address: cheap,
         // but not something to do between frames while the user is scrolling.
-        extraAddresses = withContext(Dispatchers.Default) {
-            (scannedSize until scannedSize + extraCount).map { index -> scanner.derive(chain, index).address }
+        derived = withContext(Dispatchers.Default) {
+            (0 until target).map { index -> scanner.derive(chain, index) }
         }
         deriving = false
     }
@@ -148,40 +152,27 @@ fun AddressesScreen(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            ScanStateBody(state, modifier = Modifier.weight(1f)) { snapshot ->
-                AddressList(
-                    snapshot = snapshot,
-                    chain = chain,
-                    extraAddresses = extraAddresses,
-                    deriving = deriving,
-                    onShowMore = { extraCount += PAGE_SIZE },
-                    modifier = Modifier.weight(1f),
-                )
-            }
+            val rows = buildAddressRows(scanned = scanned, derived = derived)
+            AddressList(
+                rows = rows,
+                firstUnusedIndex = firstUnusedIndex(rows),
+                deriving = deriving,
+                onShowMore = { pageCount++ },
+                modifier = Modifier.weight(1f),
+            )
         }
     }
 }
 
 @Composable
 private fun AddressList(
-    snapshot: AccountSnapshot,
-    chain: AddressChain,
-    extraAddresses: List<String>,
+    rows: List<AddressRowModel>,
+    firstUnusedIndex: Int?,
     deriving: Boolean,
     onShowMore: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-    val scanned = snapshot.addresses(chain)
-    val firstUnusedIndex = scanned.indexOfFirst { !it.used }.takeIf { it >= 0 }
-
-    val scannedRows = scanned.map { visited ->
-        AddressRowModel(index = visited.index, address = visited.address, used = visited.used)
-    }
-    val extraRows = extraAddresses.mapIndexed { offset, address ->
-        AddressRowModel(index = scanned.size + offset, address = address, used = null)
-    }
-    val rows = scannedRows + extraRows
 
     LazyColumn(
         modifier = modifier.fillMaxWidth(),
@@ -258,8 +249,8 @@ private fun usageLabel(used: Boolean?, firstUnused: Boolean): String = when {
 }
 
 /**
- * Rows derived per "Show more", beyond the range the scan visited. The viewer
- * and the scanner both page in twenties, so a reader sees the same rhythm.
+ * Addresses derived per page. Deriving locally is free of the network, so this
+ * is purely how many rows a reader sees before asking for more.
  */
 private const val PAGE_SIZE = 20
 

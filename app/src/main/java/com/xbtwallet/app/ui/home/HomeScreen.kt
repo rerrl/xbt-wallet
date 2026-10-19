@@ -42,9 +42,15 @@ import com.xbtwallet.app.electrum.TorPhase
 import com.xbtwallet.app.electrum.TorStatus
 import com.xbtwallet.app.ui.theme.XbtSuccessDark
 import com.xbtwallet.app.ui.theme.XbtWalletTheme
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withTimeout
 
 /** How the server indicator under the home screen's Server button reads. */
 enum class ServerStatus {
@@ -96,6 +102,9 @@ enum class ServerStatus {
  *   above can be tested on the JVM without a socket.
  * @param torStatus the current bundled-Tor state, injected for the same reason:
  *   the onion branch reads it instead of dialling, so a JVM test can drive it.
+ * @param now the wall clock, in epoch milliseconds, used to timestamp a
+ *   completed answer so a revisit can tell a fresh one from a stale one.
+ *   Injected so the staleness rule is testable without real waiting.
  */
 @Stable
 class HomeScreenState(
@@ -107,6 +116,7 @@ class HomeScreenState(
         ElectrumClient(server = server, log = {}).ping()
     },
     private val torStatus: () -> TorStatus = { TorGateway.status() },
+    private val now: () -> Long = System::currentTimeMillis,
 ) {
 
     /** Every saved signer, oldest first. */
@@ -122,12 +132,16 @@ class HomeScreenState(
     }
 
     /**
-     * Whether the saved server answered the last check.
+     * What the indicator under the Server button should read **right now**.
      *
-     * Seeded from the store rather than left at a neutral value, so the first
-     * frame after the app starts already reads correctly: nothing saved shows
-     * the helper hint, and a saved endpoint shows "Connecting…" while the first
-     * heartbeat runs — never a red "disconnected" before anything was tried.
+     * This is a derived value: every tick recomputes it from current facts (see
+     * [applyDisplay]) rather than the act of dialling setting it. The seed below
+     * covers the first frame before any tick has run — nothing saved shows the
+     * helper hint, and a saved endpoint shows "Connecting…" rather than a red
+     * "disconnected" that nothing justified.
+     *
+     * The state lives at the navigation level and is not rebuilt on a revisit,
+     * so a remembered answer renders instantly on return (see [stampedAnswer]).
      */
     var serverStatus by mutableStateOf(
         if (configuredServer() == null) ServerStatus.NOT_CONFIGURED else ServerStatus.CONNECTING,
@@ -142,111 +156,240 @@ class HomeScreenState(
         private set
 
     /**
+     * The last completed dial's answer, or null before any dial has answered.
+     * Paired with [lastAnswerAtMillis] and [lastAnswerServerKey] so a revisit can
+     * render it instantly and decide whether it is still fresh.
+     */
+    private var lastAnswerStatus: ServerStatus? = null
+
+    /**
+     * When the last answer arrived (epoch millis), or null if no dial has
+     * completed. Only a completed dial counts: [ServerStatus.TOR_STARTING] and
+     * [ServerStatus.TOR_FAILED] are derived short-circuits, not answers, so they
+     * never make a remembered answer look fresh.
+     */
+    private var lastAnswerAtMillis: Long? = null
+
+    /**
+     * The [serverKey] the last answer belongs to. A changed endpoint invalidates
+     * the remembered answer — it was about a different server.
+     */
+    private var lastAnswerServerKey: String? = null
+
+    /**
+     * The dial currently in flight, or null when none is. A dial runs as a
+     * supervised child of the heartbeat, so the tick loop never blocks on it and
+     * this slot is what keeps a second dial from starting on top of the first.
+     */
+    private var dialJob: Job? = null
+
+    /**
      * Identity of the saved endpoint. The home screen keys its heartbeat on
      * this, so editing the server on the Server screen and coming back re-checks
      * with the new settings instead of waiting out the old loop's next tick.
      */
     val serverKey: String
-        get() = configuredServer()?.let { "${it.host}:${it.port}:${it.protocol.name}" }.orEmpty()
+        get() = configuredServer()?.let(::keyOf).orEmpty()
 
     /**
-     * Runs one check and reports the result.
+     * The heartbeat: a fixed [tickMillis] tick that recomputes the display from
+     * current facts and, when a dial is due, starts one as a supervised child
+     * coroutine.
      *
-     * [showChecking] is true for the first check of a screen visit: the neutral
-     * "Connecting…" replaces the previous answer, which is what stops the
-     * indicator flashing red before the first reply. Later heartbeats pass
-     * `false` and keep the last answer on screen while the next check is in
-     * flight, so a 60-second poll does not make the label blink.
+     * The loop itself **never blocks on a dial**. A Tor bootstrap can take a
+     * minute, and a tick that waited on it would freeze the live "Tor starting…
+     * N%" line on a stale "Connecting…" for the whole cold start — the regression
+     * this loop exists to avoid. Because the dial is a child, a slow or wedged
+     * one never stops the ticks behind it.
      *
-     * **Onion servers short-circuit.** When the saved host is an `.onion`, there
-     * is nothing to ping until Tor is up, and a ping now would block on the
-     * bootstrap mutex for the whole cold start. So the shared Tor status decides
-     * the answer instead: still bootstrapping reads as "Tor starting… N%" and a
-     * failed bootstrap reads as "Tor failed to start", both without a socket. A
-     * ready (or not-yet-asked) Tor falls through to a real dial, and a
-     * successful one is labelled "via Tor".
+     * The caller is the composable that shows the home screen (`XbtWalletApp`),
+     * so the loop stops when the user leaves the screen or the process goes to
+     * the background. Cancelling it also cancels an in-flight dial: on an onion
+     * server that resets Tor to [TorPhase.OFF] (its honest-cancellation rule), so
+     * the next entry re-dials — but now with live progress shown the whole way,
+     * which is the behaviour that was actually broken.
+     *
+     * There is no service, no wake lock and no new permission behind this —
+     * deliberately, for a watch-only app.
      */
-    suspend fun checkServerStatus(showChecking: Boolean = true): ServerStatus {
-        val server = configuredServer()
-        if (server == null) {
-            serverStatus = ServerStatus.NOT_CONFIGURED
-            return serverStatus
-        }
-        val onion = ElectrumRouting.isOnionHost(server.host)
-        if (onion) {
-            val tor = torStatus()
-            torProgressPercent = tor.progressPercent
-            when (tor.phase) {
-                TorPhase.STARTING -> {
-                    serverStatus = ServerStatus.TOR_STARTING
-                    return serverStatus
+    suspend fun runHeartbeat(tickMillis: Long = TICK_INTERVAL_MILLIS) {
+        supervisorScope {
+            while (currentCoroutineContext().isActive) {
+                try {
+                    applyDisplay()
+                    if (shouldDial()) {
+                        dialJob = launch { performDial() }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // A single failed tick must not kill the loop: the next tick
+                    // recomputes the display and retries the dial when due.
                 }
-                TorPhase.FAILED -> {
-                    serverStatus = ServerStatus.TOR_FAILED
-                    return serverStatus
-                }
-                // OFF (nobody has started Tor yet) and READY both fall through to
-                // a real dial: the connection path starts Tor itself, so an OFF
-                // status here is not a dead end.
-                TorPhase.OFF, TorPhase.READY -> Unit
+                delay(tickMillis)
             }
         }
-        // Show "Connecting…" while the ping is in flight when this is a first
-        // check of the visit, or when the previous answer was still a Tor state
-        // (a multi-minute first rendezvous must not sit on a frozen-looking
-        // "Tor starting… 100%"). An answer that was already a connection is left
-        // alone, so a 60-second re-ping does not blink.
-        if (showChecking || serverStatus == ServerStatus.TOR_STARTING || serverStatus == ServerStatus.TOR_FAILED) {
-            serverStatus = ServerStatus.CONNECTING
-        }
-        val reachable = ping(server)
-        serverStatus = when {
-            !reachable -> ServerStatus.DISCONNECTED
-            onion -> ServerStatus.CONNECTED_VIA_TOR
-            else -> ServerStatus.CONNECTED
+    }
+
+    /**
+     * One-shot check: recompute the display and, when a dial is due, perform it
+     * inline. This is the off-loop path (the preview branch in `XbtWalletApp`);
+     * the heartbeat never calls it — it ticks and dials in a child instead.
+     */
+    suspend fun checkServerStatus(): ServerStatus {
+        applyDisplay()
+        if (shouldDial()) {
+            performDial()
         }
         return serverStatus
     }
 
     /**
-     * The heartbeat: one check immediately, then another every [intervalMillis]
-     * until the caller cancels this coroutine.
+     * Recomputes [serverStatus] (and [torProgressPercent]) from the current
+     * facts, in priority order:
      *
-     * The caller is the composable that shows the home screen (`XbtWalletApp`),
-     * so the loop stops when the user leaves the screen or the process goes to
-     * the background. There is no service, no wake lock and no new permission
-     * behind this — deliberately, for a watch-only app.
+     * 1. nothing saved → [ServerStatus.NOT_CONFIGURED];
+     * 2. onion && Tor bootstrapping → [ServerStatus.TOR_STARTING] with the live
+     *    percentage;
+     * 3. onion && Tor gave up → [ServerStatus.TOR_FAILED];
+     * 4. a stamped answer for this endpoint → that answer;
+     * 5. otherwise → [ServerStatus.CONNECTING] (whether or not a dial is in
+     *    flight: the pre-dial instant and the in-flight stretch read the same).
      */
-    suspend fun runHeartbeat(intervalMillis: Long = HEARTBEAT_INTERVAL_MILLIS) {
-        var first = true
-        while (currentCoroutineContext().isActive) {
-            checkServerStatus(showChecking = first)
-            first = false
-            delay(nextDelayMillis(serverStatus, intervalMillis))
+    private fun applyDisplay() {
+        val server = configuredServer()
+        if (server == null) {
+            torProgressPercent = 0
+            serverStatus = ServerStatus.NOT_CONFIGURED
+            return
+        }
+        if (ElectrumRouting.isOnionHost(server.host)) {
+            val tor = torStatus()
+            when (tor.phase) {
+                TorPhase.STARTING -> {
+                    torProgressPercent = tor.progressPercent
+                    serverStatus = ServerStatus.TOR_STARTING
+                    return
+                }
+                TorPhase.FAILED -> {
+                    torProgressPercent = tor.progressPercent
+                    serverStatus = ServerStatus.TOR_FAILED
+                    return
+                }
+                // OFF (nobody has started Tor yet) and READY both fall through to
+                // the answer/Connecting branch: the dial starts Tor itself, so an
+                // OFF status here is not a dead end.
+                TorPhase.OFF, TorPhase.READY -> Unit
+            }
+        }
+        torProgressPercent = 0
+        serverStatus = stampedAnswer() ?: ServerStatus.CONNECTING
+    }
+
+    /**
+     * The remembered answer, but only when it belongs to the current endpoint. A
+     * changed endpoint invalidates it — the old answer was about a different
+     * server, so the display goes back to "Connecting…" until the new one dials.
+     */
+    private fun stampedAnswer(): ServerStatus? {
+        if (lastAnswerAtMillis == null) return null
+        if (lastAnswerServerKey != serverKey) return null
+        return lastAnswerStatus
+    }
+
+    /**
+     * Whether a dial should start now. All must hold:
+     *
+     * - no dial is in flight;
+     * - there is no answer yet, or it is older than [STALE_AFTER_MILLIS], or it
+     *   belongs to a different endpoint;
+     * - the route can dial: a clearnet server always can, an onion server only
+     *   when Tor is [TorPhase.READY] or [TorPhase.OFF] — never while it is
+     *   bootstrapping or failed. OFF is allowed on purpose: the connection path
+     *   starts Tor itself, and the tick loop then renders live progress while
+     *   this dial is blocked on the bootstrap.
+     */
+    internal fun shouldDial(): Boolean {
+        val server = configuredServer() ?: return false
+        if (dialJob?.isActive == true) return false
+        if (ElectrumRouting.isOnionHost(server.host)) {
+            val phase = torStatus().phase
+            if (phase != TorPhase.READY && phase != TorPhase.OFF) return false
+        }
+        val answeredAt = lastAnswerAtMillis ?: return true
+        if (lastAnswerServerKey != serverKey) return true
+        return now() - answeredAt >= STALE_AFTER_MILLIS
+    }
+
+    /**
+     * Performs one dial and applies its answer. Success reads as
+     * [ServerStatus.CONNECTED_VIA_TOR] on an onion route and
+     * [ServerStatus.CONNECTED] on clearnet; a failure, an exception or the
+     * [DIAL_TIMEOUT_MILLIS] cap reads as [ServerStatus.DISCONNECTED]. Either way
+     * the answer is stamped with the endpoint it was about, so a revisit within
+     * [STALE_AFTER_MILLIS] renders it without dialling again.
+     *
+     * Only [CancellationException] escapes (the heartbeat was cancelled, or the
+     * app left the screen): a cancelled dial leaves the previous answer in place
+     * and frees the dial slot, so the next due-check may start a fresh one.
+     */
+    private suspend fun performDial() {
+        val server = configuredServer() ?: return
+        val onion = ElectrumRouting.isOnionHost(server.host)
+        val key = keyOf(server)
+        try {
+            val reachable = withTimeout(DIAL_TIMEOUT_MILLIS) { ping(server) }
+            applyAnswer(
+                if (!reachable) ServerStatus.DISCONNECTED
+                else if (onion) ServerStatus.CONNECTED_VIA_TOR
+                else ServerStatus.CONNECTED,
+                key,
+            )
+        } catch (e: TimeoutCancellationException) {
+            // Safely past Tor's 120s bootstrap cap: give up and free the slot so
+            // the next due-check can try again.
+            applyAnswer(ServerStatus.DISCONNECTED, key)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            applyAnswer(ServerStatus.DISCONNECTED, key)
         }
     }
 
     /**
-     * How long the heartbeat waits before its next check.
-     *
-     * A Tor bootstrap takes tens of seconds and the status is a percentage that
-     * moves only while Tor is polled, so a 60-second heartbeat would show
-     * "Tor starting… 0%" for a minute. While the status is [ServerStatus.TOR_STARTING]
-     * the loop ticks at [TOR_POLL_INTERVAL_MILLIS] instead, so the line tracks the
-     * bootstrap and flips the moment Tor is ready.
+     * Stamps a completed answer and renders it straight away, so a dial
+     * finishing between ticks does not leave the old label up until the next one.
      */
-    internal fun nextDelayMillis(status: ServerStatus, intervalMillis: Long): Long =
-        if (status == ServerStatus.TOR_STARTING) TOR_POLL_INTERVAL_MILLIS else intervalMillis
+    private fun applyAnswer(status: ServerStatus, key: String) {
+        lastAnswerStatus = status
+        lastAnswerServerKey = key
+        lastAnswerAtMillis = now()
+        applyDisplay()
+    }
 
     /** The saved endpoint, or null when the user has not entered one yet. */
     private fun configuredServer(): ElectrumServer? = serverSettings.load().takeIf { it.host.isNotBlank() }
 
-    companion object {
-        /** Gap between heartbeat checks while the home screen is on display. */
-        const val HEARTBEAT_INTERVAL_MILLIS: Long = 60_000L
+    /** A stable identity for an endpoint, used to tie an answer to its server. */
+    private fun keyOf(server: ElectrumServer): String =
+        "${server.host}:${server.port}:${server.protocol.name}"
 
-        /** How often the heartbeat re-checks while Tor is bootstrapping. */
-        const val TOR_POLL_INTERVAL_MILLIS: Long = 2_000L
+    companion object {
+        /** Heartbeat tick: the Tor poll cadence and the display refresh cadence. */
+        const val TICK_INTERVAL_MILLIS: Long = 2_000L
+
+        /**
+         * How old a remembered answer may be before a return to home re-checks
+         * it, and before the running loop re-dials. Younger than this, the answer
+         * is rendered as-is and no dial is paid.
+         */
+        const val STALE_AFTER_MILLIS: Long = 60_000L
+
+        /**
+         * Cap on a single dial. Safely past Tor's 120s bootstrap cap, so a dial
+         * that never answers cannot hold the dial slot forever.
+         */
+        const val DIAL_TIMEOUT_MILLIS: Long = 150_000L
     }
 }
 

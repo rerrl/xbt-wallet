@@ -453,6 +453,56 @@ class AccountScannerTest {
         assertEquals((1..60).toList(), counts)
     }
 
+    // --- memoisation --------------------------------------------------------
+
+    @Test
+    fun `derive returns equal results on repeat calls`() {
+        val scanner = scanner()
+
+        val first = scanner.derive(AddressChain.RECEIVE, 7)
+        val second = scanner.derive(AddressChain.RECEIVE, 7)
+
+        // DerivedAddress is a data class, so equality covers address, scripthash
+        // and scriptPubKey alike.
+        assertEquals(first, second)
+        assertEquals(first.address, second.address)
+        assertEquals(first.scripthash, second.scripthash)
+    }
+
+    @Test
+    fun `deriving forty addresses then re-deriving them yields identical addresses and scripthashes`() {
+        val scanner = scanner()
+
+        val firstPass = (0 until 40).flatMap { index ->
+            AddressChain.entries.map { chain -> chain to index }
+        }.map { (chain, index) -> scanner.derive(chain, index) }
+
+        // Same scanner (the memo is what the real app relies on): a second pass
+        // must be byte-for-byte identical, from the cache.
+        val secondPass = (0 until 40).flatMap { index ->
+            AddressChain.entries.map { chain -> chain to index }
+        }.map { (chain, index) -> scanner.derive(chain, index) }
+
+        assertEquals(firstPass.size, secondPass.size)
+        for ((expected, actual) in firstPass.zip(secondPass)) {
+            assertEquals(expected.address, actual.address)
+            assertEquals(expected.scripthash, actual.scripthash)
+            assertEquals(expected.scriptPubKeyHex, actual.scriptPubKeyHex)
+        }
+    }
+
+    @Test
+    fun `derive performance sanity`() {
+        // Not a correctness assertion: a generous bound so a slow CI box never
+        // flakes. The printed number is the real signal (the verifier reports it).
+        val scanner = scanner()
+        val start = System.nanoTime()
+        for (index in 0 until 100) scanner.derive(AddressChain.RECEIVE, index)
+        val elapsedMs = (System.nanoTime() - start) / 1_000_000.0
+        println("DERIVE_100_FRESH_MS=$elapsedMs")
+        assertTrue("100 fresh derives took ${elapsedMs}ms", elapsedMs < 10_000.0)
+    }
+
     private companion object {
         /** How far the fake can map a scripthash back to an index. */
         const val LOOKUP_RANGE = 200

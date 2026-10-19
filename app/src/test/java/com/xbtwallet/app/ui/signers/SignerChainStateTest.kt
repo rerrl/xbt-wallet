@@ -18,6 +18,9 @@ import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.net.ConnectException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 /**
  * SignerChainState tests — the answers the signer screen can give, cold and warm.
@@ -338,6 +341,131 @@ class SignerChainStateTest {
 
         assertEquals("a later visit must re-sync", fresh, state.snapshot)
         assertEquals(2, attempts)
+    }
+
+    // --- staleness: sync only when in flight, or stale ----------------------
+
+    @Test
+    fun `a second load while a scan is in flight starts no second scan`() {
+        // The user re-enters the signer while its scan is still running (the
+        // whole point of the app-scoped store): the running scan must not be
+        // restarted, and a second scan must not be queued behind it.
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        var scans = 0
+        val state = SignerChainState(signer(), FakeServerSettings(SERVER)) { _, _, _, _ ->
+            scans++
+            entered.countDown()
+            release.await()
+            AccountSnapshot.EMPTY
+        }
+
+        val first = thread { runBlocking { state.load() } }
+        assertTrue("the scan must have started", entered.await(5, TimeUnit.SECONDS))
+
+        runBlocking { state.load() }
+        assertEquals("an in-flight scan must not be restarted", 1, scans)
+
+        release.countDown()
+        first.join()
+        assertEquals(1, scans)
+        assertEquals(ChainPhase.READY, state.phase)
+    }
+
+    @Test
+    fun `a completed scan is not repeated while it is fresh`() {
+        var scans = 0
+        val state = SignerChainState(signer(), FakeServerSettings(SERVER), now = { 1_000L }) { _, _, _, _ ->
+            scans++
+            AccountSnapshot.EMPTY
+        }
+
+        runBlocking { state.load() }
+        assertEquals(1, scans)
+
+        // Re-entering the screen straight away: the sync is younger than
+        // STALE_AFTER_SECONDS, so nothing is rescanned.
+        runBlocking { state.load() }
+        assertEquals("a fresh sync must not be repeated", 1, scans)
+    }
+
+    @Test
+    fun `a completed scan is repeated once it is stale`() {
+        var clock = 1_000L
+        var scans = 0
+        val state = SignerChainState(signer(), FakeServerSettings(SERVER), now = { clock }) { _, _, _, _ ->
+            scans++
+            AccountSnapshot.EMPTY
+        }
+
+        runBlocking { state.load() }
+        assertEquals(1, scans)
+
+        clock += SignerChainState.STALE_AFTER_SECONDS + 1
+        runBlocking { state.load() }
+        assertEquals("a stale sync must be repeated", 2, scans)
+    }
+
+    @Test
+    fun `a seeded cache younger than the staleness window is not rescanned`() {
+        val clock = 10_000L
+        val snapshotStore = SnapshotStore(InMemoryStore(), now = { clock - 10 })
+        snapshotStore.save("id-1", AccountSnapshot(emptyList(), emptyList(), emptyList(), ScripthashBalance(5_000, 0)))
+        var scans = 0
+        val state = SignerChainState(
+            signer(),
+            FakeServerSettings(SERVER),
+            scan = { _, _, _, _ ->
+                scans++
+                AccountSnapshot.EMPTY
+            },
+            snapshotStore = snapshotStore,
+            now = { clock },
+        )
+
+        runBlocking { state.load() }
+
+        assertEquals("a 10-second-old cache must not be rescanned", 0, scans)
+        assertEquals(5_000L, state.snapshot?.satoshis)
+    }
+
+    @Test
+    fun `a seeded cache older than the staleness window is rescanned`() {
+        val clock = 10_000L
+        val snapshotStore = SnapshotStore(InMemoryStore(), now = { clock - 300 })
+        snapshotStore.save("id-1", AccountSnapshot(emptyList(), emptyList(), emptyList(), ScripthashBalance(5_000, 0)))
+        val fresh = AccountSnapshot(emptyList(), emptyList(), emptyList(), ScripthashBalance(6_000, 0))
+        var scans = 0
+        val state = SignerChainState(
+            signer(),
+            FakeServerSettings(SERVER),
+            scan = { _, _, _, _ ->
+                scans++
+                fresh
+            },
+            snapshotStore = snapshotStore,
+            now = { clock },
+        )
+
+        runBlocking { state.load() }
+
+        assertEquals("a 300-second-old cache must be rescanned", 1, scans)
+        assertEquals(fresh, state.snapshot)
+    }
+
+    @Test
+    fun `reload forces a scan even while the last one is fresh`() {
+        var scans = 0
+        val state = SignerChainState(signer(), FakeServerSettings(SERVER), now = { 1_000L }) { _, _, _, _ ->
+            scans++
+            AccountSnapshot.EMPTY
+        }
+
+        runBlocking { state.load() }
+        assertEquals(1, scans)
+
+        runBlocking { state.reload() }
+        assertEquals("Refresh/Retry always rescans", 2, scans)
     }
 
     private fun seededStore(balance: ScripthashBalance): SnapshotStore {
