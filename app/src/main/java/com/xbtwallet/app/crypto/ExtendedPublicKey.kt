@@ -82,6 +82,20 @@ class ExtendedPublicKey(
     }
 
     /**
+     * The parsed curve point of [publicKey], computed at most once.
+     *
+     * Parsing a compressed key runs the square-root exponentiation in
+     * [Secp256k1.decompress], which is expensive relative to the rest of
+     * derivation; the key material never changes (this class is immutable), so
+     * caching it turns "parse per child" into "parse per key". `lazy` is safe
+     * here because the class is immutable and the computation is deterministic;
+     * the class is not a data class, so there are no `equals`/`hashCode`
+     * concerns. Derivation is called from several threads, and `lazy`'s default
+     * synchronisation makes the first parse publish safely.
+     */
+    private val point: Secp256k1.Point by lazy { Secp256k1.parse(publicKey) }
+
+    /**
      * BIP-32 CKDpub: `I = HMAC-SHA512(chainCode, serP(Kpar) || ser32(i))`, then
      * `Ki = point(IL) + Kpar` and the child chain code is `IR`.
      *
@@ -99,8 +113,9 @@ class ExtendedPublicKey(
         val tweak = BigInteger(1, i.copyOfRange(0, 32))
         require(tweak < Secp256k1.N) { "child tweak is not a valid scalar" }
 
-        val parent = Secp256k1.parse(publicKey)
-        val child = Secp256k1.add(Secp256k1.multiply(tweak, Secp256k1.G), parent)
+        // The parsed parent point is cached: re-parsing the (immutable) public
+        // key per child was a square-root exponentiation per derivation.
+        val child = Secp256k1.add(Secp256k1.multiply(tweak, Secp256k1.G), point)
             ?: throw IllegalArgumentException("derived child is the point at infinity")
 
         return ExtendedPublicKey(

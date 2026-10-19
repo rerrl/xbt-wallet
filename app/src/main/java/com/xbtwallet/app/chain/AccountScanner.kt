@@ -3,6 +3,7 @@ package com.xbtwallet.app.chain
 import com.xbtwallet.app.crypto.ExtendedPublicKey
 import com.xbtwallet.app.crypto.Hashes
 import com.xbtwallet.app.crypto.SegwitAddress
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * The gap-limit scan: the piece that turns an account xpub plus an Electrum
@@ -48,6 +49,17 @@ import com.xbtwallet.app.crypto.SegwitAddress
  * called from the client's IO dispatcher (see
  * `ElectrumClient.withChainSession`); nothing here touches a UI framework.
  *
+ * **Memoisation.** A scanner instance lives for the whole app lifetime, one per
+ * signer (see `SignerChainStateStore`), so everything derivable is derived once
+ * and kept: the two chain keys ([chainKeys]) and every address ever derived
+ * ([derivedCache]). That is what makes paging the address list, switching
+ * between the Receive/Change tabs and a rescan re-derive *nothing* — the UI's
+ * `Dispatchers.Default` derivation and the scanner's IO thread can both call
+ * [derive] on the same instance, so the caches are [ConcurrentHashMap], never a
+ * plain map. Derivation is pure and deterministic, so a racy duplicate compute
+ * (two threads missing the cache at once) is harmless: both produce the same
+ * value and the map keeps one.
+ *
  * @param accountKey the signer's account-level extended public key.
  * @param gapLimit consecutive unused addresses that end the walk; 20 is the
  *   BIP-44 convention and the batch size.
@@ -62,7 +74,21 @@ class AccountScanner(
     }
 
     /**
-     * Derives one address of one chain.
+     * The two chain keys (`account/<chain>`), identical for every index of a
+     * chain. Re-deriving the chain key per address was pure duplicated work;
+     * memoised here it is derived at most once per chain per scanner instance.
+     */
+    private val chainKeys = ConcurrentHashMap<AddressChain, ExtendedPublicKey>()
+
+    /**
+     * Every address this scanner has derived, keyed by chain and index. A repeat
+     * [derive] returns the cached [DerivedAddress] verbatim, so a page or a
+     * rescan pays no crypto at all for addresses it has already seen.
+     */
+    private val derivedCache = ConcurrentHashMap<Pair<AddressChain, Int>, DerivedAddress>()
+
+    /**
+     * Derives one address of one chain, memoised.
      *
      * The path is `account/<chain>/<index>`: [accountKey] is already the account
      * (`m/84'/0'/0'`), so a child of the chain key is the address key. The
@@ -70,21 +96,27 @@ class AccountScanner(
      * key — the same construction the address viewer has always used, now in one
      * place so the scan, the viewer and the UTXO list can never derive
      * differently.
+     *
+     * Both the chain key and the resulting address are cached, so repeated calls
+     * for the same `(chain, index)` return the identical object without touching
+     * the curve.
      */
     fun derive(chain: AddressChain, index: Int): DerivedAddress {
         require(index >= 0) { "address index must not be negative, got $index" }
-        val chainKey = accountKey.deriveChild(chain.index)
-        val addressKey = chainKey.deriveChild(index.toLong())
-        val program = Hashes.hash160(addressKey.publicKey)
-        return DerivedAddress(
-            chain = chain,
-            index = index,
-            address = SegwitAddress.encodeP2wpkh(SegwitAddress.MAINNET_HRP, program),
-            scripthash = Scripthash.ofP2wpkh(program),
-            // Carried alongside so a transaction's outputs can be matched without
-            // decoding a script back into an address.
-            scriptPubKeyHex = Scripthash.toHex(Scripthash.p2wpkhScript(program)),
-        )
+        return derivedCache.getOrPut(chain to index) {
+            val chainKey = chainKeys.getOrPut(chain) { accountKey.deriveChild(chain.index) }
+            val addressKey = chainKey.deriveChild(index.toLong())
+            val program = Hashes.hash160(addressKey.publicKey)
+            DerivedAddress(
+                chain = chain,
+                index = index,
+                address = SegwitAddress.encodeP2wpkh(SegwitAddress.MAINNET_HRP, program),
+                scripthash = Scripthash.ofP2wpkh(program),
+                // Carried alongside so a transaction's outputs can be matched
+                // without decoding a script back into an address.
+                scriptPubKeyHex = Scripthash.toHex(Scripthash.p2wpkhScript(program)),
+            )
+        }
     }
 
     /**
