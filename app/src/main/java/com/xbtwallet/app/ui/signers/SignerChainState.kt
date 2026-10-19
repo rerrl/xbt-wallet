@@ -113,6 +113,10 @@ class SignerChainState(
      * One visit's worth of work. Distinct from [phase] on purpose: with a cached
      * snapshot the phase can already be [ChainPhase.READY] before [load] runs,
      * so "has this state started?" is its own flag rather than a phase check.
+     *
+     * A scan that is *cancelled* mid-flight clears this flag again (see
+     * [coldScan]/[warmScan]), so a cancelled visit leaves the state
+     * re-startable rather than one-shot-consumed.
      */
     private var started = false
 
@@ -132,6 +136,10 @@ class SignerChainState(
      * the screen recomposes or the signer changes; a state that has already
      * started does nothing, so one visit costs one scan. When a snapshot was
      * seeded at construction that scan is an incremental rescan of it.
+     *
+     * A scan cancelled mid-flight (the screen went away) leaves this state
+     * re-startable — the cancelled scan un-sets the flag it set, so the next
+     * visit runs a real scan instead of silently doing nothing.
      */
     suspend fun load() {
         if (started) return
@@ -201,7 +209,12 @@ class SignerChainState(
             snapshotStore?.save(signer.id, result)
         } catch (cancellation: CancellationException) {
             // Leaving the screen while the scan is in flight must stay a
-            // cancellation, not become an error message about the network.
+            // cancellation, not become an error message about the network — but
+            // the state must also be *re-startable*: a re-displayed screen would
+            // otherwise sit on LOADING forever, so drop back to IDLE and clear
+            // the one-visit flag before rethrowing.
+            phase = ChainPhase.IDLE
+            started = false
             throw cancellation
         } catch (error: Exception) {
             snapshot = null
@@ -226,7 +239,9 @@ class SignerChainState(
             snapshotStore?.save(signer.id, result)
         } catch (cancellation: CancellationException) {
             // Cancelling (leaving the screen) is not a failure: the cached data
-            // is untouched and a later visit rescans.
+            // is untouched and a later visit rescans. Clear the one-visit flag so
+            // that later visit can actually start (isSyncing is reset in finally).
+            started = false
             throw cancellation
         } catch (error: Exception) {
             // Keep the cached snapshot: a refresh that failed must not blank a

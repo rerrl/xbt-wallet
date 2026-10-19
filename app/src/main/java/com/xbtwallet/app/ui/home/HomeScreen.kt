@@ -191,7 +191,14 @@ class HomeScreenState(
                 TorPhase.OFF, TorPhase.READY -> Unit
             }
         }
-        if (showChecking) serverStatus = ServerStatus.CONNECTING
+        // Show "Connecting…" while the ping is in flight when this is a first
+        // check of the visit, or when the previous answer was still a Tor state
+        // (a multi-minute first rendezvous must not sit on a frozen-looking
+        // "Tor starting… 100%"). An answer that was already a connection is left
+        // alone, so a 60-second re-ping does not blink.
+        if (showChecking || serverStatus == ServerStatus.TOR_STARTING || serverStatus == ServerStatus.TOR_FAILED) {
+            serverStatus = ServerStatus.CONNECTING
+        }
         val reachable = ping(server)
         serverStatus = when {
             !reachable -> ServerStatus.DISCONNECTED

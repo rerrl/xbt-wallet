@@ -78,6 +78,13 @@ class HomeScreenStateTest {
         /** [HomeScreenState.serverStatus] as seen *inside* each ping, i.e. in flight. */
         val statusDuringPing = mutableListOf<ServerStatus>()
 
+        /**
+         * When set, the probe suspends here until the test completes it. That is
+         * how a test observes the status *while a dial is genuinely in flight*
+         * rather than only at the instant the probe was entered.
+         */
+        var hold: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+
         lateinit var state: HomeScreenState
 
         init {
@@ -85,6 +92,7 @@ class HomeScreenStateTest {
             val probe: suspend (ElectrumServer) -> Boolean = { target ->
                 pinged += target
                 statusDuringPing += state.serverStatus
+                hold?.await()
                 results.getOrElse(call++) { results.last() }
             }
             state = HomeScreenState(store, serverSettings, probe, torStatus = { tor })
@@ -233,6 +241,85 @@ class HomeScreenStateTest {
         val status = runBlocking { fixture.state.checkServerStatus() }
 
         assertEquals(ServerStatus.DISCONNECTED, status)
+    }
+
+    @Test
+    fun `onion + Tor READY pings and promotes to CONNECTED_VIA_TOR`() {
+        // Regression: one tick sees Tor STARTING (the 100% the user was stuck
+        // on), the next sees it READY. The READY tick must actually dial and
+        // promote, not short-circuit on the stale STARTING value.
+        val fixture = Fixture(server = ONION, results = listOf(true))
+        fixture.tor = TorStatus(TorPhase.STARTING, 100)
+
+        val first = runBlocking { fixture.state.checkServerStatus() }
+        assertEquals(ServerStatus.TOR_STARTING, first)
+        assertEquals("nothing to dial while Tor bootstraps", 0, fixture.pinged.size)
+
+        fixture.tor = TorStatus(TorPhase.READY, 100)
+        val second = runBlocking { fixture.state.checkServerStatus(showChecking = false) }
+
+        assertEquals(ServerStatus.CONNECTED_VIA_TOR, second)
+        assertEquals(ServerStatus.CONNECTED_VIA_TOR, fixture.state.serverStatus)
+        assertEquals(listOf(ONION), fixture.pinged)
+    }
+
+    @Test
+    fun `onion + Tor READY shows CONNECTING while the first dial is in flight`() {
+        // A multi-minute first rendezvous must not look frozen on "Tor
+        // starting… 100%": the fall-through to a real dial has to move the label
+        // to CONNECTING even though this is not the first check of the visit.
+        val fixture = Fixture(server = ONION, results = listOf(true))
+        fixture.tor = TorStatus(TorPhase.STARTING, 100)
+
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        fixture.hold = gate
+
+        runBlocking {
+            assertEquals(ServerStatus.TOR_STARTING, fixture.state.checkServerStatus())
+            fixture.tor = TorStatus(TorPhase.READY, 100)
+
+            val check = launch { fixture.state.checkServerStatus(showChecking = false) }
+            withTimeout(5_000) { while (fixture.pinged.isEmpty()) delay(5) }
+
+            assertEquals(
+                "a first dial must not sit on a frozen Tor starting 100%",
+                ServerStatus.CONNECTING,
+                fixture.state.serverStatus,
+            )
+
+            gate.complete(Unit)
+            check.join()
+        }
+
+        assertEquals(ServerStatus.CONNECTED_VIA_TOR, fixture.state.serverStatus)
+    }
+
+    @Test
+    fun `an established CONNECTED_VIA_TOR does not blink to CONNECTING on a later heartbeat`() {
+        val fixture = Fixture(server = ONION, results = listOf(true))
+        fixture.tor = TorStatus(TorPhase.READY, 100)
+
+        runBlocking { fixture.state.checkServerStatus() }
+        assertEquals(ServerStatus.CONNECTED_VIA_TOR, fixture.state.serverStatus)
+
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        fixture.hold = gate
+
+        runBlocking {
+            val check = launch { fixture.state.checkServerStatus(showChecking = false) }
+            withTimeout(5_000) { while (fixture.pinged.size < 2) delay(5) }
+
+            assertEquals(
+                "a 60-second re-ping must not blink an established connection",
+                ServerStatus.CONNECTED_VIA_TOR,
+                fixture.state.serverStatus,
+            )
+
+            gate.complete(Unit)
+            check.join()
+        }
+
+        assertEquals(ServerStatus.CONNECTED_VIA_TOR, fixture.state.serverStatus)
     }
 
     @Test

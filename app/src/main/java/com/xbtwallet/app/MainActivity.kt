@@ -11,6 +11,7 @@ import com.xbtwallet.app.electrum.TorGateway
 import com.xbtwallet.app.electrum.tor.AndroidTorBootstrap
 import com.xbtwallet.app.ui.XbtWalletApp
 import com.xbtwallet.app.ui.theme.XbtWalletTheme
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
@@ -26,11 +27,22 @@ class MainActivity : ComponentActivity() {
         // failure here is deliberately swallowed: the screens read the shared Tor
         // status (see TorGateway.status) and show it; the connection path itself
         // retries, so an eager start that loses a race is not an error to report.
+        // Cancellation is rethrown, never swallowed: this coroutine dies with the
+        // activity, and a CancellationException caught and discarded here would
+        // hide the fact that the bootstrap was torn down mid-flight.
         val bootstrap = AndroidTorBootstrap(applicationContext)
         TorGateway.install(bootstrap)
         val saved = ServerSettingsStore(applicationContext).load()
         if (ElectrumRouting.isOnionHost(saved.host)) {
-            lifecycleScope.launch(Dispatchers.IO) { runCatching { bootstrap.start(log = {}) } }
+            lifecycleScope.launch(Dispatchers.IO) {
+                try {
+                    bootstrap.start(log = {})
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (_: Exception) {
+                    // Surfaced through the Tor status line; nothing to do here.
+                }
+            }
         }
         setContent {
             XbtWalletTheme {

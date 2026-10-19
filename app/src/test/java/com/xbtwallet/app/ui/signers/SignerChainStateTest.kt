@@ -295,6 +295,51 @@ class SignerChainStateTest {
         assertEquals(0, scans)
     }
 
+    // --- cancellation hardening ---------------------------------------------
+
+    @Test
+    fun `a cancelled cold scan leaves the state re-startable`() {
+        // Leaving the signer screen while the cold scan is in flight cancels it.
+        // The next visit must be able to scan again rather than sit on LOADING
+        // forever (the one-visit flag has to be un-set by the cancellation).
+        var attempt = 0
+        val state = SignerChainState(signer(), FakeServerSettings(SERVER)) { _, _, _, _ ->
+            attempt++
+            if (attempt == 1) throw CancellationException("screen left") else AccountSnapshot.EMPTY
+        }
+
+        assertThrows(CancellationException::class.java) { runBlocking { state.load() } }
+        assertEquals("a cancelled scan must not sit on LOADING", ChainPhase.IDLE, state.phase)
+
+        runBlocking { state.load() }
+
+        assertEquals(ChainPhase.READY, state.phase)
+        assertEquals("the later visit must actually scan", 2, attempt)
+    }
+
+    @Test
+    fun `a cancelled warm refresh keeps the cache and can re-sync`() {
+        val snapshotStore = seededStore(ScripthashBalance(5_000, 0))
+        val fresh = AccountSnapshot(emptyList(), emptyList(), emptyList(), ScripthashBalance(6_000, 0))
+        var attempts = 0
+        val state = SignerChainState(signer(), FakeServerSettings(SERVER), scan = { _, _, _, _ ->
+            attempts++
+            if (attempts == 1) throw CancellationException("screen left") else fresh
+        }, snapshotStore = snapshotStore)
+
+        assertThrows(CancellationException::class.java) { runBlocking { state.load() } }
+
+        assertEquals("the cached snapshot must survive a cancellation", 5_000L, state.snapshot?.satoshis)
+        assertEquals(ChainPhase.READY, state.phase)
+        assertFalse("a cancelled refresh is not still syncing", state.isSyncing)
+        assertFalse(state.syncFailed)
+
+        runBlocking { state.load() }
+
+        assertEquals("a later visit must re-sync", fresh, state.snapshot)
+        assertEquals(2, attempts)
+    }
+
     private fun seededStore(balance: ScripthashBalance): SnapshotStore {
         val store = SnapshotStore(InMemoryStore(), now = { 1L })
         store.save("id-1", AccountSnapshot(emptyList(), emptyList(), emptyList(), balance))
