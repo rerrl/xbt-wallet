@@ -47,12 +47,18 @@ interface ChainQuery {
     fun getTipHeight(): Int
 
     /**
-     * The raw 80-byte block header at [height], as lowercase hex — what
+     * The block header at [height], as hex — what
      * [`blockchain.block.header`] answers.
      *
-     * Needed only to date a transaction row: `get_history` reports a mined
-     * height and no time, and the time lives in the header. See
+     * **At least** 80 bytes (160 hex characters): an ElectrumX/electrs server
+     * sends exactly that, and a chain that extends its header — the BLAKE2b
+     * hardfork the test server indexes appends an 84-byte PoW extension, making
+     * it 164 bytes — sends more. Only the 80-byte prefix is ever read, and the
+     * timestamp always sits at byte 68 of it; see
      * [blockTimestampFromHeaderHex].
+     *
+     * Needed only to date a transaction row: `get_history` reports a mined
+     * height and no time, and the time lives in the header.
      */
     fun blockHeader(height: Int): String
 }

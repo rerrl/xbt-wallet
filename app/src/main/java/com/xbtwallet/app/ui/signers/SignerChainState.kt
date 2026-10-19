@@ -1,5 +1,6 @@
 package com.xbtwallet.app.ui.signers
 
+import android.util.Log
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -366,6 +367,13 @@ typealias ChainScan = suspend (ElectrumServer, AccountScanner, AccountSnapshot?,
  *
  * The client is built with a no-op logger — this is a background read, and the
  * Server screen's log is for connection tests, not for every balance refresh.
+ *
+ * The one thing this *does* report is a block header that could not be read: a
+ * row that cannot be dated used to become a row with no date line and no
+ * explanation anywhere (the failure was swallowed one layer down), which is
+ * unfixable from a user's bug report. It goes to Logcat as a warning — height
+ * only, never the server's identity or any address — and the Transactions
+ * section says one line about it on screen.
  */
 internal suspend fun scanOverElectrum(
     server: ElectrumServer,
@@ -374,5 +382,15 @@ internal suspend fun scanOverElectrum(
     onScanned: (Int) -> Unit,
 ): AccountSnapshot =
     ElectrumClient(server = server, log = {}).withChainSession { query ->
-        if (cached == null) scanner.scan(query, onScanned) else scanner.rescan(query, cached, onScanned)
+        val onTimestampFailure: (Int, Exception) -> Unit = { height, error ->
+            Log.w(SCAN_LOG_TAG, "block header unavailable for height $height", error)
+        }
+        if (cached == null) {
+            scanner.scan(query, onScanned, onTimestampFailure)
+        } else {
+            scanner.rescan(query, cached, onScanned, onTimestampFailure)
+        }
     }
+
+/** Logcat tag for the scan's own diagnostics (see [scanOverElectrum]). */
+private const val SCAN_LOG_TAG = "SignerChainScan"

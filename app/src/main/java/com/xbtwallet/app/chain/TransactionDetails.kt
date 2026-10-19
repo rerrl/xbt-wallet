@@ -86,6 +86,18 @@ enum class ConfirmationBucket {
 const val SETTLED_CONFIRMATIONS: Int = 6
 
 /**
+ * True when at least one confirmed row carries no date — what a list looks like
+ * when a block header could not be read (see [buildTransactionRows]).
+ *
+ * The Transactions section shows one quiet line for this rather than an
+ * explanation per row: the failure is per *block*, not per transaction, and
+ * several rows mined in the same block share it. Unconfirmed rows are not
+ * counted: they have no block to date them, which is normal, not a failure.
+ */
+fun List<TransactionRow>.hasUndatedConfirmedRows(): Boolean =
+    any { row -> row.confirmed && row.blockTimestampEpochSeconds == null }
+
+/**
  * Buckets a confirmation count. The boundaries are the card's, exactly:
  * 0 is unconfirmed, 1..5 is shallow, 6 and above is settled.
  */
@@ -140,7 +152,11 @@ const val MAX_DETAILED_TRANSACTIONS: Int = 50
  * confirmed height among the shown rows (rows mined in the same block share one
  * call), and never for an unconfirmed row. A header that cannot be read leaves
  * its rows' [TransactionRow.blockTimestampEpochSeconds] null: dating a row is
- * best-effort and must never fail a scan.
+ * best-effort and must never fail a scan — but it must never be *silent*
+ * either, so every failure is handed to [onTimestampFailure] (the Android side
+ * logs it, and the Transactions section says one line about it). A server whose
+ * header is longer than 80 bytes is not a failure: the parser reads the 80-byte
+ * prefix (see [blockTimestampFromHeaderHex]).
  *
  * **Reuse.** [cachedRows] is the previous scan's rows, keyed by txid. A shown
  * entry whose cached row is *confirmed and still at the same height* is reused
@@ -158,6 +174,13 @@ const val MAX_DETAILED_TRANSACTIONS: Int = 50
  *
  * Throws whatever the transport throws: a transaction that cannot be read is an
  * error state on the screen, not a row with a guessed amount.
+ *
+ * @param onTimestampFailure called once per *distinct height* whose block header
+ *   could not be fetched or read, with the height and the exception — never for
+ *   an unconfirmed row, and never for a header that merely came back larger than
+ *   80 bytes. The default does nothing, which is what the JVM tests and any
+ *   caller with nowhere to report to want; the app wires it to `Log.w` and the
+ *   Transactions section renders one line about it.
  */
 internal fun buildTransactionRows(
     transactions: List<ScannedTransaction>,
@@ -165,6 +188,7 @@ internal fun buildTransactionRows(
     query: ChainQuery,
     limit: Int = MAX_DETAILED_TRANSACTIONS,
     cachedRows: Map<String, TransactionRow> = emptyMap(),
+    onTimestampFailure: (height: Int, error: Exception) -> Unit = { _, _ -> },
 ): List<TransactionRow> {
     if (transactions.isEmpty()) return emptyList()
     val walletScripts = addresses.mapNotNullTo(HashSet()) {
@@ -233,8 +257,10 @@ internal fun buildTransactionRows(
     // Date the confirmed rows: one `block.header` call per DISTINCT height,
     // shared by every row mined in the same block. A header that cannot be read
     // leaves its rows' timestamps null rather than failing the scan — a date is
-    // not worth losing a whole balance over. Unconfirmed rows stay null: there
-    // is no block to read.
+    // not worth losing a whole balance over — but the failure is *reported*
+    // through onTimestampFailure instead of being swallowed: a row that is
+    // silently undated is exactly the bug this callback exists to expose.
+    // Unconfirmed rows stay null: there is no block to read.
     val heights = rows.asSequence().filter { it.confirmed }.map { it.height }.toSet()
     val timestamps = HashMap<Int, Long?>(heights.size)
     for (height in heights) {
@@ -242,7 +268,8 @@ internal fun buildTransactionRows(
             blockTimestampFromHeaderHex(query.blockHeader(height))
         } catch (error: Exception) {
             // The height exists (the history reported it) but its header did
-            // not come back. Leave the date unknown.
+            // not come back, or came back as something that is not a header.
+            onTimestampFailure(height, error)
             null
         }
     }

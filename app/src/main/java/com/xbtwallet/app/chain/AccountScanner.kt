@@ -124,18 +124,26 @@ class AccountScanner(
     /**
      * Walks both chains from scratch and reports everything the account holds.
      *
-     * [onScanned] is called after every address the server answers about, with
-     * the running count — the signer screen uses it to show that the scan is
-     * making progress rather than hanging. It is called from the scanning thread.
+     * @param onScanned is called after every address the server answers about, with
+     *   the running count — the signer screen uses it to show that the scan is
+     *   making progress rather than hanging. It is called from the scanning thread.
+     * @param onTimestampFailure is passed straight through to
+     *   [buildTransactionRows]: a block header that could not be read leaves its
+     *   rows undated, and this is how the app learns about it instead of the date
+     *   lines simply going missing (see the Android caller, which logs it).
      */
-    fun scan(query: ChainQuery, onScanned: (Int) -> Unit = {}): AccountSnapshot {
+    fun scan(
+        query: ChainQuery,
+        onScanned: (Int) -> Unit = {},
+        onTimestampFailure: (height: Int, error: Exception) -> Unit = { _, _ -> },
+    ): AccountSnapshot {
         var checked = 0
         val count: () -> Unit = { checked++; onScanned(checked) }
 
         val receive = scanChain(query, AddressChain.RECEIVE, count)
         val change = scanChain(query, AddressChain.CHANGE, count)
 
-        return assemble(receive, change, query)
+        return assemble(receive, change, query, onTimestampFailure = onTimestampFailure)
     }
 
     /**
@@ -165,15 +173,28 @@ class AccountScanner(
      *
      * @param cached the snapshot a previous scan produced; its addresses are the
      *   re-check list and its rows are the reuse pool for the transaction list.
+     * @param onTimestampFailure as in [scan]: a header that cannot be read is
+     *   reported, not swallowed.
      */
-    fun rescan(query: ChainQuery, cached: AccountSnapshot, onScanned: (Int) -> Unit = {}): AccountSnapshot {
+    fun rescan(
+        query: ChainQuery,
+        cached: AccountSnapshot,
+        onScanned: (Int) -> Unit = {},
+        onTimestampFailure: (height: Int, error: Exception) -> Unit = { _, _ -> },
+    ): AccountSnapshot {
         var checked = 0
         val count: () -> Unit = { checked++; onScanned(checked) }
 
         val receive = rescanChain(query, AddressChain.RECEIVE, cached.receive, count)
         val change = rescanChain(query, AddressChain.CHANGE, cached.change, count)
 
-        return assemble(receive, change, query, cachedRows = cached.transactions.associateBy { it.txHash })
+        return assemble(
+            receive,
+            change,
+            query,
+            cachedRows = cached.transactions.associateBy { it.txHash },
+            onTimestampFailure = onTimestampFailure,
+        )
     }
 
     /**
@@ -190,6 +211,7 @@ class AccountScanner(
         change: List<ScannedAddress>,
         query: ChainQuery,
         cachedRows: Map<String, TransactionRow> = emptyMap(),
+        onTimestampFailure: (height: Int, error: Exception) -> Unit = { _, _ -> },
     ): AccountSnapshot {
         // Only addresses with history can hold anything, so only they are asked
         // for a balance and a UTXO list.
@@ -225,6 +247,7 @@ class AccountScanner(
                 addresses = receive + change,
                 query = query,
                 cachedRows = cachedRows,
+                onTimestampFailure = onTimestampFailure,
             ),
         )
     }

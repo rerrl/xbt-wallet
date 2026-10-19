@@ -336,7 +336,7 @@ class AccountScannerTest {
     }
 
     @Test
-    fun `a missing header leaves the row's date null instead of failing the scan`() {
+    fun `a missing header leaves the row's date null instead of failing the scan, and is reported`() {
         val scanner = scanner()
         // No header fixture at all: every block.header call errors.
         val query = FakeChainQuery(
@@ -344,12 +344,14 @@ class AccountScannerTest {
             usedReceive = setOf(0),
             history = mapOf((AddressChain.RECEIVE to 0) to listOf(HistoryEntry(txHash = TX_A, height = 800_000))),
         )
+        val failures = mutableListOf<Int>()
 
-        val snapshot = scanner.scan(query)
+        val snapshot = scanner.scan(query, onTimestampFailure = { height, _ -> failures += height })
 
         assertEquals(1, snapshot.transactions.size)
         assertNull(snapshot.transactions.single().blockTimestampEpochSeconds)
         assertEquals("the header was still asked for; only its reading failed", listOf(800_000), query.headerCalls)
+        assertEquals("and the failure reached the caller instead of vanishing", listOf(800_000), failures)
     }
 
     // --- incremental rescan -------------------------------------------------
@@ -509,6 +511,43 @@ class AccountScannerTest {
 
         // 20 cached + 20 continuation receive, then 20 cold change.
         assertEquals((1..60).toList(), counts)
+    }
+
+    // --- row dating failures are reported, not swallowed --------------------
+
+    @Test
+    fun `a header longer than eighty bytes dates a row and is not a failure`() {
+        // The real server's shape from the BLAKE2b hardfork's activation height
+        // on: 164 bytes. The scan must date the row off the 80-byte prefix and
+        // report nothing — this is the regression the whole card is about.
+        val scanner = scanner()
+        val query = FakeChainQuery(
+            scanner,
+            usedReceive = setOf(0),
+            history = mapOf((AddressChain.RECEIVE to 0) to listOf(HistoryEntry(txHash = TX_A, height = 800_000))),
+            blockHeaders = mapOf(800_000 to GENESIS_HEADER + "00".repeat(84)),
+        )
+        val failures = mutableListOf<Int>()
+
+        val snapshot = scanner.scan(query, onTimestampFailure = { height, _ -> failures += height })
+
+        assertEquals(1231006505L, snapshot.transactions.single().blockTimestampEpochSeconds)
+        assertTrue("an extended header is not a failure: $failures", failures.isEmpty())
+    }
+
+    @Test
+    fun `a rescan reports a header failure the same way the cold scan does`() {
+        val scanner = scanner()
+        val cached = cachedSnapshot(scanner, receiveCount = 20)
+        val failures = mutableListOf<Int>()
+
+        scanner.rescan(
+            FakeChainQuery(scanner, usedReceive = setOf(0)),
+            cached,
+            onTimestampFailure = { height, _ -> failures += height },
+        )
+
+        assertEquals(listOf(800_000), failures)
     }
 
     // --- memoisation --------------------------------------------------------

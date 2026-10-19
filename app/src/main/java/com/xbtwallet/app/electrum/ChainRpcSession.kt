@@ -86,8 +86,17 @@ class ChainRpcSession internal constructor(
 
     override fun blockHeader(height: Int): String {
         val result = call("blockchain.block.header", listOf(height))
-        return result as? String
-            ?: throw ElectrumException("block.header did not answer with hex: ${MiniJson.encode(result)}")
+        // Every implementation answers with the header as a bare hex string —
+        // only the *length* varies (80 bytes on ElectrumX/electrs, 164 on the
+        // BLAKE2b hardfork the test server indexes). A wrapper object keyed
+        // `hex` is accepted too, because a server build that did that would
+        // otherwise look like a dating failure rather than a protocol quirk.
+        return when (result) {
+            is String -> result
+            is Map<*, *> -> result["hex"] as? String
+                ?: throw ElectrumException("block.header did not answer with hex: ${MiniJson.encode(result)}")
+            else -> throw ElectrumException("block.header did not answer with hex: ${MiniJson.encode(result)}")
+        }
     }
 
     private fun Map<*, *>.string(key: String): String = this[key] as? String

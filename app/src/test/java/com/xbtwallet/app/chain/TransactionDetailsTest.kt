@@ -434,6 +434,89 @@ class TransactionDetailsTest {
     }
 
     @Test
+    fun `a header that cannot be read is reported to the caller, and its row stays undated`() {
+        // The failure must never be silent: an undated row with no explanation
+        // anywhere is exactly the bug this callback exists to expose. The fake
+        // answers a height with no fixture with an exception, and the callback
+        // must receive that height and that exception once.
+        val failures = mutableListOf<Pair<Int, Exception>>()
+        val query = FakeTxQuery(transactions = mapOf(fund.first to fund.second), tipHeight = 800_000)
+
+        val rows = buildTransactionRows(
+            transactions = listOf(ScannedTransaction(txHash = fund.first, height = 800_000)),
+            addresses = listOf(address(AddressChain.RECEIVE, 0, receiveScript)),
+            query = query,
+            onTimestampFailure = { height, error -> failures += height to error },
+        )
+
+        assertNull(rows.single().blockTimestampEpochSeconds)
+        assertEquals(listOf(800_000), failures.map { it.first })
+        assertTrue(
+            "the exception itself must travel with the height, got ${failures.single().second::class.java.simpleName}",
+            failures.single().second is IllegalStateException,
+        )
+    }
+
+    @Test
+    fun `an unconfirmed row is not reported as a dating failure`() {
+        // A mempool transaction has no block to read, which is normal — only a
+        // confirmed row whose header failed is worth reporting.
+        val failures = mutableListOf<Int>()
+        val query = FakeTxQuery(transactions = mapOf(fund.first to fund.second), tipHeight = 800_000)
+
+        val rows = buildTransactionRows(
+            transactions = listOf(ScannedTransaction(txHash = fund.first, height = 0)),
+            addresses = listOf(address(AddressChain.RECEIVE, 0, receiveScript)),
+            query = query,
+            onTimestampFailure = { height, _ -> failures += height },
+        )
+
+        assertNull(rows.single().blockTimestampEpochSeconds)
+        assertTrue("no header call, no failure", failures.isEmpty())
+        assertTrue("nothing was asked for either", query.headerCalls.isEmpty())
+    }
+
+    @Test
+    fun `a header longer than eighty bytes dates a row without reporting a failure`() {
+        // The real server's shape: 164 bytes. The date comes off the 80-byte
+        // prefix, and the longer reply is not a failure.
+        val failures = mutableListOf<Int>()
+        val query = FakeTxQuery(
+            transactions = mapOf(fund.first to fund.second),
+            tipHeight = 800_000,
+            blockHeaders = mapOf(800_000 to genesisHeader + "00".repeat(84)),
+        )
+
+        val rows = buildTransactionRows(
+            transactions = listOf(ScannedTransaction(txHash = fund.first, height = 800_000)),
+            addresses = listOf(address(AddressChain.RECEIVE, 0, receiveScript)),
+            query = query,
+            onTimestampFailure = { height, _ -> failures += height },
+        )
+
+        assertEquals(1_231_006_505L, rows.single().blockTimestampEpochSeconds)
+        assertTrue("an extended header is not a failure: $failures", failures.isEmpty())
+    }
+
+    // --- the undated-rows signal the UI renders one line for ---------------
+
+    @Test
+    fun `undated confirmed rows are detected as a whole-list condition`() {
+        val dated = rowFor(netSatoshis = 1).copy(blockTimestampEpochSeconds = 1_700_000_000L)
+        val undatedConfirmed = rowFor(netSatoshis = 1)
+        val undatedUnconfirmed = rowFor(netSatoshis = 1).copy(height = 0, confirmations = 0)
+
+        assertTrue(listOf(undatedConfirmed).hasUndatedConfirmedRows())
+        assertTrue(listOf(dated, undatedConfirmed).hasUndatedConfirmedRows())
+        assertTrue(
+            "an unconfirmed row alone is not a dating failure",
+            !listOf(undatedUnconfirmed).hasUndatedConfirmedRows(),
+        )
+        assertTrue("a fully dated list says nothing", !listOf(dated).hasUndatedConfirmedRows())
+        assertTrue("an empty list says nothing", !emptyList<TransactionRow>().hasUndatedConfirmedRows())
+    }
+
+    @Test
     fun `a reused cached row keeps the date it already carried`() {
         val query = FakeTxQuery(transactions = emptyMap(), tipHeight = 800_010)
         val rows = buildTransactionRows(
