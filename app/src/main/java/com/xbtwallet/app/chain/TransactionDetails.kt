@@ -89,12 +89,21 @@ fun confirmationBucket(confirmations: Int): ConfirmationBucket = when {
 }
 
 /**
- * The text of a row's confirmation badge: `Unconfirmed`, `1 conf`, `N confs`,
- * or `6+ confs` once the depth stops being interesting.
+ * The largest confirmation count a row ever renders. Past this the badge reads
+ * `100+ confs`: a four-digit badge breaks the row layout, and once a
+ * transaction is this deep the exact depth stops being interesting — the same
+ * reasoning that put the old cap at six.
+ */
+const val MAX_RENDERED_CONFIRMATIONS: Int = 100
+
+/**
+ * The text of a row's confirmation badge: `Unconfirmed`, `1 conf`, the real
+ * count as `N confs` up to [MAX_RENDERED_CONFIRMATIONS] - 1, and `100+ confs`
+ * from there on. The colour is a separate concern (see [confirmationBucket]).
  */
 fun confirmationLabel(confirmations: Int): String = when {
     confirmations <= 0 -> "Unconfirmed"
-    confirmations >= SETTLED_CONFIRMATIONS -> "6+ confs"
+    confirmations >= MAX_RENDERED_CONFIRMATIONS -> "$MAX_RENDERED_CONFIRMATIONS+ confs"
     confirmations == 1 -> "1 conf"
     else -> "$confirmations confs"
 }

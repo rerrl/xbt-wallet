@@ -146,8 +146,18 @@ class TransactionDetailsTest {
         assertEquals("1 conf", confirmationLabel(1))
         assertEquals("2 confs", confirmationLabel(2))
         assertEquals("5 confs", confirmationLabel(5))
-        assertEquals("6+ confs", confirmationLabel(6))
-        assertEquals("6+ confs", confirmationLabel(1_000))
+        assertEquals("6 confs", confirmationLabel(6))
+        assertEquals("99 confs", confirmationLabel(99))
+        assertEquals("100+ confs", confirmationLabel(100))
+        assertEquals("100+ confs", confirmationLabel(101))
+        assertEquals("100+ confs", confirmationLabel(1_000))
+    }
+
+    @Test
+    fun `the rendered cap sits at a hundred confirmations`() {
+        assertEquals(100, MAX_RENDERED_CONFIRMATIONS)
+        assertEquals("100+ confs", confirmationLabel(MAX_RENDERED_CONFIRMATIONS))
+        assertEquals("99 confs", confirmationLabel(MAX_RENDERED_CONFIRMATIONS - 1))
     }
 
     @Test
@@ -185,7 +195,7 @@ class TransactionDetailsTest {
         assertEquals(1, rows[0].confirmations)
         assertEquals(100_000L, rows[1].netSatoshis)
         assertEquals(6, rows[1].confirmations)
-        assertEquals("6+ confs", confirmationLabel(rows[1].confirmations))
+        assertEquals("6 confs", confirmationLabel(rows[1].confirmations))
         assertEquals(TransactionDirection.IN, rows[1].direction)
     }
 
