@@ -226,9 +226,11 @@ The three scripthash RPCs (`get_history`, `get_balance`, `listunspent`) run over
 **one connection** per scan (`ElectrumClient.withChainSession`), together with the
 transaction fetches and the tip lookup the history rows need: an account scan is
 dozens of requests, and a connect/TLS/close per address would make an ordinary
-balance look like a port scan to the user's own server. The scan re-runs each
-time a signer is opened — there is no caching in this iteration, which is cheap
-enough and removes a whole class of stale-balance bugs.
+balance look like a port scan to the user's own server. Each signer's scan state
+lives in an app-scoped store for the app's lifetime, so entering a signer starts a
+scan only when none is running and a scan in flight survives navigating between
+that signer's screens; re-entering within two minutes reuses the last completed
+scan instead of re-running it (the manual Refresh always forces one).
 
 ## UTXOs
 
@@ -247,11 +249,16 @@ now, what the scan learned about it — *used*, *unused*, or the accent-marked
 *first unused*, which is the address the next receive would hand out. Tap a row
 to copy it.
 
-The list starts as exactly what the scan visited, which is a full unused batch
-past the last used address. **Show 20 more** derives further addresses on
-demand; those rows are marked *not scanned* rather than *unused*, because the
-app genuinely has not asked about them and a receive screen that guesses is how
-an address with history gets handed out twice.
+The list is derived locally, so it appears instantly in every scan phase — even
+with no server configured. It starts with one page of 20 addresses per chain, and
+**Show 20 more** derives the next page on demand; a scan that has visited further
+than the current page extends the list so no scanned row is truncated. Rows the
+scan has answered about carry its verdict — *used*, *unused*, or the
+accent-marked *first unused*, the address the next receive would hand out; rows
+past the range the scan visited are marked *not scanned* rather than *unused*,
+because the app genuinely has not asked about them and a receive screen that
+guesses is how an address with history gets handed out twice. The scan annotates
+rows in place; it never gates the list.
 
 ## Crypto layer
 
