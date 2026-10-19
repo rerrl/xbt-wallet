@@ -239,7 +239,11 @@ fun XbtWalletApp() {
                     state = chainState,
                     onOpenUtxos = { nav.push(Route(Screen.SIGNER_UTXOS, signerId = openSigner.id)) },
                     onOpenAddresses = { nav.push(Route(Screen.SIGNER_ADDRESSES, signerId = openSigner.id)) },
-                    onOpenReceive = { nav.push(Route(Screen.RECEIVE, signerId = openSigner.id)) },
+                    // The address is resolved by the button before it navigates,
+                    // so the receive screen opens with a QR already in hand.
+                    onOpenReceive = { address ->
+                        nav.push(Route(Screen.RECEIVE, signerId = openSigner.id, address = address))
+                    },
                     onBack = { nav.pop() },
                 )
             }
@@ -273,18 +277,20 @@ fun XbtWalletApp() {
         }
 
         Screen.RECEIVE -> {
-            if (chainState == null) {
-                // Same rule as the other per-signer screens: the signer no
-                // longer resolves, so restart at Home rather than show a QR for
-                // an account that is gone.
+            val requestedAddress = route.address
+            if (chainState == null || requestedAddress == null) {
+                // Either the signer no longer resolves, or the route carries no
+                // address — a stack restored from a build that saved a receive
+                // route before the address was resolved pre-navigation. Restart
+                // at Home rather than show a receive screen with nothing to
+                // receive to.
                 LaunchedEffect(route) { nav.reset() }
             } else {
                 ReceiveScreen(
                     state = chainState,
-                    // Non-null when the user came from the addresses list; null
-                    // when they came from the signer's own Receive button, in
-                    // which case the screen picks the first unused address.
-                    requestedAddress = route.address,
+                    // Always known: the signer's Receive button resolves it
+                    // before pushing, and an addresses-list row passes its own.
+                    address = requestedAddress,
                     onBack = { nav.pop() },
                 )
             }

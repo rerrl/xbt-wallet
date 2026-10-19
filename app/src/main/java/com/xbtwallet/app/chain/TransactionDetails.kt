@@ -44,12 +44,19 @@ enum class TransactionDirection {
  *
  * [netSatoshis] is signed: positive means the account gained value, negative
  * means it lost value. [confirmations] is 0 until the transaction is mined.
+ *
+ * [blockTimestampEpochSeconds] is when the block that mined this transaction
+ * was stamped — read from the block header (see
+ * [blockTimestampFromHeaderHex]) — or null when the transaction is unconfirmed
+ * or its header could not be fetched. It is deliberately nullable and defaults
+ * to null, so a snapshot persisted before the field existed still loads.
  */
 data class TransactionRow(
     val txHash: String,
     val height: Int,
     val confirmations: Int,
     val netSatoshis: Long,
+    val blockTimestampEpochSeconds: Long? = null,
 ) {
     /** True when the server has this transaction in a block. */
     val confirmed: Boolean get() = height > 0
@@ -129,6 +136,12 @@ const val MAX_DETAILED_TRANSACTIONS: Int = 50
  * history already knows about (see the file comment). Nothing is fetched for an
  * input the account has never seen — that coin is somebody else's.
  *
+ * Each row is then dated by one `blockchain.block.header` call per *distinct*
+ * confirmed height among the shown rows (rows mined in the same block share one
+ * call), and never for an unconfirmed row. A header that cannot be read leaves
+ * its rows' [TransactionRow.blockTimestampEpochSeconds] null: dating a row is
+ * best-effort and must never fail a scan.
+ *
  * **Reuse.** [cachedRows] is the previous scan's rows, keyed by txid. A shown
  * entry whose cached row is *confirmed and still at the same height* is reused
  * verbatim — only its confirmation count is recomputed from the fresh tip —
@@ -200,7 +213,7 @@ internal fun buildTransactionRows(
     }
 
     val tipHeight = query.getTipHeight()
-    return shown.map { entry ->
+    val rows = shown.map { entry ->
         // Reused rows keep their stored net amount; only the confirmation count
         // is recomputed from the fresh tip. Everything else is computed from the
         // transaction we fetched.
@@ -211,7 +224,34 @@ internal fun buildTransactionRows(
             confirmations = confirmationsFor(entry.height, tipHeight),
             netSatoshis = cached?.netSatoshis
                 ?: netEffect(parsed.getValue(entry.txHash), walletScripts, walletOutputs),
+            // A reused row keeps the date it already carried; a fresh one starts
+            // null and is dated in the pass below.
+            blockTimestampEpochSeconds = cached?.blockTimestampEpochSeconds,
         )
+    }
+
+    // Date the confirmed rows: one `block.header` call per DISTINCT height,
+    // shared by every row mined in the same block. A header that cannot be read
+    // leaves its rows' timestamps null rather than failing the scan — a date is
+    // not worth losing a whole balance over. Unconfirmed rows stay null: there
+    // is no block to read.
+    val heights = rows.asSequence().filter { it.confirmed }.map { it.height }.toSet()
+    val timestamps = HashMap<Int, Long?>(heights.size)
+    for (height in heights) {
+        timestamps[height] = try {
+            blockTimestampFromHeaderHex(query.blockHeader(height))
+        } catch (error: Exception) {
+            // The height exists (the history reported it) but its header did
+            // not come back. Leave the date unknown.
+            null
+        }
+    }
+    return rows.map { row ->
+        if (!row.confirmed || row.blockTimestampEpochSeconds != null) {
+            row
+        } else {
+            row.copy(blockTimestampEpochSeconds = timestamps[row.height])
+        }
     }
 }
 

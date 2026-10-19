@@ -25,6 +25,7 @@ import com.xbtwallet.app.chain.TransactionDirection
 import com.xbtwallet.app.chain.TransactionRow
 import com.xbtwallet.app.chain.confirmationBucket
 import com.xbtwallet.app.chain.confirmationLabel
+import com.xbtwallet.app.chain.formatBlockTimestamp
 import kotlinx.coroutines.launch
 
 /**
@@ -210,7 +211,33 @@ private fun TransactionRowItem(transaction: TransactionRow) {
             fontFamily = FontFamily.Monospace,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        // When the transaction happened: the block's own timestamp for a mined
+        // row, the word "Unconfirmed" for one still in the mempool, and nothing
+        // at all for a mined row whose header we could not read — a failure to
+        // date a transaction must not put invented text on screen.
+        transactionTimestampLabel(transaction)?.let { label ->
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
+}
+
+/**
+ * The date line for one row, or null when there is nothing honest to say.
+ *
+ * An unmined transaction has no block to read a time from, so it reads
+ * "Unconfirmed" — the same word the badge uses, in the date line's place. A
+ * mined row with a known timestamp is formatted in the device's time zone; a
+ * mined row whose header could not be fetched stays blank rather than guessing.
+ */
+private fun transactionTimestampLabel(transaction: TransactionRow): String? = when {
+    transaction.confirmations <= 0 -> "Unconfirmed"
+    transaction.blockTimestampEpochSeconds != null -> formatBlockTimestamp(transaction.blockTimestampEpochSeconds)
+    else -> null
 }
 
 /**

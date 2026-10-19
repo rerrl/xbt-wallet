@@ -25,11 +25,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.FilterQuality
@@ -39,9 +35,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.google.zxing.common.BitMatrix
 import com.xbtwallet.app.chain.AddressChain
+import com.xbtwallet.app.chain.ScannedUtxo
 import com.xbtwallet.app.ui.signers.SignerChainState
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import com.xbtwallet.app.ui.signers.formatSats
+import com.xbtwallet.app.ui.signers.shortenedMiddle
 
 /**
  * Hand out one address: a QR to point a payer's camera at, and the address as
@@ -50,64 +47,45 @@ import kotlinx.coroutines.withContext
  * This is the receive half of the wallet's primary job — *get money into it* —
  * and it is deliberately offline-complete: an address is arithmetic over the
  * account xpub ([SignerChainState.scanner]), so the QR renders whether or not a
- * server is reachable. The scan's only job here is to say *which* index to hand
- * out: the first address the chain walk saw as unused (see
- * [resolveReceiveIndex]). No scan answer means index 0, labelled as unverified —
- * the screen never claims a server cleared an address it never asked about.
+ * server is reachable. The scan's only job here is to *annotate*: [address] is
+ * already resolved, and the snapshot says whether it has been used and what it
+ * holds.
+ *
+ * **The address is resolved before this screen exists.** [address] is
+ * non-null and comes from whoever navigated here — the signer detail screen
+ * derives the first unused address (showing a spinner on its own button while
+ * it does), and an addresses-list row passes the address the user tapped, both
+ * verbatim. That is why there is no loading state here: by the time this
+ * composes, the address is already in hand, so the QR and the text render
+ * synchronously on the first frame and the screen never flashes "Deriving…".
  *
  * **Two ways in**, and they show different addresses:
  *
- * - from a signer's own **Receive** button, with no [requestedAddress]: the
- *   "first unused" rule above;
- * - from a row in the **addresses list**, with [requestedAddress] set: exactly
- *   the address the user tapped, verbatim, so the QR matches the row they were
- *   reading rather than silently switching to a different index.
+ * - from a signer's own **Receive** button: the "first unused" address (the
+ *   caller resolved it) — labelled as such when the scan agrees;
+ * - from a row in the **addresses list**: exactly the address the user tapped,
+ *   verbatim, so the QR matches the row they were reading.
  *
- * The requested address rides in on the navigation [com.xbtwallet.app.ui.Route],
- * so it survives a rotation with the rest of the back stack.
+ * **What the scan adds.** When the shown address has history, a warning says so
+ * — paying into a used address links the payments on chain — and the address's
+ * own UTXOs are listed, so a user can see the address is not empty before
+ * handing it out. An address the scan never asked about shows neither: the
+ * wallet does not know, and it does not pretend to.
  *
  * @param state the open signer's chain state (shared with its other screens).
- * @param requestedAddress the address to show, or null to pick the first unused
- *   receive address.
+ * @param address the address to hand out — always known, never derived here.
  * @param onBack pops one level — the addresses list or the signer detail screen.
  */
 @Composable
 fun ReceiveScreen(
     state: SignerChainState,
-    requestedAddress: String?,
+    address: String,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-
-    // The address on screen, resolved once per (snapshot, key, request) and
-    // derived off the UI thread — same reason the addresses list does it there:
-    // a handful of elliptic-curve operations is cheap but is not a frame's work.
-    var address by remember { mutableStateOf<String?>(null) }
-    var sourceLabel by remember { mutableStateOf("") }
-    var verified by remember { mutableStateOf(true) }
-
-    LaunchedEffect(state.snapshot, state.accountKey, requestedAddress) {
-        if (requestedAddress != null) {
-            // Tapped from the list: show that address, not a guessed one.
-            address = requestedAddress
-            sourceLabel = "Selected address"
-            verified = true
-            return@LaunchedEffect
-        }
-        val scanner = state.scanner
-        if (scanner == null) {
-            address = null
-            return@LaunchedEffect
-        }
-        val scanned = state.snapshot?.addresses(AddressChain.RECEIVE) ?: emptyList()
-        val (index, isVerified) = resolveReceiveIndex(scanned)
-        sourceLabel = "First unused receive address"
-        verified = isVerified
-        address = withContext(Dispatchers.Default) {
-            scanner.derive(AddressChain.RECEIVE, index).address
-        }
-    }
+    val info = receiveAddressInfo(state.snapshot, address)
+    val sourceLabel = receiveSourceLabel(state, info)
 
     Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
         Column(
@@ -140,21 +118,14 @@ fun ReceiveScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            val shown = address
             if (state.accountKey == null) {
                 Text(
                     text = "This xpub's stored key could not be read. Delete and re-import it.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.error,
                 )
-            } else if (shown == null) {
-                Text(
-                    text = "Deriving the receive address\u2026",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             } else {
-                QrPanel(payload = qrPayload(shown))
+                QrPanel(payload = qrPayload(address))
 
                 Spacer(modifier = Modifier.height(16.dp))
 
@@ -163,7 +134,7 @@ fun ReceiveScreen(
                 // tool for moving an address around.
                 SelectionContainer {
                     Text(
-                        text = shown,
+                        text = address,
                         style = MaterialTheme.typography.bodyMedium,
                         fontFamily = FontFamily.Monospace,
                     )
@@ -172,14 +143,7 @@ fun ReceiveScreen(
                 Spacer(modifier = Modifier.height(8.dp))
 
                 Text(
-                    text = if (verified) {
-                        sourceLabel
-                    } else {
-                        // Honest about what the app has and has not asked its
-                        // server: handing out an address nobody checked is how
-                        // an address with history gets reused.
-                        "$sourceLabel \u2014 not yet verified on chain, sync to confirm unused"
-                    },
+                    text = sourceLabel,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -188,12 +152,23 @@ fun ReceiveScreen(
 
                 Button(
                     onClick = {
-                        copyToClipboard(context, shown)
+                        copyToClipboard(context, address)
                         Toast.makeText(context, "Address copied", Toast.LENGTH_SHORT).show()
                     },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text("Copy address")
+                }
+
+                if (info?.used == true) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    UsedAddressWarning()
+                }
+
+                val utxos = info?.utxos.orEmpty()
+                if (utxos.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    AddressUtxos(utxos)
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -209,15 +184,105 @@ fun ReceiveScreen(
 }
 
 /**
+ * The caption under the address: what this address *is*, as far as the scan can
+ * honestly say.
+ *
+ * Three cases. With no snapshot at all, nothing has been asked of the server, so
+ * the caption says the address is unverified rather than claiming it is unused —
+ * handing out an address nobody checked is how an address with history gets
+ * reused. When the shown address *is* the snapshot's own first-unused answer,
+ * the caption names the rule (the signer's Receive button resolved exactly this
+ * one). Everything else — a row the user picked, an address outside the scanned
+ * range — reads plainly as "Receive address", because there is no rule to name.
+ */
+private fun receiveSourceLabel(state: SignerChainState, info: ReceiveAddressInfo?): String {
+    val snapshot = state.snapshot
+        ?: return "Receive address \u2014 not yet verified on chain, sync to confirm unused"
+    val scanned = snapshot.addresses(AddressChain.RECEIVE)
+    if (scanned.isNotEmpty()) {
+        val firstUnusedIndex = resolveReceiveIndex(scanned).first
+        if (info?.chain == AddressChain.RECEIVE && info.index == firstUnusedIndex && !info.used) {
+            return "First unused receive address"
+        }
+    }
+    return "Receive address"
+}
+
+/**
+ * The privacy warning for an address that already carries history.
+ *
+ * Paying into an address twice links the two transactions — and everyone
+ * watching the chain can see the connection — so this is the one thing a receive
+ * screen must say out loud. It is a warning, not a block: the user may still
+ * have a reason to reuse the address, and the wallet does not get to refuse.
+ *
+ * Plain text only — this build carries no icon pack, and a dependency for one
+ * glyph is the surface this project keeps small.
+ */
+@Composable
+private fun UsedAddressWarning(modifier: Modifier = Modifier) {
+    Surface(
+        color = MaterialTheme.colorScheme.errorContainer,
+        shape = MaterialTheme.shapes.small,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Text(
+            text = "This address has been used before. For your privacy, prefer a fresh address.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onErrorContainer,
+            modifier = Modifier.padding(12.dp),
+        )
+    }
+}
+
+/**
+ * The outputs sitting at the shown address, so a user can see it is not empty
+ * before handing it out.
+ *
+ * One line per output: its outpoint (`txid:vout`, txid elided in the middle like
+ * every other hash in the app), its amount, and whether it has confirmed. The
+ * amounts are summed in the header with the same [formatSats] the UTXO screen
+ * uses, so the two screens can never disagree about a number.
+ */
+@Composable
+private fun AddressUtxos(utxos: List<ScannedUtxo>, modifier: Modifier = Modifier) {
+    Column(modifier = modifier.fillMaxWidth()) {
+        val total = utxos.sumOf { it.utxo.satoshis }
+        Text(
+            text = "${utxos.size} UTXO${if (utxos.size == 1) "" else "s"} at this address " +
+                "\u00b7 ${formatSats(total)} sats",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        utxos.forEach { scanned ->
+            val utxo = scanned.utxo
+            Text(
+                text = buildString {
+                    append(shortenedMiddle(utxo.txHash)).append(':').append(utxo.txPos)
+                    append("   ").append(formatSats(utxo.satoshis)).append(" sats")
+                    if (!utxo.confirmed) append("   unconfirmed")
+                },
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/**
  * The QR as it is drawn: a white panel with the symbol centred in it.
  *
  * The white [Surface] is not decoration — it is the quiet zone. A QR module
  * touching the dark background of a phone screen gives a camera nothing to find
  * the finder patterns against, so the symbol keeps its own light margin.
  *
- * The bitmap is built once per payload (`remember`), with one pixel per module
- * and `FilterQuality.None` on the way up to the screen: a QR is binary data, and
- * smoothing its modules is exactly the blur a scanner cannot read.
+ * The bitmap is built once per payload (`remember`) at first composition, with
+ * one pixel per module and `FilterQuality.None` on the way up to the screen: a
+ * QR is binary data, and smoothing its modules is exactly the blur a scanner
+ * cannot read. Filling 512×512 pixels is trivial and happens synchronously, so
+ * the QR is on screen on the very first frame.
  */
 @Composable
 private fun QrPanel(payload: String, modifier: Modifier = Modifier) {

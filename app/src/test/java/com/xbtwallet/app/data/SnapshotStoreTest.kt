@@ -9,6 +9,7 @@ import com.xbtwallet.app.chain.ScannedUtxo
 import com.xbtwallet.app.chain.ScripthashBalance
 import com.xbtwallet.app.chain.TransactionRow
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -106,6 +107,45 @@ class SnapshotStoreTest {
 
         assertEquals(full, reloaded?.snapshot)
         assertEquals(5L, reloaded?.scannedAtEpochSeconds)
+    }
+
+    @Test
+    fun `a transaction's block timestamp round-trips when present`() {
+        val backing = InMemoryStore()
+        val dated = full.copy(
+            transactions = listOf(
+                TransactionRow(
+                    txHash = TX_A,
+                    height = 800_000,
+                    confirmations = 6,
+                    netSatoshis = 12_345,
+                    blockTimestampEpochSeconds = 1_700_000_000L,
+                ),
+            ),
+        )
+
+        SnapshotStore(backing, now = { 1L }).save("id-1", dated)
+        val loaded = SnapshotStore(backing).load("id-1")
+
+        assertEquals(dated, loaded?.snapshot)
+        assertEquals(1_700_000_000L, loaded?.snapshot?.transactions?.single()?.blockTimestampEpochSeconds)
+    }
+
+    @Test
+    fun `a transaction blob written before the field existed still loads, with a null date`() {
+        val backing = InMemoryStore()
+        // Exactly what the previous schema wrote: no `blockTimestamp` key.
+        backing.putString(
+            SnapshotStore.KEY_PREFIX + "id-1",
+            """{"version":1,"scannedAt":1,"receive":[],"change":[],"utxos":[],""" +
+                """"balance":{"confirmed":0,"unconfirmed":0},""" +
+                """"transactions":[{"txHash":"$TX_A","height":800000,"confirmations":6,"netSatoshis":12345}]}""",
+        )
+
+        val loaded = SnapshotStore(backing).load("id-1")
+
+        assertNotNull("an older blob must keep loading", loaded)
+        assertNull(loaded?.snapshot?.transactions?.single()?.blockTimestampEpochSeconds)
     }
 
     @Test

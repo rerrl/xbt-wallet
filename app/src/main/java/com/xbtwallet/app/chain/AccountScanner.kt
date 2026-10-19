@@ -32,7 +32,9 @@ import java.util.concurrent.ConcurrentHashMap
  * empty account — is 40 history calls (20 per chain) and nothing else. An
  * account with history additionally costs one `blockchain.transaction.get` per
  * displayed transaction (capped at [MAX_DETAILED_TRANSACTIONS]) plus one
- * `blockchain.headers.subscribe` for the tip — see [buildTransactionRows].
+ * `blockchain.headers.subscribe` for the tip and one `blockchain.block.header`
+ * per distinct block the shown transactions were mined in — see
+ * [buildTransactionRows].
  *
  * **Rescanning.** [scan] is the cold path: it knows nothing and walks from
  * index 0. [rescan] is the warm path a persisted snapshot enables: it re-checks

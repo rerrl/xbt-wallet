@@ -35,9 +35,14 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.xbtwallet.app.PlaceholderPrices
 import com.xbtwallet.app.chain.AccountSnapshot
+import com.xbtwallet.app.chain.AddressChain
 import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerType
+import com.xbtwallet.app.ui.receive.resolveReceiveIndex
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.math.BigDecimal
 
 /**
@@ -69,10 +74,16 @@ fun SignerDetailScreen(
     state: SignerChainState,
     onOpenUtxos: () -> Unit,
     onOpenAddresses: () -> Unit,
-    onOpenReceive: () -> Unit,
+    onOpenReceive: (String) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val scope = rememberCoroutineScope()
+    // True while the receive address is being resolved. It disables the Receive
+    // button and shows a spinner inside it, so the navigation happens only with
+    // the address already in hand — the receive screen then never has to show a
+    // loading state of its own.
+    var resolvingReceive by remember { mutableStateOf(false) }
     Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
         Column(
             modifier = Modifier
@@ -129,13 +140,52 @@ fun SignerDetailScreen(
                 // Send is disabled, not hidden: the thing a wallet does with
                 // coins stays visible so the screen reads as a wallet, and greyed
                 // so it never promises the air-gapped signing flow it does not
-                // have. Receive needs no signing, so it is live — it opens the
-                // address QR.
+                // have. Receive needs no signing, so it is live — it resolves the
+                // first unused address *here*, then opens the QR for it.
                 Button(onClick = {}, enabled = false, modifier = Modifier.weight(1f)) {
                     Text("Send")
                 }
-                Button(onClick = onOpenReceive, modifier = Modifier.weight(1f)) {
-                    Text("Receive")
+                Button(
+                    onClick = {
+                        if (resolvingReceive) return@Button
+                        resolvingReceive = true
+                        scope.launch {
+                            try {
+                                val scanner = state.scanner
+                                if (scanner == null) return@launch
+                                val scanned = state.snapshot?.addresses(AddressChain.RECEIVE) ?: emptyList()
+                                val (index, _) = resolveReceiveIndex(scanned)
+                                // Key derivation is a few elliptic-curve
+                                // operations: cheap, but not a frame's work.
+                                val address = withContext(Dispatchers.Default) {
+                                    scanner.derive(AddressChain.RECEIVE, index).address
+                                }
+                                onOpenReceive(address)
+                            } catch (cancellation: CancellationException) {
+                                // Leaving the screen cancels the launch; the
+                                // `finally` still clears the busy flag so the
+                                // button is never left wedged.
+                                throw cancellation
+                            } catch (error: Exception) {
+                                // Nothing more to do here: a sync failure has its
+                                // own surfaces (the balance card's Retry). The
+                                // button simply becomes usable again.
+                            } finally {
+                                resolvingReceive = false
+                            }
+                        }
+                    },
+                    enabled = !resolvingReceive,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    if (resolvingReceive) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.width(16.dp).height(16.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    } else {
+                        Text("Receive")
+                    }
                 }
             }
 

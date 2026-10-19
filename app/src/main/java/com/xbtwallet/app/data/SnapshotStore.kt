@@ -137,12 +137,16 @@ class SnapshotStore(
         "addressIndex" to scanned.addressIndex,
     )
 
-    private fun encodeTransaction(row: TransactionRow): Map<String, Any?> = mapOf(
-        "txHash" to row.txHash,
-        "height" to row.height,
-        "confirmations" to row.confirmations,
-        "netSatoshis" to row.netSatoshis,
-    )
+    private fun encodeTransaction(row: TransactionRow): Map<String, Any?> = buildMap {
+        put("txHash", row.txHash)
+        put("height", row.height)
+        put("confirmations", row.confirmations)
+        put("netSatoshis", row.netSatoshis)
+        // Written only when known. A row without a date simply omits the field,
+        // and a blob written before the field existed reads back the same way —
+        // see decodeTransactions, which treats it as optional.
+        row.blockTimestampEpochSeconds?.let { put("blockTimestamp", it) }
+    }
 
     /** Decodes one chain's address list; null on any entry that cannot be read. */
     private fun decodeAddresses(value: Any?, chain: AddressChain): List<ScannedAddress>? {
@@ -221,6 +225,10 @@ class SnapshotStore(
                 height = height,
                 confirmations = confirmations,
                 netSatoshis = netSatoshis,
+                // Optional by design: a blob saved before this field existed has
+                // no `blockTimestamp`, and that is a valid row with an unknown
+                // date — not a corrupt one.
+                blockTimestampEpochSeconds = (map["blockTimestamp"] as? Number)?.toLong(),
             )
         }
         return result

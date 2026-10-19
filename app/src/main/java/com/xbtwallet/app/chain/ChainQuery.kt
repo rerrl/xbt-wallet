@@ -45,4 +45,14 @@ interface ChainQuery {
      * height a transaction was mined at.
      */
     fun getTipHeight(): Int
+
+    /**
+     * The raw 80-byte block header at [height], as lowercase hex — what
+     * [`blockchain.block.header`] answers.
+     *
+     * Needed only to date a transaction row: `get_history` reports a mined
+     * height and no time, and the time lives in the header. See
+     * [blockTimestampFromHeaderHex].
+     */
+    fun blockHeader(height: Int): String
 }

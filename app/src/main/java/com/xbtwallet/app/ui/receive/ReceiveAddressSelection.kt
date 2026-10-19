@@ -1,6 +1,9 @@
 package com.xbtwallet.app.ui.receive
 
+import com.xbtwallet.app.chain.AccountSnapshot
+import com.xbtwallet.app.chain.AddressChain
 import com.xbtwallet.app.chain.ScannedAddress
+import com.xbtwallet.app.chain.ScannedUtxo
 
 /**
  * The text a receive QR carries.
@@ -53,4 +56,45 @@ internal fun resolveReceiveIndex(scanned: List<ScannedAddress>): Pair<Int, Boole
     if (scanned.isEmpty()) return 0 to false
     val firstUnused = scanned.indexOfFirst { !it.used }
     return if (firstUnused >= 0) firstUnused to true else scanned.size to true
+}
+
+/**
+ * What the scan knows about one address, for the receive screen to warn about.
+ *
+ * [used] is the address-reuse signal: paying into an address that already has
+ * history links the two payments on chain, which is exactly the privacy leak a
+ * fresh address avoids. [utxos] is that address's spendable outputs, so a user
+ * about to hand it out can see it is not empty.
+ */
+data class ReceiveAddressInfo(
+    val chain: AddressChain,
+    val index: Int,
+    val used: Boolean,
+    val utxos: List<ScannedUtxo>,
+)
+
+/**
+ * The scan's record of [address], or null when the wallet never asked about it.
+ *
+ * The lookup is over both chains — a `change` address is still a real address,
+ * and the receive screen shows whatever the caller handed it — matched on the
+ * address string, because that is all the navigation carries. The UTXOs are
+ * narrowed to the ones found at exactly this chain *and* index: `listunspent`
+ * is per scripthash, so an output belongs to one address and one index, never
+ * to the chain as a whole.
+ *
+ * **Null is honest.** An address outside the scanned range was never queried, so
+ * there is nothing to warn about and nothing to list — a screen that guessed
+ * "unused" for it is how a used address gets handed out again. A null snapshot
+ * (nothing scanned yet) is the same case: unknown.
+ */
+fun receiveAddressInfo(snapshot: AccountSnapshot?, address: String): ReceiveAddressInfo? {
+    if (snapshot == null) return null
+    val match = (snapshot.receive + snapshot.change).firstOrNull { it.address == address } ?: return null
+    return ReceiveAddressInfo(
+        chain = match.chain,
+        index = match.index,
+        used = match.used,
+        utxos = snapshot.utxos.filter { it.chain == match.chain && it.addressIndex == match.index },
+    )
 }

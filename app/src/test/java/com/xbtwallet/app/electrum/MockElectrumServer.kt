@@ -161,6 +161,9 @@ class MockElectrumServer(
          *   `blockchain.transaction.get` answers. A txid not listed is answered
          *   as an RPC error, which is what a server does for a transaction it
          *   does not know.
+         * @param blockHeaders raw 80-byte headers by height — what
+         *   `blockchain.block.header` answers. A height not listed is answered as
+         *   an RPC error, the way a server answers a height it cannot serve.
          * @param tipHeight the height `blockchain.headers.subscribe` reports.
          */
         fun scripted(
@@ -168,6 +171,7 @@ class MockElectrumServer(
             balances: Map<String, Pair<Long, Long>> = emptyMap(),
             unspent: Map<String, List<Any?>> = emptyMap(),
             transactions: Map<String, String> = emptyMap(),
+            blockHeaders: Map<Int, String> = emptyMap(),
             tipHeight: Int = 800_000,
         ): MockElectrumServer = MockElectrumServer { method, params, _ ->
             val scripthash = params.firstOrNull() as? String ?: ""
@@ -190,6 +194,12 @@ class MockElectrumServer(
 
                 "blockchain.headers.subscribe" ->
                     Reply.Result(linkedMapOf<String, Any?>("height" to tipHeight, "hex" to "00"))
+
+                "blockchain.block.header" -> {
+                    val height = (params.firstOrNull() as? Number)?.toInt()
+                    blockHeaders[height]?.let { Reply.Result(it) }
+                        ?: Reply.Error(-32601, "unknown height $height")
+                }
 
                 else -> Reply.Error(-32601, "unknown method $method")
             }

@@ -146,6 +146,7 @@ class ChainRpcSessionTest {
                 ),
             ),
             transactions = mapOf(fundingTxId to fundingTx),
+            blockHeaders = mapOf(800_000 to GENESIS_HEADER),
             tipHeight = 800_000,
         ).use { mock ->
             val snapshot = runBlocking {
@@ -162,6 +163,8 @@ class ChainRpcSessionTest {
             assertEquals(1, methods.count { it == "blockchain.scripthash.listunspent" })
             assertEquals(1, methods.count { it == "blockchain.transaction.get" })
             assertEquals(1, methods.count { it == "blockchain.headers.subscribe" })
+            // One block.header for the single mined height, to date the row.
+            assertEquals(1, methods.count { it == "blockchain.block.header" })
 
             // ... and it is all one connection, which is the point of the
             // session API: a scan must not look like a port scan.
@@ -172,11 +175,39 @@ class ChainRpcSessionTest {
             assertEquals(AddressChain.RECEIVE, snapshot.utxos.first().chain)
             assertEquals(0, snapshot.utxos.first().addressIndex)
 
-            // The transaction row: 5 000 in, mined at the tip, one confirmation.
+            // The transaction row: 5 000 in, mined at the tip, one confirmation,
+            // and dated from the block header at that height.
             val row = snapshot.transactions.single()
             assertEquals(fundingTxId, row.txHash)
             assertEquals(5_000L, row.netSatoshis)
             assertEquals(1, row.confirmations)
+            assertEquals(1_231_006_505L, row.blockTimestampEpochSeconds)
+        }
+    }
+
+    @Test
+    fun `block_header asks for the height and returns the raw hex`() {
+        MockElectrumServer.scripted(blockHeaders = mapOf(800_000 to GENESIS_HEADER)).use { mock ->
+            val header = runBlocking {
+                client(mock.port).withChainSession { it.blockHeader(800_000) }
+            }
+
+            assertEquals(GENESIS_HEADER, header)
+            assertEquals(listOf("blockchain.block.header"), mock.requests.map { it["method"] })
+            assertEquals(listOf(800_000), mock.requests.first()["params"])
+        }
+    }
+
+    @Test
+    fun `block_header raises on a height the server does not know`() {
+        MockElectrumServer.scripted().use { mock ->
+            val error = assertThrows(ElectrumException::class.java) {
+                runBlocking {
+                    client(mock.port).withChainSession { it.blockHeader(1) }
+                }
+            }
+
+            assertTrue(error.message.orEmpty().contains("block.header"))
         }
     }
 
@@ -214,5 +245,9 @@ class ChainRpcSessionTest {
 
         /** An outpoint from a transaction this wallet has no history for. */
         const val UNRELATED_TXID = "2222222222222222222222222222222222222222222222222222222222222222"
+
+        /** The mainnet genesis block header, whose timestamp is 1231006505. */
+        const val GENESIS_HEADER =
+            "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c"
     }
 }
