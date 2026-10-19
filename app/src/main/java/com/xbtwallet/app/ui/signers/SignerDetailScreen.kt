@@ -150,7 +150,8 @@ fun SignerDetailScreen(
             // *is*, but it is not an action and it is long. It lives behind its
             // own button and dialog so the body stays readable; tap to read or
             // copy it.
-            val xpub = (signer.type as? SignerType.WatchOnlyXpub)?.xpub
+            val watchOnly = signer.type as? SignerType.WatchOnlyXpub
+            val xpub = watchOnly?.xpub
             var showAccountKey by remember { mutableStateOf(false) }
             OutlinedButton(
                 onClick = { showAccountKey = true },
@@ -163,6 +164,8 @@ fun SignerDetailScreen(
             if (showAccountKey && xpub != null) {
                 AccountKeyDialog(
                     xpub = xpub,
+                    masterFingerprint = watchOnly?.masterFingerprint,
+                    derivationPath = watchOnly?.derivationPath,
                     onDismiss = { showAccountKey = false },
                 )
             }
@@ -180,23 +183,52 @@ fun SignerDetailScreen(
  * The account key, shown on demand: the full xpub in monospace, selectable so a
  * user can copy it by hand, with a Copy button that puts it on the clipboard.
  *
+ * When the signer was imported from a BIP-32 key-expression QR, the master
+ * fingerprint and derivation path that came with it are shown underneath the
+ * key — they are what the later PSBT signing flow needs to name the signer's
+ * device, and this dialog is the only place the user can check them. A signer
+ * imported from a bare key has neither, and then nothing is added.
+ *
  * Dismissal follows the platform default — [onDismissRequest] fires for an
  * outside tap and for Back, and both simply close the dialog. Nothing here
  * swallows those gestures.
  */
 @Composable
-private fun AccountKeyDialog(xpub: String, onDismiss: () -> Unit) {
+private fun AccountKeyDialog(
+    xpub: String,
+    masterFingerprint: String?,
+    derivationPath: String?,
+    onDismiss: () -> Unit,
+) {
     val clipboard = LocalClipboardManager.current
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Account key") },
         text = {
-            SelectionContainer {
-                Text(
-                    text = xpub,
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                )
+            Column {
+                SelectionContainer {
+                    Text(
+                        text = xpub,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+                masterFingerprint?.let {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Master fingerprint: $it",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+                derivationPath?.let {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Derivation: m/$it",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
             }
         },
         confirmButton = {
