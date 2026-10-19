@@ -7,13 +7,13 @@ import com.xbtwallet.app.electrum.ElectrumProtocol
 import com.xbtwallet.app.electrum.ElectrumServer
 import com.xbtwallet.app.electrum.TorPhase
 import com.xbtwallet.app.electrum.TorStatus
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -21,12 +21,16 @@ import org.junit.Test
  * HomeScreenState tests.
  *
  * The class exists so the home screen's rules — "how many signers are saved"
- * (a plain list, with no active selection) and "the server indicator follows a
- * real check, never a guess" — are testable without a UI or an emulator. It is
- * plain Kotlin over a [SignerStore] and a [ServerSettings], so in-memory fakes
- * drive it here; the ping and the Tor status are both injected, so no socket and
- * no clock are involved (except in the one test that runs the heartbeat loop,
- * which is bounded).
+ * (a plain list, with no active selection) and "the server indicator is derived
+ * from the facts every tick, never set by the act of dialling" — are testable
+ * without a UI or an emulator. It is plain Kotlin over a [SignerStore] and a
+ * [ServerSettings], so in-memory fakes drive it here; the ping and the Tor status
+ * are both injected, so no socket is involved.
+ *
+ * The heartbeat tests run the real loop on a short tick and a fake clock. The
+ * load-bearing ones use a latch to hold the injected ping open, which is how a
+ * test observes the display *while a dial is genuinely blocked* — the shape of
+ * the "Connecting…" regression this loop was rewritten to fix.
  */
 class HomeScreenStateTest {
 
@@ -59,7 +63,9 @@ class HomeScreenStateTest {
      * [results] answers the pings in order (the last value repeats), so a test
      * can say "up, then down" without any real network. [clock] is the fake
      * epoch-millisecond wall clock the state reads for answer staleness, so a
-     * test can age a remembered answer without sleeping.
+     * test can age a remembered answer without sleeping. [throwOnCall] makes one
+     * dial blow up, which is how the "a failed dial must not kill the loop"
+     * rule is exercised.
      */
     private class Fixture(
         server: ElectrumServer? = null,
@@ -84,10 +90,13 @@ class HomeScreenStateTest {
 
         /**
          * When set, the probe suspends here until the test completes it. That is
-         * how a test observes the status *while a dial is genuinely in flight*
+         * how a test observes the display *while a dial is genuinely in flight*
          * rather than only at the instant the probe was entered.
          */
-        var hold: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+        var hold: CompletableDeferred<Unit>? = null
+
+        /** Index of the ping call (0-based) that should throw, or null for none. */
+        var throwOnCall: Int? = null
 
         lateinit var state: HomeScreenState
 
@@ -96,8 +105,10 @@ class HomeScreenStateTest {
             val probe: suspend (ElectrumServer) -> Boolean = { target ->
                 pinged += target
                 statusDuringPing += state.serverStatus
+                val index = call++
                 hold?.await()
-                results.getOrElse(call++) { results.last() }
+                if (index == throwOnCall) throw IllegalStateException("dial failed")
+                results.getOrElse(index) { results.last() }
             }
             state = HomeScreenState(store, serverSettings, probe, torStatus = { tor }, now = { clock })
         }
@@ -155,178 +166,6 @@ class HomeScreenStateTest {
     }
 
     @Test
-    fun `a successful check against a clearnet server reports connected`() {
-        val fixture = Fixture(server = CLEARNET)
-
-        val status = runBlocking { fixture.state.checkServerStatus() }
-
-        assertEquals(ServerStatus.CONNECTED, status)
-        assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
-        assertEquals(listOf(CLEARNET), fixture.pinged)
-        assertEquals(listOf(ServerStatus.CONNECTING), fixture.statusDuringPing)
-    }
-
-    @Test
-    fun `a failed check reports disconnected`() {
-        val fixture = Fixture(server = CLEARNET, results = listOf(false))
-
-        val status = runBlocking { fixture.state.checkServerStatus() }
-
-        assertEquals(ServerStatus.DISCONNECTED, status)
-        assertEquals(ServerStatus.DISCONNECTED, fixture.state.serverStatus)
-    }
-
-    @Test
-    fun `the first check shows connecting in flight, later checks keep the last answer`() {
-        val fixture = Fixture(server = CLEARNET, results = listOf(true, false))
-
-        runBlocking {
-            fixture.state.checkServerStatus() // first check of the screen visit
-            fixture.state.checkServerStatus(showChecking = false) // a later heartbeat
-        }
-
-        // In flight: "Connecting…" then the previous answer — never blank, never a
-        // sign flip, which is what keeps a 60-second poll from blinking.
-        assertEquals(
-            listOf(ServerStatus.CONNECTING, ServerStatus.CONNECTED),
-            fixture.statusDuringPing,
-        )
-        assertEquals(ServerStatus.DISCONNECTED, fixture.state.serverStatus)
-        assertEquals(2, fixture.pinged.size)
-    }
-
-    // --- onion servers and Tor ---------------------------------------------
-
-    @Test
-    fun `an onion server still bootstrapping reads as tor starting, with no ping`() {
-        val fixture = Fixture(server = ONION)
-        fixture.tor = TorStatus(TorPhase.STARTING, 40)
-
-        val status = runBlocking { fixture.state.checkServerStatus() }
-
-        // A ping here would block on the Tor bootstrap mutex for the whole cold
-        // start, so the shared Tor status answers instead.
-        assertEquals(ServerStatus.TOR_STARTING, status)
-        assertEquals(40, fixture.state.torProgressPercent)
-        assertTrue("must not dial while Tor is bootstrapping", fixture.pinged.isEmpty())
-    }
-
-    @Test
-    fun `an onion server whose tor failed reads as tor failed, with no ping`() {
-        val fixture = Fixture(server = ONION)
-        fixture.tor = TorStatus(TorPhase.FAILED, 40)
-
-        val status = runBlocking { fixture.state.checkServerStatus() }
-
-        assertEquals(ServerStatus.TOR_FAILED, status)
-        assertEquals(40, fixture.state.torProgressPercent)
-        assertTrue("nothing to dial once Tor has given up", fixture.pinged.isEmpty())
-    }
-
-    @Test
-    fun `an onion server with tor ready and a reachable server reads as connected via tor`() {
-        val fixture = Fixture(server = ONION, results = listOf(true))
-        fixture.tor = TorStatus(TorPhase.READY, 100)
-
-        val status = runBlocking { fixture.state.checkServerStatus() }
-
-        assertEquals(ServerStatus.CONNECTED_VIA_TOR, status)
-        assertEquals(listOf(ONION), fixture.pinged)
-        assertEquals(100, fixture.state.torProgressPercent)
-    }
-
-    @Test
-    fun `an onion server whose tor failed to reach the server reads as disconnected`() {
-        // Tor is up but the server behind the onion is not answering: that is a
-        // server problem, not a Tor one.
-        val fixture = Fixture(server = ONION, results = listOf(false))
-        fixture.tor = TorStatus(TorPhase.READY, 100)
-
-        val status = runBlocking { fixture.state.checkServerStatus() }
-
-        assertEquals(ServerStatus.DISCONNECTED, status)
-    }
-
-    @Test
-    fun `onion + Tor READY pings and promotes to CONNECTED_VIA_TOR`() {
-        // Regression: one tick sees Tor STARTING (the 100% the user was stuck
-        // on), the next sees it READY. The READY tick must actually dial and
-        // promote, not short-circuit on the stale STARTING value.
-        val fixture = Fixture(server = ONION, results = listOf(true))
-        fixture.tor = TorStatus(TorPhase.STARTING, 100)
-
-        val first = runBlocking { fixture.state.checkServerStatus() }
-        assertEquals(ServerStatus.TOR_STARTING, first)
-        assertEquals("nothing to dial while Tor bootstraps", 0, fixture.pinged.size)
-
-        fixture.tor = TorStatus(TorPhase.READY, 100)
-        val second = runBlocking { fixture.state.checkServerStatus(showChecking = false) }
-
-        assertEquals(ServerStatus.CONNECTED_VIA_TOR, second)
-        assertEquals(ServerStatus.CONNECTED_VIA_TOR, fixture.state.serverStatus)
-        assertEquals(listOf(ONION), fixture.pinged)
-    }
-
-    @Test
-    fun `onion + Tor READY shows CONNECTING while the first dial is in flight`() {
-        // A multi-minute first rendezvous must not look frozen on "Tor
-        // starting… 100%": the fall-through to a real dial has to move the label
-        // to CONNECTING even though this is not the first check of the visit.
-        val fixture = Fixture(server = ONION, results = listOf(true))
-        fixture.tor = TorStatus(TorPhase.STARTING, 100)
-
-        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
-        fixture.hold = gate
-
-        runBlocking {
-            assertEquals(ServerStatus.TOR_STARTING, fixture.state.checkServerStatus())
-            fixture.tor = TorStatus(TorPhase.READY, 100)
-
-            val check = launch { fixture.state.checkServerStatus(showChecking = false) }
-            withTimeout(5_000) { while (fixture.pinged.isEmpty()) delay(5) }
-
-            assertEquals(
-                "a first dial must not sit on a frozen Tor starting 100%",
-                ServerStatus.CONNECTING,
-                fixture.state.serverStatus,
-            )
-
-            gate.complete(Unit)
-            check.join()
-        }
-
-        assertEquals(ServerStatus.CONNECTED_VIA_TOR, fixture.state.serverStatus)
-    }
-
-    @Test
-    fun `an established CONNECTED_VIA_TOR does not blink to CONNECTING on a later heartbeat`() {
-        val fixture = Fixture(server = ONION, results = listOf(true))
-        fixture.tor = TorStatus(TorPhase.READY, 100)
-
-        runBlocking { fixture.state.checkServerStatus() }
-        assertEquals(ServerStatus.CONNECTED_VIA_TOR, fixture.state.serverStatus)
-
-        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
-        fixture.hold = gate
-
-        runBlocking {
-            val check = launch { fixture.state.checkServerStatus(showChecking = false) }
-            withTimeout(5_000) { while (fixture.pinged.size < 2) delay(5) }
-
-            assertEquals(
-                "a 60-second re-ping must not blink an established connection",
-                ServerStatus.CONNECTED_VIA_TOR,
-                fixture.state.serverStatus,
-            )
-
-            gate.complete(Unit)
-            check.join()
-        }
-
-        assertEquals(ServerStatus.CONNECTED_VIA_TOR, fixture.state.serverStatus)
-    }
-
-    @Test
     fun `checking with no server saved settles on not configured without pinging`() {
         val fixture = Fixture()
 
@@ -353,129 +192,239 @@ class HomeScreenStateTest {
         assertEquals("10.0.0.2:50001:TCP", fixture.state.serverKey)
     }
 
-    // --- remembered answers: entry staleness ---------------------------------
+    // --- clearnet: unchanged behaviour --------------------------------------
 
     @Test
-    fun `an entry tick is skipped only for a fresh answer about the same endpoint`() {
+    fun `a successful check against a clearnet server reports connected`() {
         val fixture = Fixture(server = CLEARNET)
 
-        // Nothing has dialled yet: the entry tick must run.
-        assertTrue("no answer exists yet", fixture.state.shouldCheckOnEntry())
+        val status = runBlocking { fixture.state.checkServerStatus() }
 
-        runBlocking { fixture.state.checkServerStatus() }
-
-        fixture.clock = 0
-        assertFalse("a just-answered endpoint needs no entry check", fixture.state.shouldCheckOnEntry())
-
-        fixture.clock = HomeScreenState.STALE_AFTER_MILLIS - 1
-        assertFalse("still fresh just under the window", fixture.state.shouldCheckOnEntry())
-
-        fixture.clock = HomeScreenState.STALE_AFTER_MILLIS
-        assertTrue("stale once the window elapses", fixture.state.shouldCheckOnEntry())
-
-        // The Server screen was edited: the remembered answer belongs to a
-        // different endpoint, so it must not suppress the recheck.
-        fixture.clock = 1_000
-        fixture.serverSettings.server = OTHER
-        assertTrue("a changed endpoint is not the remembered answer", fixture.state.shouldCheckOnEntry())
+        assertEquals(ServerStatus.CONNECTED, status)
+        assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
+        assertEquals(listOf(CLEARNET), fixture.pinged)
+        assertEquals(listOf(ServerStatus.CONNECTING), fixture.statusDuringPing)
     }
 
     @Test
-    fun `a fresh answer is rendered instantly and the entry tick performs no ping`() {
+    fun `a failed check reports disconnected`() {
+        val fixture = Fixture(server = CLEARNET, results = listOf(false))
+
+        val status = runBlocking { fixture.state.checkServerStatus() }
+
+        assertEquals(ServerStatus.DISCONNECTED, status)
+        assertEquals(ServerStatus.DISCONNECTED, fixture.state.serverStatus)
+    }
+
+    // --- onion servers and Tor ---------------------------------------------
+
+    @Test
+    fun `an onion server still bootstrapping renders tor starting with live percent, and never dials`() {
+        val fixture = Fixture(server = ONION)
+        fixture.tor = TorStatus(TorPhase.STARTING, 10)
+
+        runBlocking {
+            val heartbeat = launch { fixture.state.runHeartbeat(tickMillis = 10) }
+            withTimeout(5_000) { while (fixture.state.torProgressPercent != 10) delay(5) }
+            assertEquals(ServerStatus.TOR_STARTING, fixture.state.serverStatus)
+
+            // The percentage is re-read every tick, so the line tracks the
+            // bootstrap rather than sitting on the value it started at.
+            fixture.tor = TorStatus(TorPhase.STARTING, 65)
+            withTimeout(5_000) { while (fixture.state.torProgressPercent != 65) delay(5) }
+            assertEquals(ServerStatus.TOR_STARTING, fixture.state.serverStatus)
+
+            heartbeat.cancelAndJoin()
+        }
+
+        assertTrue("must not dial while Tor is bootstrapping", fixture.pinged.isEmpty())
+    }
+
+    @Test
+    fun `an onion server whose tor failed renders tor failed, with no ping`() {
+        val fixture = Fixture(server = ONION)
+        fixture.tor = TorStatus(TorPhase.FAILED, 40)
+
+        runBlocking {
+            val heartbeat = launch { fixture.state.runHeartbeat(tickMillis = 10) }
+            withTimeout(5_000) {
+                while (fixture.state.serverStatus != ServerStatus.TOR_FAILED) delay(5)
+            }
+            assertEquals(40, fixture.state.torProgressPercent)
+            heartbeat.cancelAndJoin()
+        }
+
+        assertTrue("nothing to dial once Tor has given up", fixture.pinged.isEmpty())
+    }
+
+    @Test
+    fun `an onion server with tor ready and a reachable server reads as connected via tor`() {
+        val fixture = Fixture(server = ONION, results = listOf(true))
+        fixture.tor = TorStatus(TorPhase.READY, 100)
+
+        val status = runBlocking { fixture.state.checkServerStatus() }
+
+        assertEquals(ServerStatus.CONNECTED_VIA_TOR, status)
+        assertEquals(listOf(ONION), fixture.pinged)
+        // The percentage is only meaningful while bootstrapping.
+        assertEquals(0, fixture.state.torProgressPercent)
+    }
+
+    @Test
+    fun `an onion server whose tor failed to reach the server reads as disconnected`() {
+        // Tor is up but the server behind the onion is not answering: that is a
+        // server problem, not a Tor one.
+        val fixture = Fixture(server = ONION, results = listOf(false))
+        fixture.tor = TorStatus(TorPhase.READY, 100)
+
+        val status = runBlocking { fixture.state.checkServerStatus() }
+
+        assertEquals(ServerStatus.DISCONNECTED, status)
+    }
+
+    @Test
+    fun `an onion dial never blocks the tick loop — Tor progress renders while the dial is blocked`() {
+        // The regression: Tor is OFF, so the state dials (the connection path
+        // starts Tor itself). The dial then blocks on the bootstrap. The tick
+        // loop must keep running, so when Tor flips to STARTING the live
+        // percentage is rendered instead of a frozen "Connecting…".
+        val fixture = Fixture(server = ONION, results = listOf(true))
+        fixture.tor = TorStatus.OFF
+
+        val gate = CompletableDeferred<Unit>()
+        fixture.hold = gate
+
+        runBlocking {
+            val heartbeat = launch { fixture.state.runHeartbeat(tickMillis = 10) }
+
+            withTimeout(5_000) { while (fixture.pinged.isEmpty()) delay(5) }
+            assertEquals(ServerStatus.CONNECTING, fixture.state.serverStatus)
+
+            fixture.tor = TorStatus(TorPhase.STARTING, 40)
+            withTimeout(5_000) {
+                while (fixture.state.serverStatus != ServerStatus.TOR_STARTING) delay(5)
+            }
+
+            assertEquals(40, fixture.state.torProgressPercent)
+            assertEquals("the blocked dial must not have been joined", 1, fixture.pinged.size)
+
+            gate.complete(Unit)
+            heartbeat.cancelAndJoin()
+        }
+    }
+
+    @Test
+    fun `an established CONNECTED_VIA_TOR does not blink to CONNECTING on a stale redial`() {
+        val fixture = Fixture(server = ONION, results = listOf(true))
+        fixture.tor = TorStatus(TorPhase.READY, 100)
+        runBlocking { fixture.state.checkServerStatus() }
+        assertEquals(ServerStatus.CONNECTED_VIA_TOR, fixture.state.serverStatus)
+        assertEquals(1, fixture.pinged.size)
+
+        val gate = CompletableDeferred<Unit>()
+        fixture.hold = gate
+        fixture.clock = HomeScreenState.STALE_AFTER_MILLIS + 1
+
+        runBlocking {
+            val heartbeat = launch { fixture.state.runHeartbeat(tickMillis = 10) }
+            withTimeout(5_000) { while (fixture.pinged.size < 2) delay(5) }
+
+            assertEquals(
+                "a background redial must not blank an established connection",
+                ServerStatus.CONNECTED_VIA_TOR,
+                fixture.state.serverStatus,
+            )
+
+            gate.complete(Unit)
+            heartbeat.cancelAndJoin()
+        }
+
+        assertEquals(ServerStatus.CONNECTED_VIA_TOR, fixture.state.serverStatus)
+    }
+
+    // --- remembered answers: entry freshness and staleness ------------------
+
+    @Test
+    fun `a fresh answer renders instantly and the entry tick performs no dial`() {
         val fixture = Fixture(server = CLEARNET)
         runBlocking { fixture.state.checkServerStatus() }
         assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
         assertEquals(1, fixture.pinged.size)
 
-        // Coming back well within the stale window: zero dials, the last answer
-        // stays on screen.
+        // Coming back well within the stale window: the loop ticks but never
+        // dials, and the last answer stays on screen.
         fixture.clock = 10_000
         runBlocking {
-            val heartbeat = launch { fixture.state.runHeartbeat(intervalMillis = 60_000) }
+            val heartbeat = launch { fixture.state.runHeartbeat(tickMillis = 10) }
             delay(200)
             heartbeat.cancelAndJoin()
         }
 
         assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
-        assertEquals("a fresh answer must not be re-pinged on entry", 1, fixture.pinged.size)
+        assertEquals("a fresh answer must not be re-dialled", 1, fixture.pinged.size)
     }
 
     @Test
-    fun `a stale answer is re-checked quietly on the next entry`() {
-        val fixture = Fixture(server = CLEARNET, results = listOf(true, false))
+    fun `a stale answer is re-dialled, and the old answer stays on screen while the dial is blocked`() {
+        val fixture = Fixture(server = CLEARNET, results = listOf(true))
         runBlocking { fixture.state.checkServerStatus() }
-        assertEquals(1, fixture.pinged.size)
+        assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
 
-        // Older than the window: the entry tick dials again.
+        val gate = CompletableDeferred<Unit>()
+        fixture.hold = gate
+        // Older than the window: the loop must dial again.
         fixture.clock = HomeScreenState.STALE_AFTER_MILLIS + 1
-        runBlocking {
-            val heartbeat = launch { fixture.state.runHeartbeat(intervalMillis = 60_000) }
-            withTimeout(5_000) { while (fixture.pinged.size < 2) delay(5) }
-            heartbeat.cancelAndJoin()
-        }
-
-        // Quietly: the answer updates in place, it never flipped to CONNECTING.
-        assertEquals(2, fixture.pinged.size)
-        assertEquals(ServerStatus.DISCONNECTED, fixture.state.serverStatus)
-        assertEquals(
-            listOf(ServerStatus.CONNECTING, ServerStatus.CONNECTED),
-            fixture.statusDuringPing,
-        )
-    }
-
-    @Test
-    fun `no answer yet shows connecting while the first check is in flight`() {
-        val fixture = Fixture(server = CLEARNET, results = listOf(true))
-        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
-        fixture.hold = gate
 
         runBlocking {
-            val heartbeat = launch { fixture.state.runHeartbeat(intervalMillis = 60_000) }
-            withTimeout(5_000) { while (fixture.pinged.isEmpty()) delay(5) }
-
-            assertEquals(ServerStatus.CONNECTING, fixture.state.serverStatus)
-
-            gate.complete(Unit)
-            withTimeout(5_000) { while (fixture.state.serverStatus != ServerStatus.CONNECTED) delay(5) }
-            heartbeat.cancelAndJoin()
-        }
-
-        assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
-    }
-
-    @Test
-    fun `a recheck in flight keeps the remembered answer, never reading connecting`() {
-        val fixture = Fixture(server = CLEARNET, results = listOf(true))
-        runBlocking { fixture.state.checkServerStatus() }
-        assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
-
-        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
-        fixture.hold = gate
-        runBlocking {
-            val check = launch { fixture.state.checkServerStatus(showChecking = false) }
+            val heartbeat = launch { fixture.state.runHeartbeat(tickMillis = 10) }
             withTimeout(5_000) { while (fixture.pinged.size < 2) delay(5) }
 
-            // The dial is in flight and the answer is still the last one: no
-            // "Connecting…" blink while a background recheck runs.
+            // Quietly: the answer updates in place, it never flipped to CONNECTING.
             assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
+            assertEquals(listOf(ServerStatus.CONNECTING, ServerStatus.CONNECTED), fixture.statusDuringPing)
 
             gate.complete(Unit)
-            check.join()
+            heartbeat.cancelAndJoin()
         }
+
         assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
     }
 
     @Test
-    fun `a changed server after a fresh answer still pings on the next entry`() {
+    fun `a dial that throws reports disconnected and the loop keeps ticking`() {
+        val fixture = Fixture(server = CLEARNET)
+        fixture.throwOnCall = 0
+
+        runBlocking {
+            val heartbeat = launch { fixture.state.runHeartbeat(tickMillis = 10) }
+            withTimeout(5_000) {
+                while (fixture.state.serverStatus != ServerStatus.DISCONNECTED) delay(5)
+            }
+            assertEquals(1, fixture.pinged.size)
+
+            // A single blown-up dial must not have killed the loop: age the
+            // answer and the next due-check dials again.
+            fixture.clock = HomeScreenState.STALE_AFTER_MILLIS + 1
+            withTimeout(5_000) { while (fixture.pinged.size < 2) delay(5) }
+
+            heartbeat.cancelAndJoin()
+        }
+
+        assertTrue("the loop must survive a failed dial", fixture.pinged.size >= 2)
+    }
+
+    @Test
+    fun `a changed server after a fresh answer still dials on the next tick`() {
         val fixture = Fixture(server = CLEARNET)
         runBlocking { fixture.state.checkServerStatus() }
         assertEquals(listOf(CLEARNET), fixture.pinged)
 
-        // Edited on the Server screen, still well within the stale window.
+        // Edited on the Server screen, still well within the stale window: the
+        // remembered answer belongs to a different endpoint, so it is invalid.
         fixture.serverSettings.server = OTHER
         fixture.clock = 5_000
         runBlocking {
-            val heartbeat = launch { fixture.state.runHeartbeat(intervalMillis = 60_000) }
+            val heartbeat = launch { fixture.state.runHeartbeat(tickMillis = 10) }
             withTimeout(5_000) { while (fixture.pinged.size < 2) delay(5) }
             heartbeat.cancelAndJoin()
         }
@@ -484,68 +433,45 @@ class HomeScreenStateTest {
     }
 
     @Test
-    fun `a tor bootstrap keeps polling regardless of how fresh the last answer is`() {
-        val fixture = Fixture(server = ONION, results = listOf(true))
-        fixture.tor = TorStatus(TorPhase.READY, 100)
-        runBlocking { fixture.state.checkServerStatus() }
-        assertEquals(ServerStatus.CONNECTED_VIA_TOR, fixture.state.serverStatus)
-
-        // Tor restarts: the next tick reads the short-circuit state, which is not
-        // an answer and must keep being polled so the percentage moves.
-        fixture.tor = TorStatus(TorPhase.STARTING, 10)
-        runBlocking { fixture.state.checkServerStatus(showChecking = false) }
-        assertEquals(ServerStatus.TOR_STARTING, fixture.state.serverStatus)
-
-        fixture.clock = 1_000 // the remembered answer is still young
-        assertTrue("a Tor bootstrap must keep being polled", fixture.state.shouldCheckOnEntry())
-        assertEquals(
-            "Tor starting keeps the 2s cadence",
-            HomeScreenState.TOR_POLL_INTERVAL_MILLIS,
-            fixture.state.nextDelayMillis(fixture.state.serverStatus, 60_000),
-        )
-    }
-
-    // --- heartbeat cadence --------------------------------------------------
-
-    @Test
-    fun `the heartbeat polls faster while tor is bootstrapping, and at the interval otherwise`() {
-        val fixture = Fixture()
-        val minute = 60_000L
-
-        assertEquals(
-            "Tor starting must tick fast so the percentage moves",
-            2_000L,
-            fixture.state.nextDelayMillis(ServerStatus.TOR_STARTING, minute),
-        )
-        // Every other state waits out the caller's interval unchanged.
-        listOf(
-            ServerStatus.NOT_CONFIGURED,
-            ServerStatus.TOR_FAILED,
-            ServerStatus.CONNECTING,
-            ServerStatus.CONNECTED,
-            ServerStatus.CONNECTED_VIA_TOR,
-            ServerStatus.DISCONNECTED,
-        ).forEach { status ->
-            assertEquals(status.name, minute, fixture.state.nextDelayMillis(status, minute))
-        }
-    }
-
-    @Test
-    fun `the heartbeat checks immediately and keeps polling until cancelled`() {
+    fun `no answer yet shows connecting while the first dial is in flight`() {
         val fixture = Fixture(server = CLEARNET)
+        val gate = CompletableDeferred<Unit>()
+        fixture.hold = gate
 
         runBlocking {
-            val heartbeat = launch { fixture.state.runHeartbeat(intervalMillis = 25) }
+            val heartbeat = launch { fixture.state.runHeartbeat(tickMillis = 10) }
+            withTimeout(5_000) { while (fixture.pinged.isEmpty()) delay(5) }
+            delay(50)
+
+            assertEquals(ServerStatus.CONNECTING, fixture.state.serverStatus)
+
+            gate.complete(Unit)
             withTimeout(5_000) {
-                while (fixture.pinged.size < 3) delay(5)
+                while (fixture.state.serverStatus != ServerStatus.CONNECTED) delay(5)
             }
             heartbeat.cancelAndJoin()
         }
 
-        // Cancelling the coroutine is exactly how leaving the home screen (or
-        // the process going to the background) stops the polling.
         assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
-        assertTrue("expected repeated checks, saw ${fixture.pinged.size}", fixture.pinged.size >= 3)
+    }
+
+    @Test
+    fun `the heartbeat re-dials only once the answer goes stale`() {
+        val fixture = Fixture(server = CLEARNET)
+
+        runBlocking {
+            val heartbeat = launch { fixture.state.runHeartbeat(tickMillis = 10) }
+            delay(200)
+            // ~20 ticks, but the answer is fresh: exactly one dial.
+            assertEquals(1, fixture.pinged.size)
+
+            fixture.clock = HomeScreenState.STALE_AFTER_MILLIS + 1
+            withTimeout(5_000) { while (fixture.pinged.size < 2) delay(5) }
+
+            heartbeat.cancelAndJoin()
+        }
+
+        assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
     }
 
     private companion object {
