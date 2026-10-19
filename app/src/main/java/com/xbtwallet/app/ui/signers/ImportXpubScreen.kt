@@ -42,14 +42,20 @@ import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerStore
 
 /**
- * State behind the watch-only xpub import screen: two text fields, their inline
- * errors, and the save action.
+ * State behind the watch-only xpub import screen: the signer's name, the key
+ * captured by the last scan (plus whatever metadata rode with it), and the save
+ * action.
  *
  * Kept out of the composable for two reasons. First, it is plain Kotlin and can
- * be exercised without a UI test. Second, the screen is re-composed constantly
- * while the user types; holding the field values and the "already attempted a
- * save" flag here means the validation behaviour is a property of the state
- * object, not of how many times Compose happened to re-run the composable.
+ * be exercised without a UI test — and without a camera. Second, the screen is
+ * re-composed constantly; holding the scan result and the inline errors here
+ * means the state machine is a property of this object, not of how many times
+ * Compose happened to re-run the composable.
+ *
+ * There is no text field for the key any more: import is QR-only, so "what key
+ * have we got" is exactly "what did the last scan produce". A bad scan clears
+ * every scanned field before it records its error, so a stale earlier key can
+ * never look like the one that was just scanned.
  */
 @Stable
 class ImportXpubScreenState(
@@ -60,17 +66,27 @@ class ImportXpubScreenState(
     var name by mutableStateOf("")
         private set
 
-    var xpub by mutableStateOf("")
-        private set
-
     var nameError by mutableStateOf<String?>(null)
         private set
 
-    var xpubError by mutableStateOf<String?>(null)
+    /** The key text of the last successful scan, null until one lands. */
+    var scannedXpub by mutableStateOf<String?>(null)
         private set
 
-    /** Set to "zpub"/"xpub"/"ypub" once the field parses, null otherwise. */
+    /** Master fingerprint carried by the scanned key expression, when there was one. */
+    var masterFingerprint by mutableStateOf<String?>(null)
+        private set
+
+    /** Derivation path (no leading `m/`) carried by the scanned key expression, when there was one. */
+    var derivationPath by mutableStateOf<String?>(null)
+        private set
+
+    /** Set to "zpub"/"xpub"/"ypub" once a scan parses, null otherwise. */
     var recognisedVersion by mutableStateOf<String?>(null)
+        private set
+
+    /** The shared validator's message for the most recent bad scan, null otherwise. */
+    var scanError by mutableStateOf<String?>(null)
         private set
 
     /**
@@ -86,30 +102,18 @@ class ImportXpubScreenState(
     /**
      * Whether the user refused the CAMERA permission.
      *
-     * Kept so the screen can say why the button did nothing and offer a retry,
-     * without ever taking the paste path away: a wallet must be importable on a
-     * device whose camera is denied or absent.
+     * Kept so the screen can say why the button did nothing and offer a retry.
+     * There is no paste fallback to fall back to: the QR is the only way in.
      */
     var cameraDenied by mutableStateOf(false)
         private set
 
-    /** The parsed key, or null while the field is empty or invalid. */
-    private var parsedKey: XpubImport.Valid? = null
-
-    /**
-     * Inline errors only appear after the first save attempt — flagging every
-     * half-typed key on the way to a pasted one would be noise.
-     */
-    private var submitAttempted = false
+    /** The parsed key from the last successful scan, or null. */
+    private var scannedKey: XpubImport.Valid? = null
 
     fun onNameChange(value: String) {
         name = value
         if (nameError != null && value.isNotBlank()) nameError = null
-    }
-
-    fun onXpubChange(value: String) {
-        xpub = value
-        revalidate(showError = submitAttempted)
     }
 
     /**
@@ -124,10 +128,7 @@ class ImportXpubScreenState(
         showScanner = true
     }
 
-    /**
-     * The user refused the camera. The panel never opens; the screen shows the
-     * paste-is-still-available hint instead.
-     */
+    /** The user refused the camera. The panel never opens. */
     fun onCameraPermissionDenied() {
         cameraDenied = true
     }
@@ -135,50 +136,75 @@ class ImportXpubScreenState(
     /**
      * Dismisses the panel (Cancel, or the caller hiding it after a scan).
      *
-     * Nothing in the field is touched: a cancelled scan must leave whatever the
-     * user had typed exactly as it was.
+     * Whatever the last scan produced is left exactly as it was: cancelling a
+     * scan is not the same as scanning a bad one.
      */
     fun onScannerDismissed() {
         showScanner = false
     }
 
-    /** Validates and, when everything checks out, stores a new watch-only signer. */
-    fun import() {
-        submitAttempted = true
-        nameError = if (name.isBlank()) "Give this signer a name." else null
-        revalidate(showError = true)
-
-        val key = parsedKey
-        if (nameError != null || key == null) return
-
-        // The key is stored as entered (trimmed) rather than re-encoded: the
-        // user should see back what they pasted, and every accepted version is
-        // derived as native segwit anyway. `key` proves it was valid.
-        onSaved(signerStore.add(name = name, xpub = xpub))
-    }
-
-    private fun revalidate(showError: Boolean) {
-        val text = xpub.trim()
-        if (text.isEmpty()) {
-            parsedKey = null
-            recognisedVersion = null
-            xpubError = if (showError) "Paste the account extended public key (xpub, ypub or zpub)." else null
-            return
-        }
-
-        when (val result = validateXpubInput(text)) {
+    /**
+     * Routes and validates one scanned QR payload.
+     *
+     * [XpubScanRoute] decides what part of the payload is the key and what
+     * metadata came with it; [validateXpubInput] then decides whether that key is
+     * any good — the same validator a keyboard entry would have gone through, so
+     * the camera can never accept what typing would have refused.
+     *
+     * A valid scan populates the key and its metadata and clears any error. An
+     * invalid scan **clears** the scanned fields before recording the message:
+     * leaving a previous good key on screen after a bad scan would present the
+     * wrong key as imported. Scanning again replaces everything either way.
+     */
+    fun onScanResult(payload: String) {
+        val result = XpubScanRoute.extract(payload)
+        when (val validation = validateXpubInput(result.keyText)) {
             is XpubImport.Valid -> {
-                parsedKey = result
-                recognisedVersion = result.versionLabel
-                xpubError = null
+                scannedKey = validation
+                scannedXpub = result.keyText
+                recognisedVersion = validation.versionLabel
+                masterFingerprint = result.masterFingerprint
+                derivationPath = result.derivationPath
+                scanError = null
             }
 
             is XpubImport.Invalid -> {
-                parsedKey = null
+                scannedKey = null
+                scannedXpub = null
                 recognisedVersion = null
-                xpubError = if (showError) result.message else null
+                masterFingerprint = null
+                derivationPath = null
+                scanError = validation.message
             }
         }
+    }
+
+    /** Validates and, when everything checks out, stores a new watch-only signer. */
+    fun import() {
+        nameError = if (name.isBlank()) "Give this signer a name." else null
+
+        val key = scannedKey
+        if (key == null) {
+            // Do not overwrite a specific validator message with the generic
+            // "scan something" one — a bad scan's reason is more useful.
+            if (scanError == null) {
+                scanError = "Scan the signer's account xpub QR before adding it."
+            }
+            return
+        }
+        if (nameError != null) return
+
+        val xpub = scannedXpub ?: return
+        // The metadata is stored as scanned (fingerprint lowercased, path
+        // normalized by XpubScanRoute); `key` proves the xpub parsed.
+        onSaved(
+            signerStore.add(
+                name = name,
+                xpub = xpub,
+                masterFingerprint = masterFingerprint,
+                derivationPath = derivationPath,
+            ),
+        )
     }
 }
 
@@ -188,7 +214,7 @@ class ImportXpubScreenState(
  * The `onSaved` callback goes through [rememberUpdatedState] and the state
  * object is keyed only on `signerStore`: if the callback were a `remember` key,
  * a fresh lambda on every composition would recreate the state object and wipe
- * whatever the user had typed.
+ * whatever the user had entered.
  */
 @Composable
 fun rememberImportXpubScreenState(
@@ -200,23 +226,24 @@ fun rememberImportXpubScreenState(
 }
 
 /**
- * Add a signer by its account xpub — the half of the Add-signer flow reached
- * from [AddSignerScreen]'s **Add watch-only xpub** button.
+ * Add a signer by scanning its account xpub — the half of the Add-signer flow
+ * reached from [AddSignerScreen]'s **Add watch-only xpub** button.
  *
- * There are two ways in and they share one validator. The key can be **pasted**
- * into the field, or **scanned** from the signer's screen; a scan is routed by
- * [XpubScanRoute] and then lands in the same field through the same
- * [com.xbtwallet.app.crypto.validateXpubInput], so the camera can never accept
- * something the keyboard would reject. Pasting stays available at all times,
- * which is also what makes the wallet usable when camera permission is refused
- * or the device has no camera.
+ * Import is **QR-only**. The QR is the air-gapped channel between the signer and
+ * this phone, and it is the only channel that can carry the account's metadata
+ * (the master fingerprint and derivation path a BIP-32 key-expression QR holds).
+ * A paste field would have been a second way in that silently drops that
+ * metadata and invites fat-fingered keys, so it is gone: every key that reaches
+ * the store came off a QR, was routed by [XpubScanRoute], and was then validated
+ * by the shared [com.xbtwallet.app.crypto.validateXpubInput] — the same gate a
+ * keyboard entry would have had to pass.
  *
  * Scanning is an embedded panel, not a screen of its own: [XpubQrScannerPanel]
- * opens inline in this column, in portrait, and leaves the field visible below
- * it. Nothing here launches the scanner library's full-screen activity.
+ * opens inline in this column, in portrait. Nothing here launches the scanner
+ * library's full-screen activity.
  *
- * The fields validate inline (via the shared [validateXpubInput] seam, not a
- * copy of it) and the save is refused until the name is set and the key parses.
+ * The name validates inline and the save is refused until the name is set and a
+ * key has been scanned and parsed.
  */
 @Composable
 fun ImportXpubScreen(
@@ -229,7 +256,7 @@ fun ImportXpubScreen(
     // CAMERA is asked for by this app, not by the scanner library: the panel is
     // our own composable and it can only work with the permission in hand. A
     // granted request opens the panel; a refusal is remembered so the screen can
-    // explain itself. The paste path below is untouched either way.
+    // explain itself.
     val scanPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
@@ -271,7 +298,7 @@ fun ImportXpubScreen(
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = "Paste the account-level extended public key from your signer. " +
+                text = "Scan the account xpub QR from your signer or coordinator. " +
                     "Only public keys belong on this phone.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -292,9 +319,6 @@ fun ImportXpubScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Scanning and pasting fill the same field, so the button sits right
-            // on top of it rather than leading to a screen of its own — and the
-            // scanner, when it opens, opens right here.
             OutlinedButton(
                 onClick = pendingScanRequest,
                 modifier = Modifier.fillMaxWidth(),
@@ -305,7 +329,8 @@ fun ImportXpubScreen(
             if (state.cameraDenied) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Camera permission is needed to scan \u2014 you can still paste the key below.",
+                    text = "Camera permission is required \u2014 signers are imported by " +
+                        "scanning the signer's QR.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -314,16 +339,14 @@ fun ImportXpubScreen(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // The scanner is a panel inside this column, directly above the field
-            // it fills: portrait — nothing here locks orientation, so it inherits
-            // the activity's — small, and scrolled with the rest of the screen. A
-            // scan is routed by XpubScanRoute and lands in the field through the
-            // same onXpubChange a paste uses, so the camera can never accept a key
-            // the keyboard would refuse.
+            // The scanner is a panel inside this column, portrait, scrolled with
+            // the rest of the screen. A scan is routed by XpubScanRoute and
+            // validated by the same seam a keyboard entry would have used, so the
+            // camera can never accept a key typing would refuse.
             if (state.showScanner) {
                 XpubQrScannerPanel(
                     onResult = { payload ->
-                        state.onXpubChange(XpubScanRoute.extract(payload))
+                        state.onScanResult(payload)
                         state.onScannerDismissed()
                     },
                     onCancel = state::onScannerDismissed,
@@ -333,47 +356,24 @@ fun ImportXpubScreen(
                 Spacer(modifier = Modifier.height(12.dp))
             }
 
-            OutlinedTextField(
-                value = state.xpub,
-                onValueChange = state::onXpubChange,
-                label = { Text("Account xpub / ypub / zpub") },
-                placeholder = { Text("zpub6rFR7y4Q2\u2026") },
-                minLines = 3,
-                maxLines = 6,
-                textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                isError = state.xpubError != null,
-                supportingText = state.xpubError?.let { { Text(it) } },
-                modifier = Modifier.fillMaxWidth(),
-            )
-
-            state.recognisedVersion?.let { version ->
-                Spacer(modifier = Modifier.height(8.dp))
+            state.scanError?.let { error ->
                 Text(
-                    text = "Recognised $version \u2014 treated as native segwit (bc1q\u2026 addresses).",
+                    text = error,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary,
+                    color = MaterialTheme.colorScheme.error,
                 )
+                Spacer(modifier = Modifier.height(12.dp))
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Surface(
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                shape = MaterialTheme.shapes.small,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(
-                    text = "Manual import carries no master fingerprint or derivation path. " +
-                        "All three of xpub, ypub and zpub hold the same public key, so this " +
-                        "wallet derives native segwit P2WPKH (bc1q\u2026) addresses from it " +
-                        "regardless of which you paste.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(12.dp),
+            state.scannedXpub?.let { xpub ->
+                ScannedKeyConfirmation(
+                    xpub = xpub,
+                    version = state.recognisedVersion,
+                    masterFingerprint = state.masterFingerprint,
+                    derivationPath = state.derivationPath,
                 )
+                Spacer(modifier = Modifier.height(20.dp))
             }
-
-            Spacer(modifier = Modifier.height(20.dp))
 
             Button(
                 onClick = state::import,
@@ -386,3 +386,77 @@ fun ImportXpubScreen(
         }
     }
 }
+
+/**
+ * What was just scanned, echoed back before it is saved: the key in monospace,
+ * the version line the screen has always shown, and — when the QR was a BIP-32
+ * key expression — the master fingerprint and derivation path that came with it.
+ *
+ * The key is middle-elided rather than shown whole: a 111-character zpub would
+ * dominate the screen, and the point of this block is confirmation that *a* key
+ * was read, not a second place to copy it from. When the QR carried no metadata,
+ * a quiet line says so — it is not an error, but it is worth knowing before the
+ * signing flow asks for a richer QR later.
+ */
+@Composable
+private fun ScannedKeyConfirmation(
+    xpub: String,
+    version: String?,
+    masterFingerprint: String?,
+    derivationPath: String?,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = MaterialTheme.shapes.small,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+                text = elideMiddle(xpub),
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+            )
+
+            version?.let {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Recognised $it \u2014 treated as native segwit (bc1q\u2026 addresses).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+
+            masterFingerprint?.let {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Master fingerprint: $it",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+
+            derivationPath?.let {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Derivation: m/$it",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+
+            if (masterFingerprint == null && derivationPath == null) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "This QR carries no fingerprint or derivation path \u2014 fine for " +
+                        "watching; the signing flow may ask for a richer QR later.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/** Middle-elides a long key: `zpub6rFR7y4Q…dBHyPtJQ5`. */
+private fun elideMiddle(key: String, head: Int = 12, tail: Int = 12): String =
+    if (key.length <= head + tail + 1) key else key.take(head) + "\u2026" + key.takeLast(tail)

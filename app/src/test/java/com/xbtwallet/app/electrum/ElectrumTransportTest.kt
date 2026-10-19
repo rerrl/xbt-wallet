@@ -26,6 +26,7 @@ class ElectrumTransportTest {
     private fun logText(): String = logs.joinToString(separator = "\n")
 
     private fun bootstrapAt(port: Int) = object : TorBootstrap {
+        override val status: TorStatus = TorStatus.OFF
         override suspend fun start(log: (String) -> Unit): TorProxy = TorProxy(host = "127.0.0.1", port = port)
     }
 

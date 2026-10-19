@@ -6,9 +6,14 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
 import android.os.SystemClock
+import androidx.compose.runtime.State
+import androidx.compose.runtime.mutableStateOf
 import com.xbtwallet.app.electrum.TorBootstrap
 import com.xbtwallet.app.electrum.TorBootstrapException
+import com.xbtwallet.app.electrum.TorPhase
 import com.xbtwallet.app.electrum.TorProxy
+import com.xbtwallet.app.electrum.TorStatus
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
@@ -22,12 +27,16 @@ import java.net.Socket
  * Runs the bundled Tor daemon (the native tor inside `info.guardianproject:tor-android`)
  * and reports the SOCKS port it is listening on.
  *
- * **Why a bound service and not a foreground service.** `TorService` starts tor
- * in `onCreate` and publishes its control connection through a local binder;
- * binding with `BIND_AUTO_CREATE` is enough to bring it up, and the binding keeps
- * it alive while the app is using it. There is no user-visible notification and
- * no `startService` call to be refused by a background-execution limit — this is
- * the same shape Sparrow/Shrike use for their embedded Tor.
+ * **Why not a foreground service.** `TorService` starts tor in `onCreate` and
+ * publishes its control connection through a local binder; binding with
+ * `BIND_AUTO_CREATE` is enough to bring it up, and the binding keeps it alive
+ * while the app is using it. The service is *also* started — see
+ * [bindTorService] — so tor survives the app being backgrounded for a while: a
+ * bound-only service is torn down as soon as the app's foreground time ends,
+ * which is what made Tor silently drop out in the background. There is
+ * deliberately no foreground service and no notification (the GrapheneOS/F-Droid
+ * stance this app takes), so when the system kills tor anyway the recovery path
+ * is the probe-before-reuse in [start], not a persistent notification.
  *
  * **Readiness.** A SOCKS port existing is not the same as Tor being usable: tor
  * opens its SOCKS listener early, but a `.onion` connect before the first
@@ -37,11 +46,16 @@ import java.net.Socket
  * is logged at every 10% so the Server screen's log shows a long bootstrap
  * doing something rather than hanging.
  *
- * **Lifetime.** Tor is started once and then reused for the life of the process:
- * [start] returns the cached endpoint immediately on later calls. The binding is
- * intentionally never released — unbinding would destroy the service and kill
- * tor mid-session, which would make the second connection test mysteriously
- * slower and the first scan fail.
+ * **Lifetime.** Tor is started once and then reused for the life of the process.
+ * [start] probes the cached SOCKS endpoint before reuse: a listener that answers
+ * is handed back immediately, while a dead one (the daemon killed while the app
+ * was away) is dropped and re-bootstrapped, so recovery is automatic even when
+ * `onServiceDisconnected` is never delivered. A bootstrap that is *cancelled*
+ * mid-flight (screen left, app backgrounded, activity recreated) publishes
+ * [TorPhase.OFF] rather than freezing on STARTING, so no screen is left reading
+ * a stale percentage forever. The binding is intentionally never released —
+ * unbinding would destroy the service and kill tor mid-session, which would make
+ * the second connection test mysteriously slower and the first scan fail.
  *
  * @param context any context; the application context is what gets bound.
  * @param timeoutMillis how long to wait for a working circuit before giving up.
@@ -68,67 +82,120 @@ class AndroidTorBootstrap(
     @Volatile
     private var connection: ServiceConnection? = null
 
+    /**
+     * The live bootstrap state, as Compose state so a screen can observe it.
+     *
+     * This file is the one place in the Tor stack that is allowed an Android
+     * import, so it is also where the observable flavour of [status] lives: the
+     * screens render a status line, and a `State<TorStatus>` lets them recompose
+     * when it changes without polling. [status] reads the same value for callers
+     * (the home screen's check) that only want one snapshot.
+     */
+    private val _status = mutableStateOf(TorStatus.OFF)
+
+    /** The bootstrap state as observable Compose state. */
+    val observableStatus: State<TorStatus> get() = _status
+
+    override val status: TorStatus get() = _status.value
+
     override suspend fun start(log: (String) -> Unit): TorProxy {
-        ready?.let {
-            log("< tor: already running, socks proxy ${it.host}:${it.port}")
-            return it
+        ready?.let { cached ->
+            if (withContext(Dispatchers.IO) { socksListenerReachable(cached.port) }) {
+                log("< tor: already running, socks proxy ${cached.host}:${cached.port}")
+                return cached
+            }
+            // The daemon died under us (service killed while the app was away):
+            // the cached SOCKS endpoint is dead — drop it and re-bootstrap.
+            log("< tor: cached SOCKS endpoint ${cached.host}:${cached.port} is dead — restarting Tor")
+            ready = null
+            _status.value = TorStatus(TorPhase.OFF, 0)
         }
         return mutex.withLock {
-            ready?.let {
-                log("< tor: already running, socks proxy ${it.host}:${it.port}")
-                return@withLock it
+            ready?.let { cached ->
+                if (withContext(Dispatchers.IO) { socksListenerReachable(cached.port) }) {
+                    log("< tor: already running, socks proxy ${cached.host}:${cached.port}")
+                    return@withLock cached
+                }
+                ready = null
+                _status.value = TorStatus(TorPhase.OFF, 0)
             }
             withContext(Dispatchers.IO) { bootstrapTor(log) }
         }
     }
 
     private suspend fun bootstrapTor(log: (String) -> Unit): TorProxy {
-        val deadline = SystemClock.elapsedRealtime() + timeoutMillis
-        val tor = service ?: bindTorService(log)
-        log("< tor: starting the bundled Tor daemon (this can take up to ${timeoutMillis / 1000}s)")
+        // Entry point of a bootstrap (first call, or a retry after a failure):
+        // from here until either READY or FAILED the status is STARTING, so the
+        // home screen shows a progress line instead of pinging a server it
+        // cannot reach through a Tor that is not up yet.
+        _status.value = TorStatus(TorPhase.STARTING, 0)
+        try {
+            val deadline = SystemClock.elapsedRealtime() + timeoutMillis
+            val tor = service ?: bindTorService(log)
+            log("< tor: starting the bundled Tor daemon (this can take up to ${timeoutMillis / 1000}s)")
 
-        var lastTenth = -1
-        var lastPhase = "starting"
-        while (SystemClock.elapsedRealtime() < deadline) {
-            val socksPort = runCatching { tor.socksPort }.getOrDefault(0)
-            val phase = runCatching { tor.getInfo("status/bootstrap-phase") }.getOrNull()
-            val circuitEstablished = runCatching { tor.getInfo("status/circuit-established") }.getOrNull()
+            var lastTenth = -1
+            var lastPhase = "starting"
+            while (SystemClock.elapsedRealtime() < deadline) {
+                val socksPort = runCatching { tor.socksPort }.getOrDefault(0)
+                val phase = runCatching { tor.getInfo("status/bootstrap-phase") }.getOrNull()
+                val circuitEstablished = runCatching { tor.getInfo("status/circuit-established") }.getOrNull()
 
-            val progress = PROGRESS.find(phase.orEmpty())?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
-            lastPhase = describePhase(phase, progress, circuitEstablished)
+                val progress = PROGRESS.find(phase.orEmpty())?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+                lastPhase = describePhase(phase, progress, circuitEstablished)
 
-            if (socksPort > 0 && (circuitEstablished?.trim() == "1" || progress >= 100)) {
-                // tor opens the SOCKS listener before the daemon is actually
-                // able to answer through it, so "port exists" is not "usable".
-                // Probe the listener for real: a connect that completes is the
-                // only proof that the port this app will dial is the port tor
-                // is listening on (9050 could equally belong to another app).
-                if (socksListenerReachable(socksPort)) {
-                    log("< tor: SOCKS listener ${SOCKS_HOST}:$socksPort accepted a probe connection")
-                    val proxy = TorProxy(host = SOCKS_HOST, port = socksPort)
-                    ready = proxy
-                    log("< tor: ready, socks proxy on ${proxy.host}:${proxy.port}")
-                    runCatching { tor.getInfo("net/listeners/socks") }.getOrNull()
-                        ?.let { log("< tor: net/listeners/socks: $it") }
-                    runCatching { tor.getInfo("version") }.getOrNull()
-                        ?.let { log("< tor: version: $it") }
-                    return proxy
+                // Publish each new percentage so the UI tracks the bootstrap
+                // rather than freezing on the value it saw first.
+                if (progress != _status.value.progressPercent) {
+                    _status.value = TorStatus(TorPhase.STARTING, progress)
                 }
-                lastPhase = "SOCKS listener on $socksPort is not accepting connections yet"
+
+                if (socksPort > 0 && (circuitEstablished?.trim() == "1" || progress >= 100)) {
+                    // tor opens the SOCKS listener before the daemon is actually
+                    // able to answer through it, so "port exists" is not "usable".
+                    // Probe the listener for real: a connect that completes is the
+                    // only proof that the port this app will dial is the port tor
+                    // is listening on (9050 could equally belong to another app).
+                    if (socksListenerReachable(socksPort)) {
+                        log("< tor: SOCKS listener ${SOCKS_HOST}:$socksPort accepted a probe connection")
+                        val proxy = TorProxy(host = SOCKS_HOST, port = socksPort)
+                        ready = proxy
+                        _status.value = TorStatus(TorPhase.READY, 100)
+                        log("< tor: ready, socks proxy on ${proxy.host}:${proxy.port}")
+                        runCatching { tor.getInfo("net/listeners/socks") }.getOrNull()
+                            ?.let { log("< tor: net/listeners/socks: $it") }
+                        runCatching { tor.getInfo("version") }.getOrNull()
+                            ?.let { log("< tor: version: $it") }
+                        return proxy
+                    }
+                    lastPhase = "SOCKS listener on $socksPort is not accepting connections yet"
+                }
+
+                val tenth = progress / 10
+                if (tenth != lastTenth) {
+                    log("< tor: bootstrapping $progress%${summarySuffix(phase)}")
+                    lastTenth = tenth
+                }
+
+                delay(pollIntervalMillis)
             }
 
-            val tenth = progress / 10
-            if (tenth != lastTenth) {
-                log("< tor: bootstrapping $progress%${summarySuffix(phase)}")
-                lastTenth = tenth
-            }
-
-            delay(pollIntervalMillis)
+            throw TorBootstrapException(
+                "Tor did not finish bootstrapping within ${timeoutMillis / 1000}s (last status: $lastPhase)",
+            )
+        } catch (cancel: CancellationException) {
+            // A cancelled bootstrap (screen left, app backgrounded, activity
+            // recreated) is "not started", NOT "starting": freezing STARTING here
+            // is what stranded the home screen on "Tor starting… 100%" forever.
+            _status.value = TorStatus(TorPhase.OFF, 0)
+            throw cancel
+        } catch (failure: Exception) {
+            // Remember how far it got, so the phase stops reading STARTING once
+            // the bootstrap has given up and a screen can honestly say it failed.
+            // Anything thrown — not just a TorBootstrapException — must unstick it.
+            _status.value = TorStatus(TorPhase.FAILED, _status.value.progressPercent)
+            throw failure
         }
-
-        throw TorBootstrapException(
-            "Tor did not finish bootstrapping within ${timeoutMillis / 1000}s (last status: $lastPhase)",
-        )
     }
 
     /**
@@ -146,8 +213,12 @@ class AndroidTorBootstrap(
             }
 
             override fun onServiceDisconnected(name: ComponentName?) {
-                // tor died under us; a later start() rebinds.
+                // tor died under us. Clear the cached endpoint AND the published
+                // status together: a later start() must re-bootstrap rather than
+                // hand back a proxy pointing at a dead SOCKS port.
                 service = null
+                ready = null
+                _status.value = TorStatus(TorPhase.OFF, 0)
             }
         }
         connection = serviceConnection
@@ -169,6 +240,14 @@ class AndroidTorBootstrap(
         }
         val started = bound ?: throw TorBootstrapException("the bundled Tor service started without a usable binder")
         service = started
+        // Bound-only services die with the app's foreground time; a started+bound
+        // service survives background stints within the system's grace window.
+        // TorService.onStartCommand is null-intent safe (verified against the
+        // tor-android 0.4.9.6 AAR). Best-effort: a background start is refused on
+        // API 26+ — the binding alone still works, and the self-healing start()
+        // above is the backstop for when the daemon is killed anyway.
+        runCatching { appContext.startService(Intent(appContext, TorService::class.java)) }
+            .onFailure { log("< tor: startService refused (${it.message}) — continuing bound-only") }
         log("< tor: service bound")
         return started
     }

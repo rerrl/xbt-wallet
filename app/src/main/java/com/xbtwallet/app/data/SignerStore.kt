@@ -22,8 +22,19 @@ sealed interface SignerType {
      *
      * The xpub is stored exactly as the user entered it (trimmed); the
      * derivation code re-reads the version bytes on every use.
+     *
+     * [masterFingerprint] and [derivationPath] are optional metadata captured
+     * from a BIP-32 key-expression QR (`[ab12cd34/84'/0'/0']zpub…`) — the master
+     * fingerprint cannot be derived from the xpub, so it has to come off the QR,
+     * and the later PSBT signing flow will want both to name the signer. A bare
+     * key or a `bitcoin:` URI leaves them null, which is the common case; the
+     * defaults keep every pre-metadata record (and call site) valid.
      */
-    data class WatchOnlyXpub(val xpub: String) : SignerType
+    data class WatchOnlyXpub(
+        val xpub: String,
+        val masterFingerprint: String? = null,
+        val derivationPath: String? = null,
+    ) : SignerType
 }
 
 /**
@@ -103,11 +114,20 @@ class SignerStore(
     fun get(id: String): Signer? = read().firstOrNull { it.id == id }
 
     /** Creates and persists a signer, returning it so the caller has the new id. */
-    fun add(name: String, xpub: String): Signer {
+    fun add(
+        name: String,
+        xpub: String,
+        masterFingerprint: String? = null,
+        derivationPath: String? = null,
+    ): Signer {
         val signer = Signer(
             id = newId(),
             name = name.trim(),
-            type = SignerType.WatchOnlyXpub(xpub.trim()),
+            type = SignerType.WatchOnlyXpub(
+                xpub = xpub.trim(),
+                masterFingerprint = masterFingerprint,
+                derivationPath = derivationPath,
+            ),
             createdAtEpochSeconds = now(),
         )
         saveAll(read() + signer)
@@ -159,13 +179,18 @@ class SignerStore(
     }
 
     private fun encodeSigner(signer: Signer): Map<String, Any?> = when (val type = signer.type) {
-        is SignerType.WatchOnlyXpub -> mapOf(
-            "id" to signer.id,
-            "name" to signer.name,
-            "type" to Signer.WATCH_ONLY_LABEL,
-            "xpub" to type.xpub,
-            "createdAt" to signer.createdAtEpochSeconds,
-        )
+        is SignerType.WatchOnlyXpub -> buildMap {
+            put("id", signer.id)
+            put("name", signer.name)
+            put("type", Signer.WATCH_ONLY_LABEL)
+            put("xpub", type.xpub)
+            // Written only when present, so a bare-key signer's blob keeps the
+            // exact shape it had before these fields existed — and a reader that
+            // does not know them still parses the record.
+            type.masterFingerprint?.let { put("masterFingerprint", it) }
+            type.derivationPath?.let { put("derivationPath", it) }
+            put("createdAt", signer.createdAtEpochSeconds)
+        }
     }
 
     /** Parses the current (`signers`) shape; unreadable entries are skipped. */
@@ -220,7 +245,18 @@ class SignerStore(
         return when (map["type"] as? String) {
             Signer.WATCH_ONLY_LABEL -> {
                 val xpub = map["xpub"] as? String ?: return null
-                Signer(id, name, SignerType.WatchOnlyXpub(xpub), createdAt)
+                // Metadata keys are absent on every pre-metadata record; a
+                // missing key reads as null rather than failing the entry.
+                Signer(
+                    id,
+                    name,
+                    SignerType.WatchOnlyXpub(
+                        xpub = xpub,
+                        masterFingerprint = map["masterFingerprint"] as? String,
+                        derivationPath = map["derivationPath"] as? String,
+                    ),
+                    createdAt,
+                )
             }
             else -> null
         }

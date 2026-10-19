@@ -26,28 +26,19 @@ import com.xbtwallet.app.ui.theme.XbtWalletTheme
 /**
  * **Add signer** — the one way a signer enters the app.
  *
- * It is deliberately a fork and not a form: there are exactly two ways to pair
- * with a signer, and both are named up front, in plain language, before either
- * button. Naming them together is what makes the choice legible instead of
- * implied — the screen opens by saying what each option is *for*, not by talking
- * the user out of one of them.
+ * This is a single-path screen, not a fork: there is exactly one way to add a
+ * signer, watch-only via an account xpub scanned as a QR code. That hands off
+ * to [ImportXpubScreen], which takes a name and the xpub and stores a
+ * watch-only signer. Only a public key ever crosses this boundary.
  *
- * 1. **Add watch-only xpub** — the live path. It hands off to
- *    [ImportXpubScreen], which takes a name and an account xpub and stores a
- *    watch-only signer. Only a public key ever crosses this boundary.
- * 2. **Create hot wallet** — **not available yet.** Generating a seed on this
- *    phone is a capability this build does not have, so the button is disabled
- *    and carries a small *not available yet* tag. It is presented as the
- *    convenience it will be (a hot wallet is cash in your pocket for small,
- *    everyday amounts), not as something to be talked out of — and there is no
- *    seed generation code anywhere behind the button.
+ * The hot-wallet path was removed rather than deferred. Generating a seed on
+ * this phone is no longer a "not yet" — keeping the seed off the phone is a
+ * stated product stance, and a watch-only app that offers to create a hot
+ * wallet invites exactly the behaviour the product exists to prevent. Spending
+ * stays a QR round-trip to the signer.
  *
- * The screen owns no state; it renders two choices and forwards taps.
- *
- * A code note for the reader: **QR scanning is a later feature.** The primary
- * import path in the plan is a SeedSigner `crypto-account` QR export (PLAN.md
- * §4). Until that lands, [ImportXpubScreen] is the manual fallback — paste the
- * key — and this screen only advertises the manual path.
+ * The screen owns no state; it renders the description and forwards the one
+ * tap.
  */
 @Composable
 fun AddSignerScreen(
@@ -71,12 +62,10 @@ fun AddSignerScreen(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // The intro sits above both options: what each one is for, in the
-            // order the buttons below appear. No avoidance language — a hot
-            // wallet is a real thing this app intends to do, it just cannot do
-            // it yet.
+            // The screen's one message, above the single action it describes.
             Text(
-                text = "Two ways to pair this phone with your keys.",
+                text = "For SeedSigner users and watch-only wallets. SeedSigner " +
+                    "users can still use this to create transactions.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface,
             )
@@ -91,18 +80,8 @@ fun AddSignerScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = "Hot wallet \u2014 like cash in your pocket. Generate a seed " +
-                    "on this device for small, everyday amounts.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
             Spacer(modifier = Modifier.height(24.dp))
 
-            // 1. The live path: a watch-only signer, keyed by its xpub.
             Button(
                 onClick = onAddWatchOnly,
                 modifier = Modifier.fillMaxWidth(),
@@ -113,36 +92,12 @@ fun AddSignerScreen(
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = "Paste the account-level xpub from your air-gapped signer. " +
-                    "This phone holds public keys only, so it can watch the money " +
-                    "but can never spend it.",
+                text = "Scan the xpub QR from your signer or coordinator. This " +
+                    "phone holds public keys only, so it can watch the money but " +
+                    "can never spend it.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-
-            Spacer(modifier = Modifier.height(28.dp))
-
-            // 2. The convenience path, not yet built. There is no seed code
-            //    behind this button — the tag says why, and nothing more.
-            Button(
-                onClick = {},
-                enabled = false,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Create hot wallet")
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                NotAvailableTag()
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "Seed generation on this phone is not available yet.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
 
             Spacer(modifier = Modifier.height(28.dp))
 
@@ -163,28 +118,6 @@ fun AddSignerScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
         }
-    }
-}
-
-/**
- * A small capability badge for an option this build cannot do yet.
- *
- * It is a plain chip rather than a sentence: the fact belongs next to the thing
- * it qualifies, and a tag can be read at a glance where a paragraph cannot.
- */
-@Composable
-private fun NotAvailableTag(modifier: Modifier = Modifier) {
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = MaterialTheme.shapes.small,
-        modifier = modifier,
-    ) {
-        Text(
-            text = "Not available yet",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-        )
     }
 }
 

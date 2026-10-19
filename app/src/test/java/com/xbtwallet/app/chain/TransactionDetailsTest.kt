@@ -146,8 +146,18 @@ class TransactionDetailsTest {
         assertEquals("1 conf", confirmationLabel(1))
         assertEquals("2 confs", confirmationLabel(2))
         assertEquals("5 confs", confirmationLabel(5))
-        assertEquals("6+ confs", confirmationLabel(6))
-        assertEquals("6+ confs", confirmationLabel(1_000))
+        assertEquals("6 confs", confirmationLabel(6))
+        assertEquals("99 confs", confirmationLabel(99))
+        assertEquals("100+ confs", confirmationLabel(100))
+        assertEquals("100+ confs", confirmationLabel(101))
+        assertEquals("100+ confs", confirmationLabel(1_000))
+    }
+
+    @Test
+    fun `the rendered cap sits at a hundred confirmations`() {
+        assertEquals(100, MAX_RENDERED_CONFIRMATIONS)
+        assertEquals("100+ confs", confirmationLabel(MAX_RENDERED_CONFIRMATIONS))
+        assertEquals("99 confs", confirmationLabel(MAX_RENDERED_CONFIRMATIONS - 1))
     }
 
     @Test
@@ -185,7 +195,7 @@ class TransactionDetailsTest {
         assertEquals(1, rows[0].confirmations)
         assertEquals(100_000L, rows[1].netSatoshis)
         assertEquals(6, rows[1].confirmations)
-        assertEquals("6+ confs", confirmationLabel(rows[1].confirmations))
+        assertEquals("6 confs", confirmationLabel(rows[1].confirmations))
         assertEquals(TransactionDirection.IN, rows[1].direction)
     }
 
@@ -260,6 +270,118 @@ class TransactionDetailsTest {
 
         assertTrue(rows.isEmpty())
         assertTrue("nothing should have been fetched", query.fetched.isEmpty())
+    }
+
+    // --- cached-row reuse (the incremental rescan's saving) ---------------
+
+    @Test
+    fun `a cached confirmed row is reused without fetching its transaction`() {
+        // The fixture map is empty: any getTransaction would throw. A test that
+        // passes therefore proves none was issued.
+        val query = FakeTxQuery(transactions = emptyMap(), tipHeight = 800_010)
+        val rows = buildTransactionRows(
+            transactions = listOf(ScannedTransaction(txHash = fund.first, height = 800_005)),
+            addresses = listOf(address(AddressChain.RECEIVE, 0, receiveScript)),
+            query = query,
+            cachedRows = mapOf(
+                // Deliberately stale confirmations (1) — the fresh tip must win.
+                fund.first to TransactionRow(txHash = fund.first, height = 800_005, confirmations = 1, netSatoshis = 100_000),
+            ),
+        )
+
+        assertEquals(100_000L, rows.single().netSatoshis)
+        assertEquals("confirmations are recomputed from the fresh tip", 6, rows.single().confirmations)
+        assertTrue("no blockchain.transaction.get may be issued for a reused row", query.fetched.isEmpty())
+    }
+
+    @Test
+    fun `an unconfirmed cached row is re-fetched rather than trusted`() {
+        val query = FakeTxQuery(transactions = mapOf(fund.first to fund.second), tipHeight = 800_000)
+        val rows = buildTransactionRows(
+            transactions = listOf(ScannedTransaction(txHash = fund.first, height = 0)),
+            addresses = listOf(address(AddressChain.RECEIVE, 0, receiveScript)),
+            query = query,
+            // A cached mempool row's amount is exactly what must not be trusted.
+            cachedRows = mapOf(fund.first to TransactionRow(fund.first, height = 0, confirmations = 0, netSatoshis = 999)),
+        )
+
+        assertEquals("the fresh computation must win", 100_000L, rows.single().netSatoshis)
+        assertEquals(0, rows.single().confirmations)
+        assertEquals(listOf(fund.first), query.fetched)
+    }
+
+    @Test
+    fun `a cached row whose height moved is re-fetched`() {
+        val query = FakeTxQuery(transactions = mapOf(fund.first to fund.second), tipHeight = 800_010)
+        val rows = buildTransactionRows(
+            transactions = listOf(ScannedTransaction(txHash = fund.first, height = 800_010)),
+            addresses = listOf(address(AddressChain.RECEIVE, 0, receiveScript)),
+            query = query,
+            cachedRows = mapOf(fund.first to TransactionRow(fund.first, height = 800_000, confirmations = 11, netSatoshis = 999)),
+        )
+
+        assertEquals(100_000L, rows.single().netSatoshis)
+        assertEquals(listOf(fund.first), query.fetched)
+    }
+
+    @Test
+    fun `a brand-new transaction fetches only itself and its known funding predecessor`() {
+        // Only the spend is displayed (limit = 1); the funding transaction is in
+        // the aggregated history, so it is fetched as the spend's predecessor —
+        // and nothing else is.
+        val query = FakeTxQuery(
+            transactions = mapOf(fund.first to fund.second, spend.first to spend.second),
+            tipHeight = 800_010,
+        )
+        val rows = buildTransactionRows(
+            transactions = listOf(
+                ScannedTransaction(txHash = spend.first, height = 800_010),
+                ScannedTransaction(txHash = fund.first, height = 800_005),
+            ),
+            addresses = listOf(
+                address(AddressChain.RECEIVE, 0, receiveScript),
+                address(AddressChain.CHANGE, 0, changeScript),
+            ),
+            query = query,
+            limit = 1,
+        )
+
+        assertEquals(1, rows.size)
+        assertEquals(-31_000L, rows.single().netSatoshis)
+        assertEquals(setOf(spend.first, fund.first), query.fetched.toSet())
+        assertEquals("exactly the spend and its predecessor", 2, query.fetched.size)
+    }
+
+    @Test
+    fun `a new spend of a reused funding transaction still nets out correctly`() {
+        // The funding row is cached and unchanged, so it is not fetched for its
+        // own sake — but the new spend's inputs point at it, so it is fetched as
+        // a predecessor and its value is what makes the spend net out.
+        val query = FakeTxQuery(
+            transactions = mapOf(fund.first to fund.second, spend.first to spend.second),
+            tipHeight = 800_010,
+        )
+        val rows = buildTransactionRows(
+            transactions = listOf(
+                ScannedTransaction(txHash = spend.first, height = 800_010),
+                ScannedTransaction(txHash = fund.first, height = 800_005),
+            ),
+            addresses = listOf(
+                address(AddressChain.RECEIVE, 0, receiveScript),
+                address(AddressChain.CHANGE, 0, changeScript),
+            ),
+            query = query,
+            cachedRows = mapOf(
+                fund.first to TransactionRow(fund.first, height = 800_005, confirmations = 6, netSatoshis = 100_000),
+                // Height moved, so this one is not reusable.
+                spend.first to TransactionRow(spend.first, height = 800_009, confirmations = 1, netSatoshis = 5),
+            ),
+        )
+
+        assertEquals(-31_000L, rows[0].netSatoshis)
+        assertEquals("the unchanged funding row keeps its stored amount", 100_000L, rows[1].netSatoshis)
+        assertTrue(query.fetched.contains(spend.first))
+        assertTrue("the spend's funding predecessor must be fetched", query.fetched.contains(fund.first))
     }
 
     // --- helpers ----------------------------------------------------------

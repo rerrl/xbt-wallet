@@ -15,6 +15,7 @@ import com.xbtwallet.app.data.ServerSettingsStore
 import com.xbtwallet.app.data.SharedPreferencesKeyValueStore
 import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerStore
+import com.xbtwallet.app.data.SnapshotStore
 import com.xbtwallet.app.ui.home.HomeScreen
 import com.xbtwallet.app.ui.home.rememberHomeScreenState
 import com.xbtwallet.app.ui.server.ServerScreen
@@ -82,6 +83,10 @@ fun XbtWalletApp() {
     val context = LocalContext.current
     val serverStore = remember(context) { ServerSettingsStore(context) }
     val signerStore = remember(context) { SignerStore(SharedPreferencesKeyValueStore(context)) }
+    // One snapshot store for the app: same prefs file as the signer list, its own
+    // `snapshot_<id>` keys. Held here so the chain state below can both seed from
+    // it and save back to it, and so the delete path can clear a signer's cache.
+    val snapshotStore = remember(context) { SnapshotStore(SharedPreferencesKeyValueStore(context)) }
 
     val homeState = rememberHomeScreenState(signerStore, serverStore)
 
@@ -102,8 +107,8 @@ fun XbtWalletApp() {
     // deleted underneath us fall back Home instead of rendering stale data.
     // Keyed on the signer *id*, so walking detail → UTXOs → detail keeps the same
     // scan and its result.
-    val chainState = remember(openSigner?.id, serverStore) {
-        openSigner?.let { SignerChainState(signer = it, serverSettings = serverStore) }
+    val chainState = remember(openSigner?.id, serverStore, snapshotStore) {
+        openSigner?.let { SignerChainState(signer = it, serverSettings = serverStore, snapshotStore = snapshotStore) }
     }
 
     // One scan per open signer. `load()` is a no-op once a scan has run or is
@@ -163,6 +168,10 @@ fun XbtWalletApp() {
                 // entry still on the stack — should there be one — stops
                 // resolving (that branch restarts at Home).
                 signerStore.delete(signer.id)
+                // Drop this signer's cached scan too, so a later signer that
+                // happens to reuse the id can never open on another account's
+                // addresses, UTXOs or balance.
+                snapshotStore.clear(signer.id)
                 homeState.refresh()
             },
             onBack = { nav.pop() },

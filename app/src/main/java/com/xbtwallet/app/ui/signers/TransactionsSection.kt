@@ -65,9 +65,32 @@ internal fun TransactionsSection(state: SignerChainState, modifier: Modifier = M
                 "Connect a server to see this account's transactions.",
             )
             ChainPhase.ERROR -> TransactionsFailed(state)
-            ChainPhase.READY -> TransactionsList(state.snapshot?.transactions.orEmpty())
+            ChainPhase.READY -> TransactionsReady(state)
         }
     }
+}
+
+/**
+ * The loaded state: the snapshot's rows, rendering straight from the snapshot.
+ *
+ * Because the screen opens on a cached snapshot, the list is simply what the
+ * snapshot holds. A failed refresh shows its short line (with a Retry) above the
+ * rows and the rows keep rendering throughout; the running-rescan signal lives in
+ * the header's single spinner, not here.
+ */
+@Composable
+private fun TransactionsReady(state: SignerChainState) {
+    val scope = rememberCoroutineScope()
+    if (state.syncFailed) {
+        Text(
+            text = "Couldn't refresh \u2014 showing the last synced values.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+        )
+        TextButton(onClick = { scope.launch { state.reload() } }) { Text("Retry") }
+        Spacer(modifier = Modifier.height(6.dp))
+    }
+    TransactionsList(state.snapshot?.transactions.orEmpty())
 }
 
 @Composable
@@ -192,8 +215,10 @@ private fun TransactionRowItem(transaction: TransactionRow) {
 
 /**
  * The confirmation count as a small badge: red for unconfirmed, amber for the
- * shallow 1–5 range, green once a transaction is six blocks deep (labelled
- * `6+ confs`, because the exact depth stops mattering at that point).
+ * shallow 1–5 range, green once a transaction is six blocks deep. The text comes
+ * from [confirmationLabel] and carries the real depth up to 99, then caps at
+ * `100+ confs`, because past that the exact count stops mattering (and a wider
+ * badge would break the row).
  */
 @Composable
 private fun ConfirmationBadge(confirmations: Int) {

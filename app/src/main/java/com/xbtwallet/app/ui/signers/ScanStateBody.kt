@@ -93,18 +93,23 @@ private fun ScanFailed(state: SignerChainState, modifier: Modifier = Modifier) {
 }
 
 /**
- * A quiet one-line banner naming the account being looked at, so a screenshot of
- * any of these screens says which signer it came from.
+ * A quiet one-line banner under a per-signer screen's header.
+ *
+ * It used to name the saved `host:port`. It no longer does — the wallet never
+ * renders which server the user chose (a screenshot of a UTXO list should not
+ * leak their private endpoint), so this is the route-level fact instead: whether
+ * a server is backing the view at all.
  */
 @Composable
 internal fun ScannedFromBanner(state: SignerChainState, modifier: Modifier = Modifier) {
+    val hasServer = state.phase != ChainPhase.NO_SERVER
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
         shape = MaterialTheme.shapes.small,
         modifier = modifier.fillMaxWidth(),
     ) {
         Text(
-            text = state.serverLabel?.let { "Scanned from $it" } ?: "No server configured",
+            text = if (hasServer) "Scanned from your Electrum server" else "No server configured",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),

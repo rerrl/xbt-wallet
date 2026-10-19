@@ -1,6 +1,7 @@
 package com.xbtwallet.app.data
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -260,6 +261,100 @@ class SignerStoreTest {
                 """{"id":"b","name":"keyless","type":"watch-only","createdAt":1}]}""",
         )
         assertEquals(listOf("ok"), SignerStore(backing).list().map { it.name })
+    }
+
+    // --- captured metadata: master fingerprint + derivation path -----------
+    //
+    // A BIP-32 key-expression QR carries a master fingerprint and a derivation
+    // path that a bare key does not. They are additive: written only when
+    // present, so a bare-key blob keeps its exact old shape and every blob an
+    // earlier build wrote still loads.
+
+    @Test
+    fun `add stores the captured fingerprint and derivation path`() {
+        val backing = InMemoryStore()
+        val store = SignerStore(backing, now = { 42L }, newId = { "abc" })
+        val signer = store.add(
+            name = "Cold storage",
+            xpub = "zpub6xyz",
+            masterFingerprint = "ab12cd34",
+            derivationPath = "84'/0'/0'",
+        )
+
+        assertEquals(
+            SignerType.WatchOnlyXpub("zpub6xyz", masterFingerprint = "ab12cd34", derivationPath = "84'/0'/0'"),
+            signer.type,
+        )
+    }
+
+    @Test
+    fun `fingerprint and path survive a round-trip through storage`() {
+        val backing = InMemoryStore()
+        newStore(backing).add(
+            "Cold",
+            "zpub6xyz",
+            masterFingerprint = "ab12cd34",
+            derivationPath = "84'/0'/0'",
+        )
+
+        val reloaded = SignerStore(backing).list().single()
+        val type = reloaded.type as SignerType.WatchOnlyXpub
+        assertEquals("ab12cd34", type.masterFingerprint)
+        assertEquals("84'/0'/0'", type.derivationPath)
+    }
+
+    @Test
+    fun `a bare-key signer writes neither metadata key`() {
+        val backing = InMemoryStore()
+        newStore(backing).add("Cold", "zpub6xyz")
+
+        val json = backing.map[SignerStore.STORAGE_KEY].orEmpty()
+        assertFalse("masterFingerprint must be absent", json.contains("masterFingerprint"))
+        assertFalse("derivationPath must be absent", json.contains("derivationPath"))
+
+        val type = SignerStore(backing).list().single().type as SignerType.WatchOnlyXpub
+        assertNull(type.masterFingerprint)
+        assertNull(type.derivationPath)
+    }
+
+    @Test
+    fun `a fingerprint-only signer round-trips with a null path`() {
+        val backing = InMemoryStore()
+        newStore(backing).add("Cold", "zpub6xyz", masterFingerprint = "ab12cd34")
+
+        val type = SignerStore(backing).list().single().type as SignerType.WatchOnlyXpub
+        assertEquals("ab12cd34", type.masterFingerprint)
+        assertNull(type.derivationPath)
+    }
+
+    /** The exact blob an earlier build wrote: no metadata keys at all. */
+    @Test
+    fun `a pre-metadata blob still loads, with nulls for the new fields`() {
+        val backing = InMemoryStore()
+        backing.putString(
+            SignerStore.STORAGE_KEY,
+            """{"signers":[{"id":"a","name":"Cold","type":"watch-only","xpub":"zpub6old","createdAt":7}]}""",
+        )
+
+        val type = SignerStore(backing).list().single().type as SignerType.WatchOnlyXpub
+        assertEquals("zpub6old", type.xpub)
+        assertNull(type.masterFingerprint)
+        assertNull(type.derivationPath)
+    }
+
+    /** A JSON null (rather than an absent key) also reads as no metadata. */
+    @Test
+    fun `explicit nulls in a stored blob read as null metadata`() {
+        val backing = InMemoryStore()
+        backing.putString(
+            SignerStore.STORAGE_KEY,
+            """{"signers":[{"id":"a","name":"Cold","type":"watch-only","xpub":"zpub6x",""" +
+                """"masterFingerprint":null,"derivationPath":null,"createdAt":7}]}""",
+        )
+
+        val type = SignerStore(backing).list().single().type as SignerType.WatchOnlyXpub
+        assertNull(type.masterFingerprint)
+        assertNull(type.derivationPath)
     }
 
     // --- migration from the old `wallets` shape ----------------------------
