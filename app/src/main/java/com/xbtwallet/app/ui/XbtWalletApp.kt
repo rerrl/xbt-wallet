@@ -22,6 +22,7 @@ import com.xbtwallet.app.ui.home.rememberHomeScreenState
 import com.xbtwallet.app.ui.server.ServerScreen
 import com.xbtwallet.app.ui.server.rememberServerScreenState
 import com.xbtwallet.app.ui.addresses.AddressesScreen
+import com.xbtwallet.app.ui.receive.ReceiveScreen
 import com.xbtwallet.app.ui.signers.AddSignerScreen
 import com.xbtwallet.app.ui.signers.ImportXpubScreen
 import com.xbtwallet.app.ui.signers.SignerChainStateStore
@@ -45,7 +46,7 @@ import kotlinx.coroutines.cancel
  * name, not a route); it rides in the [Route] that carries this screen onto the
  * back stack, so each level remembers its own argument. See [NavStack].
  */
-enum class Screen { HOME, SERVER, SIGNERS, ADD_SIGNER, IMPORT_XPUB, SIGNER_DETAIL, SIGNER_UTXOS, SIGNER_ADDRESSES }
+enum class Screen { HOME, SERVER, SIGNERS, ADD_SIGNER, IMPORT_XPUB, SIGNER_DETAIL, SIGNER_UTXOS, SIGNER_ADDRESSES, RECEIVE }
 
 /**
  * The app's navigation and its shared stores.
@@ -77,6 +78,8 @@ enum class Screen { HOME, SERVER, SIGNERS, ADD_SIGNER, IMPORT_XPUB, SIGNER_DETAI
  *
  * - HOME → ADD_SIGNER → (the paste form) → back → ADD_SIGNER → back → HOME.
  * - a signer's detail → UTXOs (or Addresses) → back → that signer's detail.
+ * - a signer's detail → RECEIVE (the first unused address), or an Addresses row
+ *   → RECEIVE (that row's address) → back → wherever it was opened from.
  *
  * Android's back button is wired to `pop` through [BackHandler], *enabled* only
  * while there is something to pop ([NavStack.canGoBack]). At HOME the handler is
@@ -236,6 +239,7 @@ fun XbtWalletApp() {
                     state = chainState,
                     onOpenUtxos = { nav.push(Route(Screen.SIGNER_UTXOS, signerId = openSigner.id)) },
                     onOpenAddresses = { nav.push(Route(Screen.SIGNER_ADDRESSES, signerId = openSigner.id)) },
+                    onOpenReceive = { nav.push(Route(Screen.RECEIVE, signerId = openSigner.id)) },
                     onBack = { nav.pop() },
                 )
             }
@@ -251,10 +255,38 @@ fun XbtWalletApp() {
         }
 
         Screen.SIGNER_ADDRESSES -> {
-            if (chainState == null) {
+            val signerId = route.signerId
+            if (chainState == null || signerId == null) {
                 LaunchedEffect(route) { nav.reset() }
             } else {
-                AddressesScreen(state = chainState, onBack = { nav.pop() })
+                AddressesScreen(
+                    state = chainState,
+                    // The QR for a specific row: the address the user tapped
+                    // rides on the route, so back/rotation return to *that*
+                    // address rather than to the first unused one.
+                    onShowQr = { address ->
+                        nav.push(Route(Screen.RECEIVE, signerId = signerId, address = address))
+                    },
+                    onBack = { nav.pop() },
+                )
+            }
+        }
+
+        Screen.RECEIVE -> {
+            if (chainState == null) {
+                // Same rule as the other per-signer screens: the signer no
+                // longer resolves, so restart at Home rather than show a QR for
+                // an account that is gone.
+                LaunchedEffect(route) { nav.reset() }
+            } else {
+                ReceiveScreen(
+                    state = chainState,
+                    // Non-null when the user came from the addresses list; null
+                    // when they came from the signer's own Receive button, in
+                    // which case the screen picks the first unused address.
+                    requestedAddress = route.address,
+                    onBack = { nav.pop() },
+                )
             }
         }
     }

@@ -49,9 +49,9 @@ import java.math.BigDecimal
  *     confirmed *and* unconfirmed satoshis, with a loading state while the scan
  *     runs and an honest error state when there is no server or it did not
  *     answer ("Connect a server"),
- *  3. the four actions: **UTXOs** and **Addresses** open their own screens;
- *     **Send** and **Receive** are shown disabled because they need the
- *     air-gapped signing flow that does not exist yet,
+ *  3. the four actions: **UTXOs**, **Addresses** and **Receive** open their own
+ *     screens; **Send** is shown disabled because it needs the air-gapped
+ *     signing flow that does not exist yet,
  *  4. the **Transactions** list: the same scan's `get_history` answers,
  *     aggregated and deduped (see [TransactionsSection]), below the button that
  *     reveals the account key on demand.
@@ -69,6 +69,7 @@ fun SignerDetailScreen(
     state: SignerChainState,
     onOpenUtxos: () -> Unit,
     onOpenAddresses: () -> Unit,
+    onOpenReceive: () -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -125,13 +126,15 @@ fun SignerDetailScreen(
             Spacer(modifier = Modifier.height(8.dp))
 
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                // Disabled, not hidden: the two things a wallet does with coins
-                // are visible so the screen reads as a wallet, and greyed so it
-                // never promises something it cannot do.
+                // Send is disabled, not hidden: the thing a wallet does with
+                // coins stays visible so the screen reads as a wallet, and greyed
+                // so it never promises the air-gapped signing flow it does not
+                // have. Receive needs no signing, so it is live — it opens the
+                // address QR.
                 Button(onClick = {}, enabled = false, modifier = Modifier.weight(1f)) {
                     Text("Send")
                 }
-                Button(onClick = {}, enabled = false, modifier = Modifier.weight(1f)) {
+                Button(onClick = onOpenReceive, modifier = Modifier.weight(1f)) {
                     Text("Receive")
                 }
             }
@@ -139,7 +142,7 @@ fun SignerDetailScreen(
             Spacer(modifier = Modifier.height(6.dp))
 
             Text(
-                text = "Send and Receive come with the air-gapped signing flow \u2014 coming soon.",
+                text = "Send comes with the air-gapped signing flow \u2014 coming soon.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

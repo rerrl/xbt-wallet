@@ -96,7 +96,11 @@ class NavStackTest {
     fun `the saver round-trips the stack with its arguments`() {
         val stack = NavStack()
         stack.push(Route(Screen.SIGNERS))
-        stack.push(Route(Screen.SIGNER_DETAIL, signerId = "xpub-with|odd-id"))
+        // A real signer id: a UUID (see SignerStore). Ids never contain the `|`
+        // the route string is split on, so each entry's arguments come back
+        // intact; see RouteCodecTest for the codec's own rules.
+        val signerId = "3f2a6b1e-6c3d-4c0f-9a1b-2d7e5f8c4a11"
+        stack.push(Route(Screen.SIGNER_DETAIL, signerId = signerId))
 
         val scope = object : SaverScope {
             override fun canBeSaved(value: Any): Boolean = true
@@ -107,7 +111,7 @@ class NavStackTest {
         val restored = NavStack.Saver.restore(saved!!)!!
 
         assertEquals(stack.routes, restored.routes)
-        assertEquals(Route(Screen.SIGNER_DETAIL, signerId = "xpub-with|odd-id"), restored.current)
+        assertEquals(Route(Screen.SIGNER_DETAIL, signerId = signerId), restored.current)
     }
 
     @Test
