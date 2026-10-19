@@ -71,39 +71,24 @@ internal fun TransactionsSection(state: SignerChainState, modifier: Modifier = M
 }
 
 /**
- * The loaded state: the snapshot's rows, with the background-refresh status
- * above them rather than instead of them.
+ * The loaded state: the snapshot's rows, rendering straight from the snapshot.
  *
- * Because the screen opens on a cached snapshot, a rescan is an update to a list
- * that is already on screen — so the syncing line (or the failed-refresh line
- * with its Retry) sits *above* the rows and the rows keep rendering throughout.
+ * Because the screen opens on a cached snapshot, the list is simply what the
+ * snapshot holds. A failed refresh shows its short line (with a Retry) above the
+ * rows and the rows keep rendering throughout; the running-rescan signal lives in
+ * the header's single spinner, not here.
  */
 @Composable
 private fun TransactionsReady(state: SignerChainState) {
     val scope = rememberCoroutineScope()
-    when {
-        state.isSyncing -> {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                CircularProgressIndicator(modifier = Modifier.width(16.dp).height(16.dp), strokeWidth = 2.dp)
-                Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    text = "Syncing\u2026",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Spacer(modifier = Modifier.height(6.dp))
-        }
-        state.syncFailed -> {
-            Text(
-                text = "Couldn't refresh \u2014 showing the last synced values.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-            )
-            TextButton(onClick = { scope.launch { state.reload() } }) { Text("Retry") }
-            Spacer(modifier = Modifier.height(6.dp))
-        }
-        else -> Unit
+    if (state.syncFailed) {
+        Text(
+            text = "Couldn't refresh \u2014 showing the last synced values.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+        )
+        TextButton(onClick = { scope.launch { state.reload() } }) { Text("Retry") }
+        Spacer(modifier = Modifier.height(6.dp))
     }
     TransactionsList(state.snapshot?.transactions.orEmpty())
 }

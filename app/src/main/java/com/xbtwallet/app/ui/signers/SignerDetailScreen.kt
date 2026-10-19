@@ -10,7 +10,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -20,9 +22,15 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.xbtwallet.app.PlaceholderPrices
@@ -44,8 +52,9 @@ import java.math.BigDecimal
  *  3. the four actions: **UTXOs** and **Addresses** open their own screens;
  *     **Send** and **Receive** are shown disabled because they need the
  *     air-gapped signing flow that does not exist yet,
- *  4. the **Transactions** list, under the account key: the same scan's
- *     `get_history` answers, aggregated and deduped (see [TransactionsSection]).
+ *  4. the **Transactions** list: the same scan's `get_history` answers,
+ *     aggregated and deduped (see [TransactionsSection]), below the button that
+ *     reveals the account key on demand.
  *
  * The screen owns no chain state of its own: [state] is created and driven by
  * the navigation layer so that the balance is scanned once per signer visit and
@@ -82,6 +91,17 @@ fun SignerDetailScreen(
                     style = MaterialTheme.typography.titleLarge,
                     modifier = Modifier.weight(1f),
                 )
+                // The screen's one and only "syncing" signal: a compact spinner
+                // to the left of the type badge, shown exactly while a rescan
+                // runs. The balance and transactions sections no longer carry
+                // their own indicators.
+                if (state.isSyncing) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.width(16.dp).height(16.dp),
+                        strokeWidth = 2.dp,
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
                 TypeBadge(label = signer.typeLabel)
             }
 
@@ -126,28 +146,25 @@ fun SignerDetailScreen(
 
             Spacer(modifier = Modifier.height(20.dp))
 
-            // The account key, quiet and monospaced at the foot of the screen:
-            // it is the thing this signer *is*, but it is not an action.
+            // The account key is quiet by design — it is the thing this signer
+            // *is*, but it is not an action and it is long. It lives behind its
+            // own button and dialog so the body stays readable; tap to read or
+            // copy it.
             val xpub = (signer.type as? SignerType.WatchOnlyXpub)?.xpub
-            if (xpub != null) {
-                Text(
-                    text = "Account key",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+            var showAccountKey by remember { mutableStateOf(false) }
+            OutlinedButton(
+                onClick = { showAccountKey = true },
+                enabled = xpub != null,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Account key")
+            }
+
+            if (showAccountKey && xpub != null) {
+                AccountKeyDialog(
+                    xpub = xpub,
+                    onDismiss = { showAccountKey = false },
                 )
-                Spacer(modifier = Modifier.height(4.dp))
-                Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(
-                        text = xpub,
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                        modifier = Modifier.padding(12.dp),
-                    )
-                }
             }
 
             Spacer(modifier = Modifier.height(20.dp))
@@ -157,6 +174,45 @@ fun SignerDetailScreen(
             TransactionsSection(state)
         }
     }
+}
+
+/**
+ * The account key, shown on demand: the full xpub in monospace, selectable so a
+ * user can copy it by hand, with a Copy button that puts it on the clipboard.
+ *
+ * Dismissal follows the platform default — [onDismissRequest] fires for an
+ * outside tap and for Back, and both simply close the dialog. Nothing here
+ * swallows those gestures.
+ */
+@Composable
+private fun AccountKeyDialog(xpub: String, onDismiss: () -> Unit) {
+    val clipboard = LocalClipboardManager.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Account key") },
+        text = {
+            SelectionContainer {
+                Text(
+                    text = xpub,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    clipboard.setText(AnnotatedString(xpub))
+                    onDismiss()
+                },
+            ) {
+                Text("Copy")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        },
+    )
 }
 
 /**
@@ -223,25 +279,17 @@ private fun LoadingBalance(state: SignerChainState) {
  * The refresh row under a loaded balance.
  *
  * A cached snapshot is what the screen opens on, so its refresh is a background
- * rescan rather than a load: while it runs a compact "Syncing…" line says so, a
- * failed refresh says the numbers are the last synced ones and offers a Retry,
- * and an idle card offers a plain Refresh. The cached values stay on screen in
- * every one of those cases — a refresh never blanks a balance.
+ * rescan rather than a load: while it runs, the header's single spinner says so
+ * (this card no longer carries its own indicator), a failed refresh says the
+ * numbers are the last synced ones and offers a Retry, and an idle card offers a
+ * plain Refresh. The cached values stay on screen in every one of those cases —
+ * a refresh never blanks a balance.
  */
 @Composable
 private fun BalanceRefreshControl(state: SignerChainState) {
     val scope = rememberCoroutineScope()
     Spacer(modifier = Modifier.height(10.dp))
     when {
-        state.isSyncing -> Row(verticalAlignment = Alignment.CenterVertically) {
-            CircularProgressIndicator(modifier = Modifier.width(16.dp).height(16.dp), strokeWidth = 2.dp)
-            Spacer(modifier = Modifier.width(10.dp))
-            Text(
-                text = "Syncing\u2026",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
         state.syncFailed -> {
             Text(
                 text = "Couldn't refresh \u2014 showing the last synced values.",
