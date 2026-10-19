@@ -120,6 +120,16 @@ const val MAX_DETAILED_TRANSACTIONS: Int = 50
  * history already knows about (see the file comment). Nothing is fetched for an
  * input the account has never seen — that coin is somebody else's.
  *
+ * **Reuse.** [cachedRows] is the previous scan's rows, keyed by txid. A shown
+ * entry whose cached row is *confirmed and still at the same height* is reused
+ * verbatim — only its confirmation count is recomputed from the fresh tip —
+ * and its transaction is never fetched. This is what makes a rescan cheap over
+ * Tor: `blockchain.transaction.get` returns a whole transaction, so skipping the
+ * fetch for every unchanged confirmed row removes the expensive call from the
+ * warm path. An unconfirmed cached row, or one whose height has moved (a
+ * reorg, or a mempool transaction that just got mined), is re-fetched: the old
+ * amount is exactly what we must not trust there.
+ *
  * [addresses] supplies the wallet's scriptPubKeys; a scan whose addresses carry
  * no script (a test fixture, or a pre-P2WPKH record) yields no rows rather than
  * an invented direction.
@@ -132,6 +142,7 @@ internal fun buildTransactionRows(
     addresses: List<ScannedAddress>,
     query: ChainQuery,
     limit: Int = MAX_DETAILED_TRANSACTIONS,
+    cachedRows: Map<String, TransactionRow> = emptyMap(),
 ): List<TransactionRow> {
     if (transactions.isEmpty()) return emptyList()
     val walletScripts = addresses.mapNotNullTo(HashSet()) {
@@ -148,9 +159,22 @@ internal fun buildTransactionRows(
         parsed[txHash] = TransactionParser.parse(query.getTransaction(txHash))
     }
 
-    shown.forEach { fetch(it.txHash) }
+    // A cached row is reusable only when it describes the same, still-confirmed
+    // transaction: same txid, mined, and at the height the fresh history reports.
+    // Everything else is fetched as before.
+    fun reusable(entry: ScannedTransaction): TransactionRow? {
+        val cached = cachedRows[entry.txHash] ?: return null
+        return cached.takeIf { it.confirmed && it.height == entry.height && entry.height > 0 }
+    }
+
+    shown.forEach { entry ->
+        if (reusable(entry) == null) fetch(entry.txHash)
+    }
     // A spend's inputs can point at a funding transaction that is in the history
     // but outside the displayed window; fetch those too so their value is known.
+    // A funding transaction that was reused above is not in `parsed`, so a fetched
+    // spend of it still triggers this fetch — and that is correct: the spend's
+    // net effect needs the funding output's value.
     for (transaction in parsed.values.toList()) {
         for (input in transaction.inputs) {
             if (input.previousTxHash in knownTxIds) fetch(input.previousTxHash)
@@ -168,12 +192,16 @@ internal fun buildTransactionRows(
 
     val tipHeight = query.getTipHeight()
     return shown.map { entry ->
-        val transaction = parsed.getValue(entry.txHash)
+        // Reused rows keep their stored net amount; only the confirmation count
+        // is recomputed from the fresh tip. Everything else is computed from the
+        // transaction we fetched.
+        val cached = reusable(entry)
         TransactionRow(
             txHash = entry.txHash,
             height = entry.height,
             confirmations = confirmationsFor(entry.height, tipHeight),
-            netSatoshis = netEffect(transaction, walletScripts, walletOutputs),
+            netSatoshis = cached?.netSatoshis
+                ?: netEffect(parsed.getValue(entry.txHash), walletScripts, walletOutputs),
         )
     }
 }

@@ -178,7 +178,12 @@ private fun BalanceCard(state: SignerChainState, modifier: Modifier = Modifier) 
                 ChainPhase.IDLE, ChainPhase.LOADING -> LoadingBalance(state)
                 ChainPhase.NO_SERVER -> NoServerBalance()
                 ChainPhase.ERROR -> FailedBalance(state)
-                ChainPhase.READY -> LoadedBalance(state.snapshot ?: AccountSnapshot.EMPTY)
+                ChainPhase.READY -> {
+                    LoadedBalance(state.snapshot ?: AccountSnapshot.EMPTY)
+                    // The refresh controls sit under the numbers, never instead
+                    // of them: a rescan updates the balance in place.
+                    BalanceRefreshControl(state)
+                }
             }
         }
     }
@@ -199,9 +204,11 @@ private fun LoadingBalance(state: SignerChainState) {
         Column {
             Text("Loading balance\u2026", style = MaterialTheme.typography.titleMedium)
             val checked = state.scannedAddressCount
+            // No host here: this is the pre-refresh loading line, and which
+            // server the user chose is never rendered.
             Text(
                 text = if (checked > 0) {
-                    "checked $checked addresses on ${state.serverLabel.orEmpty()}"
+                    "checked $checked addresses"
                 } else {
                     "asking your Electrum server"
                 },
@@ -209,6 +216,41 @@ private fun LoadingBalance(state: SignerChainState) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+    }
+}
+
+/**
+ * The refresh row under a loaded balance.
+ *
+ * A cached snapshot is what the screen opens on, so its refresh is a background
+ * rescan rather than a load: while it runs a compact "Syncing…" line says so, a
+ * failed refresh says the numbers are the last synced ones and offers a Retry,
+ * and an idle card offers a plain Refresh. The cached values stay on screen in
+ * every one of those cases — a refresh never blanks a balance.
+ */
+@Composable
+private fun BalanceRefreshControl(state: SignerChainState) {
+    val scope = rememberCoroutineScope()
+    Spacer(modifier = Modifier.height(10.dp))
+    when {
+        state.isSyncing -> Row(verticalAlignment = Alignment.CenterVertically) {
+            CircularProgressIndicator(modifier = Modifier.width(16.dp).height(16.dp), strokeWidth = 2.dp)
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(
+                text = "Syncing\u2026",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        state.syncFailed -> {
+            Text(
+                text = "Couldn't refresh \u2014 showing the last synced values.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+            TextButton(onClick = { scope.launch { state.reload() } }) { Text("Retry") }
+        }
+        else -> TextButton(onClick = { scope.launch { state.reload() } }) { Text("Refresh") }
     }
 }
 

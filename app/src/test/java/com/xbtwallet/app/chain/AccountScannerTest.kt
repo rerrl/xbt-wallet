@@ -294,6 +294,165 @@ class AccountScannerTest {
         assertTrue(snapshot.transactions[1].confirmed)
     }
 
+    // --- incremental rescan -------------------------------------------------
+
+    /** A cached address derived from the same scanner, so its scripthash matches. */
+    private fun cachedAddress(
+        scanner: AccountScanner,
+        chain: AddressChain,
+        index: Int,
+        used: Boolean = false,
+        history: List<HistoryEntry> = emptyList(),
+    ): ScannedAddress = scanner.derive(chain, index).let { derived ->
+        ScannedAddress(
+            chain = chain,
+            index = index,
+            address = derived.address,
+            scripthash = derived.scripthash,
+            used = used,
+            history = history,
+            scriptPubKeyHex = derived.scriptPubKeyHex,
+        )
+    }
+
+    /** A cached snapshot with the first [receiveCount]/[changeCount] addresses known. */
+    private fun cachedSnapshot(
+        scanner: AccountScanner,
+        receiveCount: Int,
+        changeCount: Int = 0,
+    ): AccountSnapshot = AccountSnapshot(
+        receive = (0 until receiveCount).map { cachedAddress(scanner, AddressChain.RECEIVE, it) },
+        change = (0 until changeCount).map { cachedAddress(scanner, AddressChain.CHANGE, it) },
+        utxos = emptyList(),
+        balance = ScripthashBalance.ZERO,
+    )
+
+    @Test
+    fun `rescan re-checks every cached address and then continues the gap walk`() {
+        val scanner = scanner()
+        val cached = cachedSnapshot(scanner, receiveCount = 20)
+        val query = FakeChainQuery(scanner)
+
+        val snapshot = scanner.rescan(query, cached)
+
+        // The 20 cached receive addresses are re-queried, then batch 20..39 is
+        // the first fully-unused batch and ends the walk.
+        assertEquals(40, snapshot.receive.size)
+        assertEquals(
+            (0 until 40).map { AddressChain.RECEIVE to it },
+            query.historyCalls.filter { it.first == AddressChain.RECEIVE },
+        )
+        // Change had nothing cached: its walk is the ordinary cold one.
+        assertEquals(
+            (0 until 20).map { AddressChain.CHANGE to it },
+            query.historyCalls.filter { it.first == AddressChain.CHANGE },
+        )
+    }
+
+    @Test
+    fun `the continuation starts at the cached list end and stops after the first fully-unused batch`() {
+        val scanner = scanner()
+        val cached = cachedSnapshot(scanner, receiveCount = 20)
+        // Index 25 is used: the continuation batch 20..39 is partly used, so the
+        // walk goes on to 40..59, which is unused and ends it — exactly the cold
+        // scan's rule, applied to the continuation.
+        val query = FakeChainQuery(scanner, usedReceive = setOf(25))
+
+        val snapshot = scanner.rescan(query, cached)
+
+        assertEquals(60, snapshot.receive.size)
+        assertTrue(snapshot.receive.first { it.index == 25 }.used)
+        assertEquals(
+            (0 until 60).map { AddressChain.RECEIVE to it },
+            query.historyCalls.filter { it.first == AddressChain.RECEIVE },
+        )
+    }
+
+    @Test
+    fun `a cached-unused address that gained history becomes used and feeds the balance`() {
+        val scanner = scanner()
+        // The cache says every address was unused …
+        val cached = cachedSnapshot(scanner, receiveCount = 20)
+        // … but another coordinator has since handed out index 2, which the
+        // server now reports history for. Re-checking every cached address (not
+        // just the tail) is what catches this.
+        val query = FakeChainQuery(
+            scanner,
+            usedReceive = setOf(2),
+            balances = mapOf((AddressChain.RECEIVE to 2) to ScripthashBalance(1_000, 0)),
+        )
+
+        val snapshot = scanner.rescan(query, cached)
+
+        val rechecked = snapshot.receive.first { it.index == 2 }
+        assertTrue("the fresh history must win over the cached used bit", rechecked.used)
+        assertFalse(snapshot.receive.first { it.index == 0 }.used)
+        assertEquals(1_000L, snapshot.satoshis)
+        assertTrue(query.balanceCalls.contains(AddressChain.RECEIVE to 2))
+    }
+
+    @Test
+    fun `a new used address in the continuation window is discovered`() {
+        val scanner = scanner()
+        val cached = cachedSnapshot(scanner, receiveCount = 20)
+        val query = FakeChainQuery(
+            scanner,
+            usedReceive = setOf(22),
+            balances = mapOf((AddressChain.RECEIVE to 22) to ScripthashBalance(5_000, 0)),
+        )
+
+        val snapshot = scanner.rescan(query, cached)
+
+        assertTrue(snapshot.receive.first { it.index == 22 }.used)
+        assertEquals(5_000L, snapshot.satoshis)
+        assertEquals("20 cached + two continuation batches", 60, snapshot.receive.size)
+    }
+
+    @Test
+    fun `rescan replaces a cached address's history with the fresh answer`() {
+        val scanner = scanner()
+        val cached = AccountSnapshot(
+            receive = listOf(
+                cachedAddress(
+                    scanner,
+                    AddressChain.RECEIVE,
+                    0,
+                    used = true,
+                    history = listOf(HistoryEntry(txHash = TX_A, height = 800_000)),
+                ),
+            ),
+            change = emptyList(),
+            utxos = emptyList(),
+            balance = ScripthashBalance.ZERO,
+        )
+        val query = FakeChainQuery(
+            scanner,
+            usedReceive = setOf(0),
+            history = mapOf(
+                (AddressChain.RECEIVE to 0) to
+                    listOf(HistoryEntry(txHash = TX_A, height = 800_000), HistoryEntry(txHash = TX_B, height = 0)),
+            ),
+        )
+
+        val snapshot = scanner.rescan(query, cached)
+
+        assertEquals(listOf(TX_A, TX_B), snapshot.receive.first { it.index == 0 }.history.map { it.txHash })
+        // Derivation data is kept from the cache rather than re-derived.
+        assertEquals(scanner.derive(AddressChain.RECEIVE, 0).address, snapshot.receive[0].address)
+    }
+
+    @Test
+    fun `rescan reports progress once per address visited`() {
+        val scanner = scanner()
+        val cached = cachedSnapshot(scanner, receiveCount = 20)
+        val counts = mutableListOf<Int>()
+
+        scanner.rescan(FakeChainQuery(scanner), cached, onScanned = { counts += it })
+
+        // 20 cached + 20 continuation receive, then 20 cold change.
+        assertEquals((1..60).toList(), counts)
+    }
+
     private companion object {
         /** How far the fake can map a scripthash back to an index. */
         const val LOOKUP_RANGE = 200

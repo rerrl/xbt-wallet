@@ -65,9 +65,47 @@ internal fun TransactionsSection(state: SignerChainState, modifier: Modifier = M
                 "Connect a server to see this account's transactions.",
             )
             ChainPhase.ERROR -> TransactionsFailed(state)
-            ChainPhase.READY -> TransactionsList(state.snapshot?.transactions.orEmpty())
+            ChainPhase.READY -> TransactionsReady(state)
         }
     }
+}
+
+/**
+ * The loaded state: the snapshot's rows, with the background-refresh status
+ * above them rather than instead of them.
+ *
+ * Because the screen opens on a cached snapshot, a rescan is an update to a list
+ * that is already on screen — so the syncing line (or the failed-refresh line
+ * with its Retry) sits *above* the rows and the rows keep rendering throughout.
+ */
+@Composable
+private fun TransactionsReady(state: SignerChainState) {
+    val scope = rememberCoroutineScope()
+    when {
+        state.isSyncing -> {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(modifier = Modifier.width(16.dp).height(16.dp), strokeWidth = 2.dp)
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = "Syncing\u2026",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+        }
+        state.syncFailed -> {
+            Text(
+                text = "Couldn't refresh \u2014 showing the last synced values.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+            TextButton(onClick = { scope.launch { state.reload() } }) { Text("Retry") }
+            Spacer(modifier = Modifier.height(6.dp))
+        }
+        else -> Unit
+    }
+    TransactionsList(state.snapshot?.transactions.orEmpty())
 }
 
 @Composable
