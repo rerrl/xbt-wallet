@@ -67,6 +67,12 @@ dependencies {
     // a clearnet wallet never starts it.
     implementation(libs.tor.android)
 
+    // QR scanning for the xpub import screen: ZXing's decoder behind
+    // journeyapps' CaptureActivity/ScanContract wrapper. Apache-2.0, and it
+    // drags in no Google Play services or ML Kit (see the module doc comment in
+    // gradle/libs.versions.toml). Used only to read a public xpub.
+    implementation(libs.zxing.android.embedded)
+
     debugImplementation(libs.androidx.ui.tooling)
 
     // JVM unit tests: the Electrum client is Android-free on purpose so it can

@@ -4,15 +4,35 @@
     <!--
       Direct socket access to a user-supplied private Electrum server, and to the
       bundled Tor daemon's loopback SOCKS port when an `.onion` endpoint is used.
-      No camera, no storage, no location.
+      No storage, no location, no network state.
+
+      CAMERA is for one thing only: reading an account xpub QR code with the
+      signer's screen (ui/signers/ImportXpubScreen.kt). The code holds nothing
+      secret — an xpub is a public key — and manual pasting remains available
+      whether or not the permission is granted.
     -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!--
+      The camera is a convenience, not a requirement: the wallet is fully usable
+      on a device without one, by pasting the key instead. Declaring it
+      required="false" keeps the app installable there.
+    -->
+    <uses-feature
+        android:name="android.hardware.camera.any"
+        android:required="false" />
 
     <!--
       Tor runs inside the app (info.guardianproject:tor-android). Its
       org.torproject.jni.TorService is declared by the library's own manifest and
       merged in; the app only needs to bind it, which MainActivity's TorGateway
       installation arranges. No Orbot, no cross-app intent.
+
+      The scan UI comes from com.journeyapps:zxing-android-embedded, whose
+      CaptureActivity is likewise merged in from the library's manifest; the
+      scanner is launched with the ScanContract result launcher from
+      ImportXpubScreen, so the app declares no activity of its own for it.
     -->
 
     <application
