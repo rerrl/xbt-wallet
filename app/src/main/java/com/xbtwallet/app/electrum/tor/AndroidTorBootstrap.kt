@@ -15,6 +15,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.torproject.jni.TorService
+import java.net.InetSocketAddress
+import java.net.Socket
 
 /**
  * Runs the bundled Tor daemon (the native tor inside `info.guardianproject:tor-android`)
@@ -29,10 +31,11 @@ import org.torproject.jni.TorService
  *
  * **Readiness.** A SOCKS port existing is not the same as Tor being usable: tor
  * opens its SOCKS listener early, but a `.onion` connect before the first
- * circuit is established fails. So this waits for both the reported SOCKS port
- * and `status/circuit-established` (or `BOOTSTRAP PROGRESS=100`) before handing
- * back the proxy. Progress is logged at every 10% so the Server screen's log
- * shows a long bootstrap doing something rather than hanging.
+ * circuit is established fails. So this waits for the reported SOCKS port,
+ * `status/circuit-established` (or `BOOTSTRAP PROGRESS=100`), *and* a real
+ * connect to the SOCKS listener itself before handing back the proxy. Progress
+ * is logged at every 10% so the Server screen's log shows a long bootstrap
+ * doing something rather than hanging.
  *
  * **Lifetime.** Tor is started once and then reused for the life of the process:
  * [start] returns the cached endpoint immediately on later calls. The binding is
@@ -95,10 +98,23 @@ class AndroidTorBootstrap(
             lastPhase = describePhase(phase, progress, circuitEstablished)
 
             if (socksPort > 0 && (circuitEstablished?.trim() == "1" || progress >= 100)) {
-                val proxy = TorProxy(host = SOCKS_HOST, port = socksPort)
-                ready = proxy
-                log("< tor: ready, socks proxy on ${proxy.host}:${proxy.port}")
-                return proxy
+                // tor opens the SOCKS listener before the daemon is actually
+                // able to answer through it, so "port exists" is not "usable".
+                // Probe the listener for real: a connect that completes is the
+                // only proof that the port this app will dial is the port tor
+                // is listening on (9050 could equally belong to another app).
+                if (socksListenerReachable(socksPort)) {
+                    log("< tor: SOCKS listener ${SOCKS_HOST}:$socksPort accepted a probe connection")
+                    val proxy = TorProxy(host = SOCKS_HOST, port = socksPort)
+                    ready = proxy
+                    log("< tor: ready, socks proxy on ${proxy.host}:${proxy.port}")
+                    runCatching { tor.getInfo("net/listeners/socks") }.getOrNull()
+                        ?.let { log("< tor: net/listeners/socks: $it") }
+                    runCatching { tor.getInfo("version") }.getOrNull()
+                        ?.let { log("< tor: version: $it") }
+                    return proxy
+                }
+                lastPhase = "SOCKS listener on $socksPort is not accepting connections yet"
             }
 
             val tenth = progress / 10
@@ -163,6 +179,26 @@ class AndroidTorBootstrap(
         else -> "bootstrap ${progress}%${summarySuffix(phase)}"
     }
 
+    /**
+     * Opens and immediately closes a local socket to the SOCKS listener.
+     *
+     * This is the readiness test that matters: tor can report a SOCKS port and
+     * an established circuit while the listener is still not accepting. A
+     * refused connection ([java.net.ConnectException], a subclass of
+     * [java.io.IOException]) means "not ready, keep polling" — the caller does,
+     * because this only answers a question. Reporting the port tor actually
+     * listens on, rather than assuming 9050, is also what settles any question
+     * of who owns that port.
+     */
+    private fun socksListenerReachable(port: Int): Boolean = try {
+        Socket().use { probe ->
+            probe.connect(InetSocketAddress(SOCKS_HOST, port), SOCKS_PROBE_TIMEOUT_MILLIS)
+        }
+        true
+    } catch (error: java.io.IOException) {
+        false
+    }
+
     private fun summarySuffix(phase: String?): String {
         val summary = SUMMARY.find(phase.orEmpty())?.groupValues?.getOrNull(1)?.trim()
         return if (summary.isNullOrEmpty()) "" else " ($summary)"
@@ -177,6 +213,9 @@ class AndroidTorBootstrap(
 
         /** Tor's SOCKS listener is loopback-only. */
         const val SOCKS_HOST: String = "127.0.0.1"
+
+        /** How long the SOCKS listener probe may take before "not ready". */
+        const val SOCKS_PROBE_TIMEOUT_MILLIS: Int = 1_000
 
         private val PROGRESS = Regex("PROGRESS=(\\d+)")
         private val SUMMARY = Regex("SUMMARY=\"([^\"]*)\"")

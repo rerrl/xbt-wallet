@@ -1,8 +1,10 @@
 package com.xbtwallet.app.electrum
 
+import kotlinx.coroutines.delay
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.Socket
+import java.net.SocketException
 
 /**
  * How the Electrum client reaches a server, and where Tor fits in.
@@ -52,6 +54,45 @@ object ElectrumRouting {
     /** The route an endpoint must take: `.onion` implies Tor, everything else is direct. */
     fun route(host: String): ElectrumRoute =
         if (isOnionHost(host)) ElectrumRoute.TOR else ElectrumRoute.DIRECT
+
+    /** The base32 alphabet a v3 onion label is drawn from, lowercase only. */
+    private const val BASE32_ALPHABET: String = "abcdefghijklmnopqrstuvwxyz234567"
+
+    /** The characters a v3 onion label has: 56 base32 characters. */
+    const val ONION_V3_LABEL_LENGTH: Int = 56
+
+    /** The characters a retired v2 onion label had. */
+    const val ONION_V2_LABEL_LENGTH: Int = 16
+
+    /** Shown when a `.onion` host is not a usable v3 address. */
+    const val ONION_PROBLEM_NOT_V3: String = "not a valid v3 onion address"
+
+    /**
+     * Why [host] cannot be dialled, or null when it can.
+     *
+     * A non-onion host is always fine here — this only judges hidden services.
+     * For an `.onion` host it enforces the one rule Tor does not tell us about
+     * nicely: a v3 address is exactly 56 lowercase base32 characters
+     * (`a`–`z`, `2`–`7`). A 16-character label is a v2 address, which Tor has
+     * refused to connect to since 0.4.9 (it answers the SOCKS request with
+     * reply 0x01, which surfaces as `SocketException: SOCKS server general
+     * failure`), so it gets its own sentence rather than a generic one.
+     *
+     * Case and the trailing dot an absolute DNS name may carry are tolerated,
+     * exactly as [isOnionHost] tolerates them.
+     */
+    fun onionAddressProblem(host: String): String? {
+        if (!isOnionHost(host)) return null
+        val label = host.trim().trimEnd('.').lowercase().removeSuffix(ONION_SUFFIX)
+        val base32 = label.isNotEmpty() && label.all { it in BASE32_ALPHABET }
+        return when {
+            label.length == ONION_V2_LABEL_LENGTH && base32 ->
+                "v2 onion addresses were retired network-wide \u2014 Tor cannot connect; " +
+                    "use the server's v3 address"
+            label.length != ONION_V3_LABEL_LENGTH || !base32 -> ONION_PROBLEM_NOT_V3
+            else -> null
+        }
+    }
 
     /**
      * The port used when the user has not chosen one, for a protocol.
@@ -164,22 +205,75 @@ class DirectTransport : ElectrumTransport {
  * there on the socket is ordinary — `java.net.Socket` with a SOCKS proxy does
  * the handshake for us, and Tor does the DNS resolution for the onion name,
  * which is the whole point (an onion address has no DNS record to look up).
+ *
+ * **Why Tor gets its own timeout.** The first connection to an onion goes
+ * through a rendezvous: Tor has to fetch the hidden service's descriptor from
+ * an HSDir and then meet the service, which routinely takes 30–60s and has
+ * nothing to do with how fast the Electrum server is. Sharing the client's
+ * short handshake timeout (a few seconds) means a perfectly healthy onion
+ * connection is abandoned mid-rendezvous and reported as a failure, so a Tor
+ * dial is allowed at least [MIN_TOR_TIMEOUT_MILLIS].
+ *
+ * **Why it retries.** Tor answers a SOCKS request it cannot serve — most
+ * commonly a retired v2 onion, or a v3 dial that lands before the descriptor
+ * is fetchable — with reply 0x01, which `java.net` raises as
+ * `SocketException: SOCKS server general failure`. That error is often
+ * transient in the first seconds after bootstrap, so the dial is attempted
+ * [DEFAULT_MAX_ATTEMPTS] times with [retryDelayMillis] between attempts before
+ * the failure is handed to the caller ([ElectrumClient] logs it).
  */
-class TorTransport(private val bootstrap: TorBootstrap) : ElectrumTransport {
+class TorTransport(
+    private val bootstrap: TorBootstrap,
+    private val maxAttempts: Int = DEFAULT_MAX_ATTEMPTS,
+    private val retryDelayMillis: Long = DEFAULT_RETRY_DELAY_MILLIS,
+) : ElectrumTransport {
 
     override fun describe(host: String): String = "Tor (via the bundled Tor SOCKS proxy)"
 
     override suspend fun connect(host: String, port: Int, timeoutMillis: Int, log: (String) -> Unit): Socket {
         val proxy = bootstrap.start(log)
-        log("< tor: socks proxy ${proxy.host}:${proxy.port}, dialling $host:$port through it")
-        val socket = Socket(Proxy(Proxy.Type.SOCKS, InetSocketAddress(proxy.host, proxy.port)))
-        socket.tcpNoDelay = true
-        // Unresolved on purpose: the host name goes to the SOCKS proxy, so Tor
-        // does the lookup. That is what makes an onion name work at all, and it
-        // is also what keeps a clearnet lookup from leaking past Tor.
-        socket.connect(InetSocketAddress.createUnresolved(host, port), timeoutMillis)
-        socket.soTimeout = timeoutMillis
-        return socket
+        val torTimeoutMillis = maxOf(timeoutMillis, MIN_TOR_TIMEOUT_MILLIS)
+        log(
+            "< tor: socks proxy ${proxy.host}:${proxy.port}, dialling $host:$port through it " +
+                "(timeout ${torTimeoutMillis}ms for the TOR route)",
+        )
+
+        var lastFailure: SocketException? = null
+        for (attempt in 1..maxAttempts) {
+            val socket = Socket(Proxy(Proxy.Type.SOCKS, InetSocketAddress(proxy.host, proxy.port)))
+            socket.tcpNoDelay = true
+            try {
+                // Unresolved on purpose: the host name goes to the SOCKS proxy, so
+                // Tor does the lookup. That is what makes an onion name work at all,
+                // and it is also what keeps a clearnet lookup from leaking past Tor.
+                socket.connect(InetSocketAddress.createUnresolved(host, port), torTimeoutMillis)
+                socket.soTimeout = torTimeoutMillis
+                return socket
+            } catch (failure: SocketException) {
+                // Reply 0x01 (or a dead SOCKS port): close this socket, say so
+                // plainly, and give Tor another go — a rendezvous that just
+                // failed often succeeds on the next dial.
+                runCatching { socket.close() }
+                lastFailure = failure
+                log("< tor: SOCKS connect failed (attempt $attempt): ${failure.message}")
+                if (attempt < maxAttempts) delay(retryDelayMillis)
+            }
+        }
+        throw lastFailure ?: SocketException("SOCKS connect to $host:$port failed")
+    }
+
+    companion object {
+        /**
+         * The shortest connect timeout a Tor dial is given. An onion rendezvous
+         * is slow by design and a short timeout here fails healthy servers.
+         */
+        const val MIN_TOR_TIMEOUT_MILLIS: Int = 90_000
+
+        /** Attempts per dial, the first one included. */
+        const val DEFAULT_MAX_ATTEMPTS: Int = 3
+
+        /** Pause between attempts. */
+        const val DEFAULT_RETRY_DELAY_MILLIS: Long = 5_000L
     }
 }
 
