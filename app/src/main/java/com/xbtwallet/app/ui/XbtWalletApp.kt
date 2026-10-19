@@ -3,6 +3,7 @@ package com.xbtwallet.app.ui
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalActivity
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -23,11 +24,15 @@ import com.xbtwallet.app.ui.server.rememberServerScreenState
 import com.xbtwallet.app.ui.addresses.AddressesScreen
 import com.xbtwallet.app.ui.signers.AddSignerScreen
 import com.xbtwallet.app.ui.signers.ImportXpubScreen
-import com.xbtwallet.app.ui.signers.SignerChainState
+import com.xbtwallet.app.ui.signers.SignerChainStateStore
 import com.xbtwallet.app.ui.signers.SignerDetailScreen
 import com.xbtwallet.app.ui.signers.SignersScreen
 import com.xbtwallet.app.ui.signers.UtxosScreen
 import com.xbtwallet.app.ui.signers.rememberImportXpubScreenState
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 
 /**
  * Screens the app can show.
@@ -54,6 +59,15 @@ enum class Screen { HOME, SERVER, SIGNERS, ADD_SIGNER, IMPORT_XPUB, SIGNER_DETAI
  *
  * There is no active-signer state any more: signers are a plain list, and
  * anything that acts on one acts inside that signer's own screen.
+ *
+ * **Chain state outlives the screens.** Each signer's scan state lives in a
+ * [SignerChainStateStore] created once here and driven by an app-scoped
+ * coroutine scope — not in a `remember` inside the screen that shows it. A sync
+ * in flight therefore keeps running while the user walks detail → UTXOs →
+ * Addresses → Home → detail, and re-entering the signer reads the same shared
+ * state rather than starting a second scan (see the store and
+ * `SignerChainState.load` for the freshness rule). The scope is cancelled only
+ * when this root composable leaves composition.
  *
  * **Navigation is a back stack.** [NavStack] holds the destinations walked so
  * far, the app renders its [NavStack.current], and *navigate* is `push` while
@@ -95,26 +109,35 @@ fun XbtWalletApp() {
     val nav = rememberSaveable(saver = NavStack.Saver) { NavStack() }
     val route = nav.current
 
+    // The app-scoped scope the per-signer scans run in. Deliberately *not* the
+    // composition's: a scan must keep running while the user navigates away from
+    // the screen that started it, and is cancelled only when this root leaves
+    // composition (the process going away).
+    val appScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
+    DisposableEffect(Unit) { onDispose { appScope.cancel() } }
+
+    // One store for the app's lifetime: it hands back the same SignerChainState
+    // for a given signer id every time, so a scan (and its result) survives
+    // navigation between that signer's screens.
+    val chainStateStore = remember { SignerChainStateStore(serverStore, snapshotStore, appScope) }
+
     // The signer the current screen is showing, if any. Read from the stack entry
     // rather than shared mutable state, so a screen's argument cannot be clobbered
     // by a later navigation.
     val openSigner = route.signerId?.let(signerStore::get)
 
-    // The open signer and its chain state. Resolved here, at the navigation
-    // level, for two reasons: the state must outlive a single screen (opening
-    // UTXOs from the detail screen must not cancel the scan in flight), and
+    // The open signer's chain state, resolved through the store at the navigation
+    // level. The store keeps one instance per signer id, so walking
+    // detail → UTXOs → Addresses → detail reads the same state throughout; and
     // resolving through the store every recomposition is what makes a signer
     // deleted underneath us fall back Home instead of rendering stale data.
-    // Keyed on the signer *id*, so walking detail → UTXOs → detail keeps the same
-    // scan and its result.
-    val chainState = remember(openSigner?.id, serverStore, snapshotStore) {
-        openSigner?.let { SignerChainState(signer = it, serverSettings = serverStore, snapshotStore = snapshotStore) }
-    }
+    val chainState = remember(openSigner?.id) { openSigner?.let(chainStateStore::stateFor) }
 
-    // One scan per open signer. `load()` is a no-op once a scan has run or is
-    // running, so recomposition and screen changes cost nothing; the effect is
-    // re-created only when a different signer is opened (a new state object).
-    LaunchedEffect(chainState) { chainState?.load() }
+    // Ask for a sync whenever a signer's screen opens. `sync()` starts a scan only
+    // if none is in flight for that signer, and `load()` inside it skips the
+    // rescan while the last completed sync is fresh — so recomposition and screen
+    // changes cost nothing.
+    LaunchedEffect(openSigner?.id) { openSigner?.let(chainStateStore::sync) }
 
     // Android back pops exactly one level. Disabled at HOME: the system finishes
     // the activity instead, which is the app-default we want there.
@@ -172,6 +195,10 @@ fun XbtWalletApp() {
                 // happens to reuse the id can never open on another account's
                 // addresses, UTXOs or balance.
                 snapshotStore.clear(signer.id)
+                // And forget its in-memory chain state: this cancels any scan
+                // still in flight for it and drops the state, so a reused id
+                // starts from scratch rather than inheriting the old scan.
+                chainStateStore.remove(signer.id)
                 homeState.refresh()
             },
             onBack = { nav.pop() },
