@@ -12,6 +12,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -28,7 +29,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.activity.compose.rememberLauncherForActivityResult
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import com.xbtwallet.app.crypto.XpubImport
+import com.xbtwallet.app.crypto.XpubScanRoute
 import com.xbtwallet.app.crypto.validateXpubInput
 import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerStore
@@ -142,14 +147,16 @@ fun rememberImportXpubScreenState(
 }
 
 /**
- * Add a signer by pasting its account xpub — the manual half of the Add-signer
- * flow, reached from [AddSignerScreen]'s **Add watch-only xpub** button.
+ * Add a signer by its account xpub — the half of the Add-signer flow reached
+ * from [AddSignerScreen]'s **Add watch-only xpub** button.
  *
- * This is the fallback path from PLAN.md §4. The primary path is scanning a
- * SeedSigner `crypto-account` QR export, which is a later feature — a code note
- * for whoever builds it: swapping in a scanner means feeding the decoded string
- * through this same state object, because the validation already lives behind
- * [com.xbtwallet.app.crypto.validateXpubInput] and never touches a camera.
+ * There are two ways in and they share one validator. The key can be **pasted**
+ * into the field, or **scanned** from the signer's screen; a scan is routed by
+ * [XpubScanRoute] and then lands in the same field through the same
+ * [com.xbtwallet.app.crypto.validateXpubInput], so the camera can never accept
+ * something the keyboard would reject. Pasting stays available at all times,
+ * which is also what makes the wallet usable when camera permission is refused
+ * or the device has no camera.
  *
  * The fields validate inline (via the shared [validateXpubInput] seam, not a
  * copy of it) and the save is refused until the name is set and the key parses.
@@ -160,6 +167,14 @@ fun ImportXpubScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // The scanner is a result launcher, not a separate screen owned here: the
+    // library's CaptureActivity runs the camera and the library's scan flow asks
+    // for CAMERA itself. A cancelled scan reports null contents and is ignored,
+    // leaving whatever the user had already typed in the field.
+    val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
+        result.contents?.let { payload -> state.onXpubChange(XpubScanRoute.extract(payload)) }
+    }
+
     Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
         Column(
             modifier = Modifier
@@ -200,6 +215,26 @@ fun ImportXpubScreen(
             )
 
             Spacer(modifier = Modifier.height(16.dp))
+
+            // Scanning and pasting fill the same field, so the button sits right
+            // on top of it rather than leading to a screen of its own.
+            OutlinedButton(
+                onClick = {
+                    scanLauncher.launch(
+                        ScanOptions().apply {
+                            setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                            setPrompt("Scan the account xpub QR")
+                            setBeepEnabled(false)
+                            setOrientationLocked(false)
+                        },
+                    )
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Scan QR")
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
 
             OutlinedTextField(
                 value = state.xpub,
