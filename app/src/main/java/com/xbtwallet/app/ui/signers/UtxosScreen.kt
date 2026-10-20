@@ -1,5 +1,6 @@
 package com.xbtwallet.app.ui.signers
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -12,11 +13,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
@@ -26,13 +34,26 @@ import com.xbtwallet.app.chain.ScannedUtxo
 
 /**
  * The UTXO list for one signer: what `blockchain.scripthash.listunspent` said
- * about each used address, flattened into one plain scrollable list.
+ * about each used address, flattened into one plain scrollable list the user
+ * selects coins from.
  *
  * Every row is monospaced and says the four things an output has: its amount,
  * where it sits on chain (`txid:vout`, both ends kept, middle elided), which of
  * this account's addresses holds it, and at what height it confirmed — or that
- * it has not. That is the whole screen: no coin control, no freezing, no
- * selection. Those are v0.2.0.
+ * it has not. The row leads with a checkbox and the whole row toggles it, so a
+ * multi-select is a tap per coin rather than a tap on a small target.
+ *
+ * **This is where a send starts.** With a non-empty selection a bottom bar
+ * appears carrying the count and sum and a "Send selected" button; tapping it
+ * hands the selected outpoints (in list order) up through [onSendSelected]. The
+ * button is enabled only for a **signing-ready** wallet — a pure watch-only
+ * signer gets it disabled with a hint, because there is nothing on this phone
+ * that could sign for it. No transaction is built here; coin *control* (freezing,
+ * labels, ordering) is still a later stage.
+ *
+ * **A resync prunes the selection.** An output another spender has consumed
+ * silently leaves both the list and the selection rather than being carried as a
+ * coin that no longer exists.
  *
  * The data comes from [state], the same scan the detail screen's balance is
  * built from, so the list and the number above it can never disagree.
@@ -40,9 +61,25 @@ import com.xbtwallet.app.chain.ScannedUtxo
 @Composable
 fun UtxosScreen(
     state: SignerChainState,
+    onSendSelected: (List<String>) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // Keyed on the signer id so walking between signers cannot carry one
+    // wallet's selection onto another's coins.
+    var selected by remember(state.signer.id) { mutableStateOf(setOf<String>()) }
+
+    // Drop any selected outpoint the latest snapshot no longer holds. Keyed on
+    // the snapshot so it re-runs on every resync: an output another spender used
+    // must leave the selection (and would otherwise linger as an unspendable
+    // entry the send button still counted).
+    LaunchedEffect(state.snapshot) {
+        val snapshot = state.snapshot ?: return@LaunchedEffect
+        val present = snapshot.utxos.mapTo(mutableSetOf()) { it.utxo.outpoint }
+        val pruned = selected.filterTo(mutableSetOf()) { it in present }
+        if (pruned.size != selected.size) selected = pruned
+    }
+
     Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
         Column(
             modifier = Modifier
@@ -72,14 +109,87 @@ fun UtxosScreen(
             Spacer(modifier = Modifier.height(12.dp))
 
             ScanStateBody(state, modifier = Modifier.weight(1f)) { snapshot ->
-                UtxoList(snapshot)
+                UtxoList(
+                    snapshot = snapshot,
+                    selected = selected,
+                    onToggle = { outpoint ->
+                        selected = if (outpoint in selected) {
+                            selected - outpoint
+                        } else {
+                            selected + outpoint
+                        }
+                    },
+                )
+            }
+
+            if (selected.isNotEmpty()) {
+                SendSelectedBar(
+                    selected = selected,
+                    snapshot = state.snapshot,
+                    signingReady = state.signer.signingReady,
+                    onSendSelected = onSendSelected,
+                )
             }
         }
     }
 }
 
+/**
+ * The bar that appears under the list once at least one coin is selected.
+ *
+ * It is what carries the selection out of this screen: it sums the selected
+ * outpoints that the snapshot actually holds (the same set the list shows),
+ * labels the button with that count and sum, and — only for a signing-ready
+ * wallet — hands the outpoints up, in list order. A watch-only wallet keeps the
+ * button visible but disabled, with a hint saying why, so the capability is
+ * discoverable without ever pretending to be available.
+ */
 @Composable
-private fun UtxoList(snapshot: AccountSnapshot, modifier: Modifier = Modifier) {
+private fun SendSelectedBar(
+    selected: Set<String>,
+    snapshot: AccountSnapshot?,
+    signingReady: Boolean,
+    onSendSelected: (List<String>) -> Unit,
+) {
+    // In list order: the order the user sees them in, which is the order the
+    // Send screen will summarise them in.
+    val ordered = snapshot?.utxos
+        ?.filter { it.utxo.outpoint in selected }
+        ?.map { it.utxo.outpoint }
+        .orEmpty()
+    val sum = snapshot?.utxos
+        ?.filter { it.utxo.outpoint in selected }
+        ?.sumOf { it.utxo.satoshis }
+        ?: 0L
+
+    Spacer(modifier = Modifier.height(8.dp))
+
+    Button(
+        onClick = { onSendSelected(ordered) },
+        enabled = signingReady,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text("Send selected (${selected.size} \u2022 ${formatSats(sum)} sats)")
+    }
+
+    if (!signingReady) {
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = "Sending needs a signing-ready wallet \u2014 re-import with a " +
+                "key-expression QR ([fingerprint/path]xpub) to enable.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun UtxoList(
+    snapshot: AccountSnapshot,
+    selected: Set<String>,
+    onToggle: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     if (snapshot.utxos.isEmpty()) {
         Column(modifier = modifier.fillMaxWidth()) {
             Text("No UTXOs.", style = MaterialTheme.typography.bodyLarge)
@@ -99,33 +209,57 @@ private fun UtxoList(snapshot: AccountSnapshot, modifier: Modifier = Modifier) {
         verticalArrangement = Arrangement.spacedBy(6.dp),
         contentPadding = PaddingValues(bottom = 16.dp),
     ) {
-        items(snapshot.utxos) { scanned -> UtxoRow(scanned) }
+        items(snapshot.utxos) { scanned ->
+            UtxoRow(
+                scanned = scanned,
+                selected = scanned.utxo.outpoint in selected,
+                onToggle = { onToggle(scanned.utxo.outpoint) },
+            )
+        }
     }
 }
 
 /**
- * One output: amount on top, provenance underneath — the same "what, then
- * where from" shape a block explorer uses, in monospace.
+ * One output: a leading checkbox, then amount on top and provenance underneath —
+ * the same "what, then where from" shape a block explorer uses, in monospace.
+ *
+ * The checkbox's own `onCheckedChange` is `null` on purpose: the row around it is
+ * the click target, so a tap anywhere toggles the coin. That is both a larger
+ * hit area and the standard list-multiselect behaviour.
  */
 @Composable
-private fun UtxoRow(scanned: ScannedUtxo) {
+private fun UtxoRow(
+    scanned: ScannedUtxo,
+    selected: Boolean,
+    onToggle: () -> Unit,
+) {
     val utxo = scanned.utxo
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Text(
-            text = "${formatSats(utxo.satoshis)} sats",
-            style = MaterialTheme.typography.bodyLarge,
-            fontFamily = FontFamily.Monospace,
-        )
-        Spacer(modifier = Modifier.height(2.dp))
-        Text(
-            text = buildString {
-                append(shortenedMiddle(utxo.txHash)).append(':').append(utxo.txPos)
-                append("   ").append(scanned.chain.label.lowercase()).append(" #").append(scanned.addressIndex)
-                append("   ").append(if (utxo.confirmed) "height ${formatSats(utxo.height.toLong())}" else "unconfirmed")
-            },
-            style = MaterialTheme.typography.bodySmall,
-            fontFamily = FontFamily.Monospace,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Checkbox(checked = selected, onCheckedChange = null)
+        Spacer(modifier = Modifier.width(8.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "${formatSats(utxo.satoshis)} sats",
+                style = MaterialTheme.typography.bodyLarge,
+                fontFamily = FontFamily.Monospace,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = buildString {
+                    append(shortenedMiddle(utxo.txHash)).append(':').append(utxo.txPos)
+                    append("   ").append(scanned.chain.label.lowercase()).append(" #").append(scanned.addressIndex)
+                    append("   ").append(if (utxo.confirmed) "height ${formatSats(utxo.height.toLong())}" else "unconfirmed")
+                },
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }

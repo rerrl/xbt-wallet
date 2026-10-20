@@ -111,6 +111,19 @@ class RouteCodecTest {
     }
 
     @Test
+    fun `a send route carries its outpoints in the address slot and round-trips`() {
+        // The free-form `address` segment doubles as the selected-outpoint list
+        // for SEND: a comma-joined `txid:vout,…`. `|` is the only forbidden
+        // character in a later segment, and txids are hex, so commas survive
+        // encode/decode without any escaping — which is the whole reason the
+        // selection can ride on the route and survive a rotation.
+        val route = Route(Screen.SEND, signerId = "id-7", address = "ab12cd34:0,ef56ab78:1")
+
+        assertEquals("SEND|id-7|ab12cd34:0,ef56ab78:1", route.encode())
+        assertEquals(route, Route.decode(route.encode()))
+    }
+
+    @Test
     fun `legacy one- and two-segment strings decode unchanged`() {
         assertEquals(Route(Screen.SIGNERS), Route.decode("SIGNERS"))
         assertEquals(

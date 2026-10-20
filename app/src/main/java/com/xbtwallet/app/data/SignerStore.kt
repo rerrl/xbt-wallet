@@ -146,6 +146,29 @@ data class Signer(
             is SignerType.WatchOnlyXpub -> WATCH_ONLY_LABEL
         }
 
+    /**
+     * True when this signer can actually produce signatures — not merely watch the
+     * account.
+     *
+     * Signing-readiness is **computed from the record, never stored**: the two
+     * things it needs ([SignerType.WatchOnlyXpub.masterFingerprint] and
+     * [SignerType.WatchOnlyXpub.derivationPath]) are exactly the fields a PSBT's
+     * BIP32 derivation records require, and neither can be derived from the xpub
+     * after the fact. They arrive only when the import QR carried a BIP-32
+     * key-expression (`[ab12cd34/84'/0'/0']zpub…`) or a signing device exported
+     * them, so a bare-key watch-only import is genuinely watch-only.
+     *
+     * **Origin ≠ capability.** This deliberately reads the *type*, not
+     * [importedVia]: an xpub with a fingerprint and a path is equally
+     * signing-ready no matter which row of the Add-wallet chooser brought it in,
+     * and a text-QR import that happens to carry both is just as ready as one off
+     * a hardware screen. A future signer kind that is not a [SignerType.WatchOnlyXpub]
+     * is not signing-ready by this rule.
+     */
+    val signingReady: Boolean
+        get() = (type as? SignerType.WatchOnlyXpub)
+            ?.let { it.masterFingerprint != null && it.derivationPath != null } ?: false
+
     companion object {
         /** Badge for [SignerType.WatchOnlyXpub] — the only signer kind that exists. */
         const val WATCH_ONLY_LABEL = "watch-only"

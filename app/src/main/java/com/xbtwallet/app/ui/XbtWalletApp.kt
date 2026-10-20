@@ -36,6 +36,7 @@ import com.xbtwallet.app.ui.signers.ChainPhase
 import com.xbtwallet.app.ui.signers.ImportXpubScreen
 import com.xbtwallet.app.ui.signers.SignerChainStateStore
 import com.xbtwallet.app.ui.signers.SignerDetailScreen
+import com.xbtwallet.app.ui.signers.SendScreen
 import com.xbtwallet.app.ui.signers.SignersScreen
 import com.xbtwallet.app.ui.signers.UtxosScreen
 import com.xbtwallet.app.ui.signers.rememberAddSigningDeviceScreenState
@@ -58,7 +59,7 @@ import kotlinx.coroutines.launch
  * name, not a route); it rides in the [Route] that carries this screen onto the
  * back stack, so each level remembers its own argument. See [NavStack].
  */
-enum class Screen { HOME, SERVER, SIGNERS, ADD_SIGNER, IMPORT_XPUB, ADD_SIGNING_DEVICE, SIGNER_DETAIL, SIGNER_UTXOS, SIGNER_ADDRESSES, RECEIVE }
+enum class Screen { HOME, SERVER, SIGNERS, ADD_SIGNER, IMPORT_XPUB, ADD_SIGNING_DEVICE, SIGNER_DETAIL, SIGNER_UTXOS, SIGNER_ADDRESSES, RECEIVE, SEND }
 
 /**
  * The app's navigation and its shared stores.
@@ -362,7 +363,46 @@ fun XbtWalletApp() {
                 // Same rule as the detail screen: no signer, nothing to show.
                 LaunchedEffect(route) { nav.reset() }
             } else {
-                UtxosScreen(state = chainState, onBack = { nav.pop() })
+                UtxosScreen(
+                    state = chainState,
+                    // The selected outpoints ride on the Send route (comma-joined
+                    // in the free-form address slot) rather than in shared state,
+                    // so a rotation on the Send screen keeps the same coin
+                    // selection. See [Route].
+                    onSendSelected = { outpoints ->
+                        nav.push(
+                            Route(
+                                Screen.SEND,
+                                signerId = route.signerId,
+                                address = outpoints.joinToString(","),
+                            ),
+                        )
+                    },
+                    onBack = { nav.pop() },
+                )
+            }
+        }
+
+        Screen.SEND -> {
+            val signerId = route.signerId
+            // The selection came in as `txid:vout,txid:vout,…`; blanks (a trailing
+            // comma, an empty address) are dropped rather than becoming a phantom
+            // outpoint. An empty result is the "nothing to send" case below.
+            val outpoints = route.address.orEmpty()
+                .split(",")
+                .filter { it.isNotBlank() }
+            if (chainState == null || signerId == null || outpoints.isEmpty()) {
+                // No signer to send from, or no coins carried on the route (a
+                // stack restored from a build that saved a Send route before the
+                // selection was put on it). Restart at Home rather than show an
+                // empty send form.
+                LaunchedEffect(route) { nav.reset() }
+            } else {
+                SendScreen(
+                    state = chainState,
+                    outpoints = outpoints,
+                    onBack = { nav.pop() },
+                )
             }
         }
 
