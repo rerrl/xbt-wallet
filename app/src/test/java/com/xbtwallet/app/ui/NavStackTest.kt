@@ -1,6 +1,9 @@
 package com.xbtwallet.app.ui
 
 import androidx.compose.runtime.saveable.SaverScope
+import com.xbtwallet.app.data.SignerOrigin
+import com.xbtwallet.app.ui.signers.AddWalletRow
+import com.xbtwallet.app.ui.signers.routeFor
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -63,6 +66,38 @@ class NavStackTest {
         assertEquals(Route(Screen.ADD_SIGNER), stack.current)
         assertTrue(stack.pop())
         assertEquals(Route(Screen.HOME), stack.current)
+    }
+
+    /**
+     * The walk each row of the Add-wallet chooser starts, pushed exactly as the
+     * app pushes it (`routeFor`). The two animated rows land on the *same*
+     * screen, so the origin on the entry is the only thing that survives the
+     * walk — and it has to, because the form behind it stamps the saved wallet
+     * with it.
+     */
+    @Test
+    fun `each chooser row pushes its own form, with its declared origin`() {
+        AddWalletRow.entries.forEach { row ->
+            val stack = NavStack()
+            stack.push(Route(Screen.ADD_SIGNER))
+            stack.push(routeFor(row))
+
+            assertEquals("row $row lands on its form", routeFor(row).screen, stack.current.screen)
+            assertEquals("row $row declares its origin", routeFor(row).origin, stack.current.origin)
+
+            // Back from the form returns to the chooser that sent you there.
+            assertTrue(stack.pop())
+            assertEquals(Route(Screen.ADD_SIGNER), stack.current)
+        }
+    }
+
+    @Test
+    fun `the two animated rows share a screen but not an origin`() {
+        val seedsigner = routeFor(AddWalletRow.SEEDSIGNER)
+        val other = routeFor(AddWalletRow.OTHER_SIGNING_DEVICE)
+
+        assertEquals("one screen for both", seedsigner.screen, other.screen)
+        assertTrue("but the origins must differ", seedsigner.origin != other.origin)
     }
 
     @Test
@@ -136,6 +171,9 @@ class NavStackTest {
         // intact; see RouteCodecTest for the codec's own rules.
         val signerId = "3f2a6b1e-6c3d-4c0f-9a1b-2d7e5f8c4a11"
         stack.push(Route(Screen.SIGNER_DETAIL, signerId = signerId))
+        // And a form opened with a declared origin, which is the argument that
+        // rides alone.
+        stack.push(Route(Screen.ADD_SIGNING_DEVICE, origin = SignerOrigin.SIGNING_DEVICE_UR))
 
         val scope = object : SaverScope {
             override fun canBeSaved(value: Any): Boolean = true
@@ -146,7 +184,11 @@ class NavStackTest {
         val restored = NavStack.Saver.restore(saved!!)!!
 
         assertEquals(stack.routes, restored.routes)
-        assertEquals(Route(Screen.SIGNER_DETAIL, signerId = signerId), restored.current)
+        assertEquals(Route(Screen.SIGNER_DETAIL, signerId = signerId), restored.routes[2])
+        assertEquals(
+            Route(Screen.ADD_SIGNING_DEVICE, origin = SignerOrigin.SIGNING_DEVICE_UR),
+            restored.current,
+        )
     }
 
     @Test

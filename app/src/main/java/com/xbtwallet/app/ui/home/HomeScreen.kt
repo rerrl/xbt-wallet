@@ -86,7 +86,7 @@ enum class ServerStatus {
  * Kotlin: [SignerStore] and [ServerSettings] own persistence, this class owns
  * the snapshot Compose observes, and [HomeScreen] only renders. That split keeps
  * the screen a pure function of the state (easy to preview) and keeps the
- * "how many signers" and "is the server up" rules testable without a UI.
+ * "how many wallets" and "is the server up" rules testable without a UI.
  *
  * There is deliberately **no active-signer selection** here: signers are just a
  * list, and the rules that act on one signer live on that signer's own screen.
@@ -512,15 +512,15 @@ fun rememberHomeScreenState(
  * coordinator holding xpubs, not a wallet holding keys.
  *
  * Top to bottom: **Server** (private Electrum endpoint) with its live status
- * line, then the two things you do with signers — **Add signer** and
- * **Signers** — then a small **Preferences** section (see below). The old
+ * line, then the two things you do with wallets — **Add wallet** and
+ * **Wallets** — then a small **Preferences** section (see below). The old
  * standalone "Import xpub", "Select active xpub" and
- * "Addresses" buttons are gone: xpubs are signers now, they live in a list
+ * "Addresses" buttons are gone: xpubs are wallets now, they live in a list
  * rather than behind an "active" selection, and everything that works on one
- * signer (addresses included) is reached by opening that signer. **Add signer**
- * now opens the signer chooser (watch-only xpub live, hot wallet disabled) and
- * **Signers** the list of what is saved; a signer's own detail screen is the one
- * screen still to come.
+ * wallet (addresses included) is reached by opening that wallet. **Add wallet**
+ * opens the three-row chooser (SeedSigner / other signing device / watch-only
+ * xpub) and **Wallets** the list of what is saved; a wallet's own detail screen
+ * is where the rest lives.
  *
  * Under the Server button the screen shows the live connection status: the
  * "connect your own server" hint until an endpoint is saved, then a dot with
@@ -565,7 +565,7 @@ fun HomeScreen(
             verticalArrangement = Arrangement.Center,
         ) {
             // 1. Server first: it is the one setup step that has nothing to do
-            //    with keys, so the screen reads as "configure, then signers".
+            //    with keys, so the screen reads as "configure, then wallets".
             OutlinedButton(
                 onClick = onOpenServer,
                 modifier = Modifier.fillMaxWidth(),
@@ -581,32 +581,32 @@ fun HomeScreen(
 
             Spacer(modifier = Modifier.height(28.dp))
 
-            // 2. Add a signer — the one way in.
+            // 2. Add a wallet — the one way in.
             Button(
                 onClick = onAddSigner,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Add signer")
+                Text("Add wallet")
             }
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // 3. The saved signers. Always tappable: the list screen is where an
+            // 3. The saved wallets. Always tappable: the list screen is where an
             //    empty list explains itself.
             Button(
                 onClick = onOpenSigners,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Signers")
+                Text("Wallets")
             }
 
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
                 text = when (state.signers.size) {
-                    0 -> "No signer yet — add one to begin."
-                    1 -> "1 signer."
-                    else -> "${state.signers.size} signers."
+                    0 -> "No wallet yet — add one to begin."
+                    1 -> "1 wallet."
+                    else -> "${state.signers.size} wallets."
                 },
                 style = MaterialTheme.typography.bodySmall,
                 textAlign = TextAlign.Center,

@@ -4,9 +4,10 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.listSaver
+import com.xbtwallet.app.data.SignerOrigin
 
 /**
- * One entry on the navigation back stack: *where* to go, plus the argument that
+ * One entry on the navigation back stack: *where* to go, plus the arguments that
  * destination needs.
  *
  * This replaces the old "a `Screen` enum value beside one shared id field"
@@ -24,21 +25,37 @@ import androidx.compose.runtime.saveable.listSaver
  *   for the same reason the signer id does: a rotation must put the user back on
  *   the address they were looking at, not on whatever the screen would choose by
  *   default.
+ * @property origin the import path the user *declared* by tapping a row of the
+ *   Add-wallet chooser, carried onto the form that row opened. Only the two
+ *   animated-BC-UR rows need it — both of them open the same scanner, and only
+ *   the tap can say whether the device in hand is a SeedSigner or some other one
+ *   — but it lives on the route like every other argument so a rotation cannot
+ *   land the user on a form that has forgotten which row sent them there. Null
+ *   for every screen that declares nothing, which is all of them but the two
+ *   import forms.
  */
 data class Route(
     val screen: Screen,
     val signerId: String? = null,
     val address: String? = null,
+    val origin: SignerOrigin? = null,
 ) {
     /**
      * One string, for [NavStack.Saver]: the screen name, then the signer id, then
-     * a requested address, each after its own `|`. Segments are emitted only as
-     * far as they are needed, and an id is always present when an address is —
-     * a lone `name||address` would decode back to a route with a null id, i.e. a
-     * *different* route from the one written. Kept deliberately tiny — a `Bundle`
-     * can hold a list of strings and nothing more exotic is needed.
+     * a requested address, then a declared origin, each after its own `|`.
+     * Segments are emitted only as far as they are needed, and an id is always
+     * present when an address is — a lone `name||address` would decode back to a
+     * route with a null id, i.e. a *different* route from the one written.
+     *
+     * The origin is the one argument that can stand entirely on its own (the
+     * import forms have no signer and no address yet), so it is written with the
+     * two empty slots in front of it that put it in its own position:
+     * `ADD_SIGNING_DEVICE|||SEEDSIGNER_UR`. That is not a stray segment — it
+     * decodes back to exactly the route that wrote it. Kept deliberately tiny — a
+     * `Bundle` can hold a list of strings and nothing more exotic is needed.
      */
     fun encode(): String = when {
+        origin != null -> "${screen.name}|||${origin.name}"
         signerId == null -> screen.name
         address == null -> "${screen.name}|$signerId"
         else -> "${screen.name}|$signerId|$address"
@@ -50,10 +67,11 @@ data class Route(
          *
          * Forgiving on purpose. A stack saved by an older build holds only the
          * one- and two-segment forms, and those must still read back exactly as
-         * they did; the address segment is simply absent and comes back null. The
+         * they did; the later segments are simply absent and come back null. The
          * separator is `|` and each field is split at the *first* `|` after it —
          * so a *later* segment may itself contain one without being truncated —
-         * which is why a signer id must not contain one (they are UUIDs).
+         * which is why a signer id must not contain one (they are UUIDs) and why
+         * the free-form segments are the last ones.
          */
         fun decode(text: String): Route {
             val separator = text.indexOf('|')
@@ -64,15 +82,35 @@ data class Route(
             if (addressSeparator < 0) {
                 return Route(screen = screen, signerId = rest.ifEmpty { null })
             }
+            val originSeparator = rest.indexOf('|', addressSeparator + 1)
+            if (originSeparator < 0) {
+                return Route(
+                    screen = screen,
+                    signerId = rest.substring(0, addressSeparator).ifEmpty { null },
+                    address = rest.substring(addressSeparator + 1).ifEmpty { null },
+                )
+            }
             return Route(
                 screen = screen,
                 signerId = rest.substring(0, addressSeparator).ifEmpty { null },
-                address = rest.substring(addressSeparator + 1).ifEmpty { null },
+                address = rest.substring(addressSeparator + 1, originSeparator).ifEmpty { null },
+                origin = originNamed(rest.substring(originSeparator + 1)),
             )
         }
 
         private fun screenNamed(name: String): Screen =
             Screen.entries.firstOrNull { it.name == name } ?: Screen.HOME
+
+        /**
+         * A saved origin reads back by its enum name, and anything this build
+         * does not know comes back null — the version of [screenNamed]'s
+         * forgiveness, and for the same reason: a route is restored state, not
+         * imported data, so the worst a stale name may do is leave the form it
+         * opened with no declared origin (which the import screen then treats as
+         * the SeedSigner path it has always been).
+         */
+        private fun originNamed(name: String): SignerOrigin? =
+            SignerOrigin.entries.firstOrNull { it.name == name }
     }
 }
 

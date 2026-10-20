@@ -422,7 +422,7 @@ private fun NoServerBalance() {
     Spacer(modifier = Modifier.height(4.dp))
     Text(
         text = "Balance comes from your own Electrum server. Add one under Server on the " +
-            "home screen and this signer's balance appears here \u2014 the phone never asks " +
+            "home screen and this wallet's balance appears here \u2014 the phone never asks " +
             "anyone else.",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,

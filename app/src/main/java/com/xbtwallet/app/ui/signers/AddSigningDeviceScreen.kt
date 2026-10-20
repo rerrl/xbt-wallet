@@ -48,7 +48,7 @@ import com.xbtwallet.app.ui.theme.XbtWalletTheme
 import com.xbtwallet.app.ui.theme.XbtWarningDark
 
 /**
- * State behind the **add signing device** screen: the signer's name, the account
+ * State behind the **add signing device** screen: the wallet's name, the account
  * decoded out of the last animated export (plus its fingerprint and path), and
  * the save action.
  *
@@ -57,6 +57,14 @@ import com.xbtwallet.app.ui.theme.XbtWarningDark
  * scan is not one QR code but an assembly of fountain-coded frames
  * ([UrAccountAssembler]), so the state machine has one more axis the text path
  * does not have: a scan in progress.
+ *
+ * [origin] is the chooser row that opened this screen — `SEEDSIGNER_UR` for the
+ * SeedSigner row, `SIGNING_DEVICE_UR` for the other-device row. Both rows read
+ * the very same QR, so the *payload* cannot tell them apart; the user's tap is
+ * the only thing that can, which is why it is passed in and recorded rather than
+ * guessed at scan time. It changes nothing about the key: the same xpub,
+ * fingerprint and path are stored either way, and only the tag the UI shows
+ * reads it.
  *
  * Plain Kotlin, no Compose UI, so the whole thing is exercised on the JVM by
  * feeding it frames — including out-of-order and interleaved ones, which is the
@@ -69,6 +77,7 @@ import com.xbtwallet.app.ui.theme.XbtWarningDark
 @Stable
 class AddSigningDeviceScreenState(
     private val signerStore: SignerStore,
+    private val origin: SignerOrigin,
     private val onSaved: (Signer) -> Unit,
 ) {
 
@@ -193,9 +202,9 @@ class AddSigningDeviceScreenState(
         }
     }
 
-    /** Validates and, when everything checks out, stores a new watch-only signer. */
+    /** Validates and, when everything checks out, stores a new watch-only wallet. */
     fun import() {
-        nameError = if (name.isBlank()) "Give this signer a name." else null
+        nameError = if (name.isBlank()) "Give this wallet a name." else null
 
         val key = scannedKey
         if (key == null) {
@@ -211,17 +220,19 @@ class AddSigningDeviceScreenState(
         val xpub = scannedXpub ?: return
         // The metadata is stored as decoded; `key` proves the xpub parsed. The
         // record is the same one the watch-only path writes — same store, same
-        // signer type — so a signer added either way is indistinguishable in the
+        // signer type — so a wallet added either way is indistinguishable in the
         // data. What *does* differ is the origin: this key came off a signing
-        // device over BC-UR, and recording that is what earns it the orange
-        // "seedsigner" tag rather than the grey "watch-only" one.
+        // device over BC-UR, and the chooser row the user tapped said *which*
+        // kind of device it was. Recording that declared origin is what earns the
+        // account its tag — orange "seedsigner" for the SeedSigner row, the blue
+        // "signing device" for any other device.
         onSaved(
             signerStore.add(
                 name = name,
                 xpub = xpub,
                 masterFingerprint = masterFingerprint,
                 derivationPath = derivationPath,
-                importedVia = SignerOrigin.SIGNING_DEVICE_UR,
+                importedVia = origin,
             ),
         )
     }
@@ -275,24 +286,28 @@ class AddSigningDeviceScreenState(
  * Remembers an [AddSigningDeviceScreenState].
  *
  * Same shape as [rememberImportXpubScreenState], and for the same reason: keying
- * the state on the store alone means a fresh `onSaved` lambda on every
- * composition cannot recreate it and wipe what the user has entered.
+ * the state on the store (and the declared [origin]) alone means a fresh
+ * `onSaved` lambda on every composition cannot recreate it and wipe what the user
+ * has entered. The origin is a key as well because it is what the saved record
+ * will carry — a state object that survived a change of origin would stamp the
+ * wrong one.
  */
 @Composable
 fun rememberAddSigningDeviceScreenState(
     signerStore: SignerStore,
+    origin: SignerOrigin,
     onSaved: (Signer) -> Unit,
 ): AddSigningDeviceScreenState {
     val currentOnSaved by rememberUpdatedState(onSaved)
-    return remember(signerStore) {
-        AddSigningDeviceScreenState(signerStore) { signer -> currentOnSaved(signer) }
+    return remember(signerStore, origin) {
+        AddSigningDeviceScreenState(signerStore, origin) { signer -> currentOnSaved(signer) }
     }
 }
 
 /**
- * Add a signer by scanning its **signing device's own export** — the sibling of
- * [ImportXpubScreen], reached from [AddSignerScreen]'s **Add signing device**
- * button.
+ * Add a wallet by scanning its **signing device's own export** — the sibling of
+ * [ImportXpubScreen], reached from [AddSignerScreen]'s **SeedSigner** and
+ * **Other signing device** rows.
  *
  * The two screens are near-identical on purpose: a name, a scan, a save, and the
  * same signer record at the end. What differs is the QR they expect. The
@@ -302,10 +317,9 @@ fun rememberAddSigningDeviceScreenState(
  * animation of fountain-coded frames, which is why this screen's scanner keeps
  * decoding until the export is whole and shows how much of it has arrived.
  *
- * Pointing the wrong screen at the wrong code is expected — the two buttons sit
- * next to each other — so each says plainly what it did not get, rather than
- * complaining about Base58 for a payload that was never Base58 in the first
- * place.
+ * Pointing the wrong screen at the wrong code is expected — the rows sit next to
+ * each other — so each says plainly what it did not get, rather than complaining
+ * about Base58 for a payload that was never Base58 in the first place.
  *
  * The name validates inline and the save is refused until the name is set and an
  * export has decoded.
@@ -372,7 +386,7 @@ fun AddSigningDeviceScreen(
             OutlinedTextField(
                 value = state.name,
                 onValueChange = state::onNameChange,
-                label = { Text("signer name") },
+                label = { Text("wallet name") },
                 placeholder = { Text("Cold storage") },
                 singleLine = true,
                 isError = state.nameError != null,
@@ -392,7 +406,7 @@ fun AddSigningDeviceScreen(
             if (state.cameraDenied) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Camera permission is required \u2014 signers are imported by " +
+                    text = "Camera permission is required \u2014 wallets are imported by " +
                         "scanning the signer's QR.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -442,7 +456,7 @@ fun AddSigningDeviceScreen(
                 onClick = state::import,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Add signer")
+                Text("Add wallet")
             }
 
             Spacer(modifier = Modifier.height(24.dp))
@@ -535,7 +549,10 @@ private fun DecodedAccountConfirmation(
 private fun AddSigningDeviceScreenPreview() {
     XbtWalletTheme {
         AddSigningDeviceScreen(
-            state = AddSigningDeviceScreenState(SignerStore(NoopKeyValueStore)) {},
+            state = AddSigningDeviceScreenState(
+                SignerStore(NoopKeyValueStore),
+                SignerOrigin.SEEDSIGNER_UR,
+            ) {},
             onBack = {},
         )
     }

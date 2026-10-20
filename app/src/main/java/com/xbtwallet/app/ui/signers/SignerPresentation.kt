@@ -32,14 +32,24 @@ internal const val SHORTENED_HEAD_CHARS = 10
 internal const val SHORTENED_TAIL_CHARS = 6
 
 /**
- * The word on the tag a signer wears when its key came off a signing device.
+ * The word on the tag a signer wears when its key came off a **SeedSigner**.
  *
- * This is deliberately the device family's own name rather than the transfer
- * method: the UR path can carry a Keystone or a Jade export as readily as a
- * SeedSigner one, but the user asked for "seedsigner" here and this is the one
- * place the wording lives, so a later rename is a one-line change.
+ * This is deliberately the device family's own name. It is the word the first
+ * row of the Add-wallet chooser promises, and this is the one place the wording
+ * lives, so a later rename is a one-line change.
  */
-internal const val SIGNING_DEVICE_TAG_LABEL = "seedsigner"
+internal const val SEEDSIGNER_TAG_LABEL = "seedsigner"
+
+/**
+ * The word on the tag a signer wears when its key came off *another* signing
+ * device — Keystone, Jade, or anything else that exports BC-UR.
+ *
+ * Deliberately not "seedsigner": the user told us only that the device was not a
+ * SeedSigner, and a tag that claimed more than that would be a lie about where
+ * the key came from. It is also not the grey "watch-only" pill, which means a
+ * key that arrived as plain text.
+ */
+internal const val SIGNING_DEVICE_TAG_LABEL = "signing device"
 
 /**
  * The accent a signer's tag is painted in.
@@ -52,18 +62,26 @@ internal enum class SignerTagAccent {
     /** The calm grey of the original watch-only pill. */
     NEUTRAL,
 
-    /** The theme's orange, worn by a key that came off a signing device. */
+    /** The theme's orange, worn by a key that came off a SeedSigner. */
     ORANGE,
+
+    /**
+     * A neutral-but-distinct accent, worn by a key that came off some other
+     * signing device. Not the orange (which would claim SeedSigner) and not the
+     * grey (which would claim a text xpub); the view layer maps it to the
+     * palette's calm blue.
+     */
+    DEVICE,
 }
 
 /**
  * The tag a signer wears: the word and the accent it is painted in.
  *
- * [Signer.importedVia] decides it. A key read off a signing device over BC-UR
- * wears "seedsigner" in orange — it arrived through the deliberate, hardware-in-
- * hand path, and the tag is how a user tells it apart from a key that was just
- * scanned or pasted. Everything else keeps the original grey "watch-only" pill,
- * unchanged, because for a text xpub that word is still exactly right.
+ * [Signer.importedVia] decides it — the origin the chooser declared. A key read
+ * off a SeedSigner over BC-UR wears "seedsigner" in orange; a key read off any
+ * other signing device wears "signing device" in the blue; and a key that
+ * arrived as plain text keeps the original grey "watch-only" pill, unchanged,
+ * because for a text xpub that word is still exactly right.
  */
 internal data class SignerTag(val label: String, val accent: SignerTagAccent)
 
@@ -76,5 +94,6 @@ internal data class SignerTag(val label: String, val accent: SignerTagAccent)
 internal fun signerTagFor(signer: Signer): SignerTag =
     when (signer.importedVia) {
         SignerOrigin.TEXT_QR -> SignerTag(signer.typeLabel, SignerTagAccent.NEUTRAL)
-        SignerOrigin.SIGNING_DEVICE_UR -> SignerTag(SIGNING_DEVICE_TAG_LABEL, SignerTagAccent.ORANGE)
+        SignerOrigin.SEEDSIGNER_UR -> SignerTag(SEEDSIGNER_TAG_LABEL, SignerTagAccent.ORANGE)
+        SignerOrigin.SIGNING_DEVICE_UR -> SignerTag(SIGNING_DEVICE_TAG_LABEL, SignerTagAccent.DEVICE)
     }

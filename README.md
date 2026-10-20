@@ -8,25 +8,30 @@ not a wallet. MIT licensed. See [PLAN.md](PLAN.md) for the full plan and
 roadmap.
 
 Status: **v0.1.0 in progress** — the skeleton, the crypto layer, and the
-signer-first restructure:
+wallet-first restructure (the unit the app organises around is a **wallet**; the
+physical device is the **signer**):
 
-- **Signers** — the app's unit of organisation. A signer is a name plus a
-  type, and today the only type is a watch-only xpub. Signers are a plain list
-  (there is no "active signer"), and everything that acts on one happens on
-  that signer's own screen.
-- **Add signer** — a chooser: *Add watch-only xpub* leads to the import form,
-  where an account-level `xpub`/`ypub`/`zpub` is validated clean-room
-  (Base58Check, version bytes, compressed key, checksum) and stored as a
-  watch-only signer. *Create hot wallet* is shown disabled — no seed code exists.
-- **Signers list** — every saved signer, oldest first, with its type badge and a
-  head…tail key snippet; tap to open, **⋮** → *Remove signer* (with a confirm
+- **Wallets** — the app's unit of organisation. A wallet is a name plus a type,
+  and today the only type is a watch-only xpub. Wallets are a plain list (there is
+  no "active wallet"), and everything that acts on one happens on that wallet's
+  own screen.
+- **Add wallet** — a chooser of three rows: **SeedSigner** and **Other signing
+  device** both read an animated BC-UR export (the *Export Xpub → single-sig →
+  native segwit → Animated* path on a SeedSigner; Keystone and Jade the same way),
+  and **Watch-only xpub** scans a plain text QR, where an
+  account-level `xpub`/`ypub`/`zpub` is validated clean-room (Base58Check, version
+  bytes, compressed key, checksum) and stored as a watch-only wallet. The row the
+  user tapped is what the wallet records as its *origin*, which is what it wears
+  as a tag: orange *seedsigner*, blue *signing device*, or grey *watch-only*.
+- **Wallets list** — every saved wallet, oldest first, with its tag and a
+  head…tail key snippet; tap to open, **⋮** → *Remove wallet* (with a confirm
   dialog) to delete.
-- **Signer screen** — one signer's own screen: its **live balance** from your
+- **Wallet screen** — one wallet's own screen: its **live balance** from your
   own Electrum server (sats first, then the coin amount and two clearly-marked
   placeholder fiat lines), then **UTXOs**, **Addresses**, and **Send**/**Receive**
   shown disabled until the air-gapped signing flow exists, with the account's
   **transaction history** at the foot of the screen.
-- **Transactions (on the signer screen)** — every transaction touching any
+- **Transactions (on the wallet screen)** — every transaction touching any
   scanned address of the account (both chains), deduped by txid and ordered
   *unconfirmed first, then newest block first*, capped at the latest 50. Each row
   shows the wallet's **net effect** — `+0.00012345 XBT in` in green, `-0.00012345
@@ -48,14 +53,14 @@ signer-first restructure:
 
 All crypto is public-key only: no private key, seed or signing code exists
 anywhere in this repository. The receive QR and sending are
-still missing, and the two fiat figures on the signer screen are **hardcoded
+still missing, and the two fiat figures on the wallet screen are **hardcoded
 placeholders** — this build requests no price feed from anyone. Tor is bundled
 for `.onion` endpoints only; clearnet connections to a LAN node stay direct.
 
 ## Home screen
 
-Top to bottom: **Server** (private Electrum endpoint), **Add signer**, and
-**Signers**.
+Top to bottom: **Server** (private Electrum endpoint), **Add wallet**, and
+**Wallets**.
 
 Under the Server button the screen shows the live server status: the hint
 *Connect to your own Electrum server* until an endpoint is saved, then a status
@@ -65,15 +70,15 @@ first reply. A saved endpoint is checked as soon as the screen appears and then
 once a minute while it stays on screen; see
 [Private Electrum server](#private-electrum-server).
 
-**Add signer** opens the Add-signer chooser: **Add watch-only xpub** leads to the
-import form, and **Create hot wallet** is shown, greyed out and tagged *Not
-available yet*. **Signers** opens the list of saved signers — each shown by
-its name, a *watch-only* type badge and a head…tail snippet of its key — and
-tapping one opens that signer's own screen. Each row has a **⋮** menu whose
-*Remove signer* asks for confirmation first. There is deliberately no "active
-signer" any more: the old active-signer card, the **Select active xpub** picker
-and the standalone **Addresses** button are gone, and per-signer screens
-(addresses included) are reached by opening a signer instead.
+**Add wallet** opens the Add-wallet chooser (three rows: *SeedSigner*, *Other
+signing device*, *Watch-only xpub*). **Wallets** opens the list of saved wallets —
+each shown by its name, its tag (*watch-only*, *seedsigner* or *signing device*)
+and a head…tail snippet of its key — and tapping one opens that wallet's own
+screen. Each row has a **⋮** menu whose *Remove wallet* asks for confirmation
+first. There is deliberately no "active wallet": the old active-signer card, the
+**Select active xpub** picker and the standalone **Addresses** button are gone,
+and per-wallet screens (addresses included) are reached by opening a wallet
+instead.
 
 ## Navigation
 
@@ -81,33 +86,46 @@ Screens are an enum and a `when` — no navigation library (PLAN.md §2.4) — o
 small **back stack** that makes *back* mean exactly one thing: one level up.
 Navigating pushes a destination onto the stack; Android's back button pops it.
 
-- HOME → **Add signer** → the paste form → back → the chooser → back → HOME.
-- A signer's screen → **UTXOs** (or **Addresses**) → back → that signer's screen.
+- HOME → **Add wallet** → the chooser → a form → back → the chooser → back → HOME.
+- A wallet's screen → **UTXOs** (or **Addresses**) → back → that wallet's screen.
 
-Each stack entry carries its own argument, so a per-signer screen remembers
-*which* signer it is showing: opening UTXOs from one signer and backing out can
-never leave the app pointing at another. The stack survives a rotation, and back
-at HOME is left to the system (it leaves the app) rather than swallowed. Saving a
-new signer resets the walk to HOME → Signers, so back from the list does not
-return into a form that has already been submitted.
+Each stack entry carries its own argument, so a per-wallet screen remembers
+*which* wallet it is showing: opening UTXOs from one wallet and backing out can
+never leave the app pointing at another. The two animated rows of the chooser open
+the *same* scanner, so the entry also carries the **origin** the user declared by
+tapping a row — that is what the saved wallet is stamped with, and a rotation must
+not lose it. The stack survives a rotation, and back at HOME is left to the system
+(it leaves the app) rather than swallowed. Saving a new wallet resets the walk to
+HOME → Wallets, so back from the list does not return into a form that has already
+been submitted.
 
-## Add signer
+## Add wallet
 
-`Add signer` is a fork, not a form — the screen opens with a plain-language
-intro naming both ways to pair with a signer, then shows the two buttons:
+`Add wallet` is a chooser, not a form — a plain-language intro saying what a wallet
+*is* on this phone ("the phone holds public keys only … keys never leave your
+signer"), then three rows:
 
-- **Add watch-only xpub** — the live path. It takes a signer name plus an
-  account-level extended public key and stores a watch-only signer. The intro
-  says what it is for: a watch-only xpub is for use with your SeedSigner — or any
-  wallet you want to keep an eye on — without the seed ever touching this phone.
-- **Create hot wallet** — **not available yet**. Generating a seed on this phone
-  is a capability this build does not have, so the button is disabled and
-  carries a small *Not available yet* tag. The copy presents it as the
-  convenience it will be — *like cash in your pocket … for small, everyday
-  amounts* — not as something the app is talking you out of. There is no seed
-  generation code behind it.
+- **SeedSigner** (filled) — the primary path. Reads the SeedSigner's own **animated
+  BC-UR `crypto-account` export**: *Export Xpub → single-sig → native segwit →
+  Animated QR*, then scan it here. The wallet is recorded with the **seedsigner**
+  origin and wears the orange tag.
+- **Other signing device** (tonal) — the same animated BC-UR payload, read off a
+  Keystone, a Jade or anything else that speaks it. Recorded with the
+  **signing-device** origin, so it wears the blue *signing device* tag rather than
+  claiming to be a SeedSigner.
+- **Watch-only xpub** (outlined) — a plain text QR from any coordinator: a bare
+  `xpub`/`ypub`/`zpub`, a `bitcoin:` URI, or a `[fingerprint/path]xpub` expression.
+  A Coldcard's text export lands here, which is why Coldcard is deliberately *not*
+  promised on the two animated rows. Recorded with the **text-qr** origin and
+  wears the grey *watch-only* tag.
 
-The pasted key is validated against the public specifications:
+Why three rows rather than one clever scanner: the animated path needs the camera
+held on a moving code until the export is whole, and saying so up front is
+friendlier than a generic scanner that guesses. The two animated rows share a
+scanner but not a meaning — only the row the user tapped says whether the device
+in hand is a SeedSigner or something else, so that tap is what the record keeps.
+
+The scanned key is validated against the public specifications:
 
 - **Base58Check** — alphabet, then the 4-byte double-SHA256 checksum.
 - **Version bytes** — `xpub`, `ypub` and `zpub` are all accepted, because all
@@ -117,50 +135,60 @@ The pasted key is validated against the public specifications:
 - **Key data** — must be a 33-byte compressed point that actually lies on the
   curve.
 
-The app is native-segwit single-sig, so whatever you paste is treated as a
+The app is native-segwit single-sig, so whatever a QR carries is treated as a
 **BIP-84-style account key** and every address is derived as P2WPKH (`bc1q…`).
-A key on the signer's screen can also be **scanned**: the *Scan QR* button above
-the field opens a small camera **panel** right there on the import screen — not a
-full-screen capture activity, and always in portrait like the rest of the app —
-and routes the payload — a bare key, or a `bitcoin:` URI with its scheme and
-parameters stripped — into that same field and the same validator, so a scan can
-never be accepted where a paste would be refused. The camera is ZXing
-(`zxing-android-embedded`, Apache-2.0, no Google dependency) driving the
-library's `DecoratedBarcodeView` inside the app's own activity. Pasting works
-whether or not the camera permission is granted; a refusal says so and leaves the
-field usable.
-The screen says so, and it warns that a manual import carries no master
-fingerprint or derivation path. Signers are stored as a JSON list (id, name,
-type, xpub, timestamp) under the `signers` key in `SharedPreferences` — a list
-keyed by id from day one, per PLAN.md's multi-signer stance. An install that
-predates the signer rename had its xpubs under the old `wallets` key; the store
-converts that blob to watch-only signers on first read and writes it forward, so
-no saved xpub is lost.
+The text path is **QR-only** — there is no paste field, because the QR is the
+air-gapped channel and the only one that can carry an account's metadata — and
+the *Scan QR* button opens a small camera **panel** right there on the import
+screen, not a full-screen capture activity, and always in portrait like the rest
+of the app. The payload is routed — a bare key, a `bitcoin:` URI with its scheme
+and parameters stripped, or a `[fingerprint/path]xpub` expression — through the
+same validator, so the camera can never accept what a keyboard would have refused.
+The camera is ZXing (`zxing-android-embedded`, Apache-2.0, no Google dependency)
+driving the library's `DecoratedBarcodeView` inside the app's own activity. The
+camera permission is asked for by this app, not the library; a refusal says so and
+leaves the screen usable.
 
-## Signers
+The animated rows use the same name-and-save shape but a different scanner: it
+keeps decoding **fountain-coded BC-UR frames** until the export is whole, showing
+how much of it has arrived, and refuses a text QR in its own words rather than
+complaining about Base58.
 
-The **Signers** screen is the app's inventory. Every saved signer is listed
-oldest first, by the name the user gave it, with a *watch-only* type badge and a
+Wallets are stored as a JSON list (id, name, type, xpub, timestamp, import origin)
+under the `signers` key in `SharedPreferences` — a list keyed by id from day one,
+per PLAN.md's multi-wallet stance. The **origin** each wallet records is the row
+the user tapped: `text-qr`, the animated SeedSigner path, or the other-device path.
+`signing-device-ur` is the wire value that predates the split and now means *the
+SeedSigner path* — every record an earlier build wrote with it was one, so an
+existing wallet keeps the tag it is showing. An install that predates the earlier
+rename had its xpubs under the old `wallets` key; the store converts that blob to
+watch-only wallets on first read and writes it forward, so no saved xpub is lost.
+
+## Wallets
+
+The **Wallets** screen is the app's inventory. Every saved wallet is listed
+oldest first, by the name the user gave it, with its tag (*watch-only* in grey,
+*seedsigner* in the theme's orange, *signing device* in a calm blue) and a
 snippet of its key — the first 10 and last 6 characters, elided in the middle, so
 two keys are told apart at a glance without an xpub filling the row. Tapping a
-row opens that signer's own screen. When nothing is saved yet the screen says so
-and offers an **Add signer** shortcut, so an empty list is never a dead end.
+row opens that wallet's own screen. When nothing is saved yet the screen says so
+and offers an **Add wallet** shortcut, so an empty list is never a dead end.
 
-Each row has a **⋮** menu with *Remove signer*, which opens a confirm dialog
+Each row has a **⋮** menu with *Remove wallet*, which opens a confirm dialog
 (name plus the fact that only the public key is stored here, so nothing is
 deleted on the signer itself). Deleting writes straight through the store and the
-list drops the row; if a screen was still pointing at the removed signer, its
+list drops the row; if a screen was still pointing at the removed wallet, its
 stack entry stops resolving and the app restarts at Home rather than
 crashing. The screen keeps only the two bits of interaction state that belong to
-it (which row's menu is open, which signer is awaiting confirmation); the store
+it (which row's menu is open, which wallet is awaiting confirmation); the store
 is written on the screen that owns it.
 
-## Signer screen
+## Wallet screen
 
-Tapping a signer opens its own screen — the place every per-signer action lives,
-and the first screen that talks to the chain. Top to bottom: the signer's name
-and its *watch-only* badge, its **balance**, the four actions, the account key,
-and the account's **transaction history**.
+Tapping a wallet opens its own screen — the place every per-wallet action lives,
+and the first screen that talks to the chain. Top to bottom: the wallet's name,
+the sync spinner while a rescan runs, and its tag, then its **balance**, the four
+actions, the account key, and the account's **transaction history**.
 
 **Balance** is this account's confirmed *plus* unconfirmed satoshis, read from
 your own Electrum server. The scan runs off the UI thread and the card shows
@@ -207,7 +235,7 @@ Rows are static: no tap-to-copy and no detail view.
 
 ## Chain queries
 
-Under the signer screens is a small chain layer (`app/src/main/java/com/xbtwallet/app/chain/`),
+Under the wallet screens is a small chain layer (`app/src/main/java/com/xbtwallet/app/chain/`),
 still Android-free:
 
 - **Scripthash** — Electrum indexes scripts by `sha256(scriptPubKey)` **reversed**,
@@ -226,10 +254,10 @@ The three scripthash RPCs (`get_history`, `get_balance`, `listunspent`) run over
 **one connection** per scan (`ElectrumClient.withChainSession`), together with the
 transaction fetches and the tip lookup the history rows need: an account scan is
 dozens of requests, and a connect/TLS/close per address would make an ordinary
-balance look like a port scan to the user's own server. Each signer's scan state
-lives in an app-scoped store for the app's lifetime, so entering a signer starts a
+balance look like a port scan to the user's own server. Each wallet's scan state
+lives in an app-scoped store for the app's lifetime, so entering a wallet starts a
 scan only when none is running and a scan in flight survives navigating between
-that signer's screens; re-entering within two minutes reuses the last completed
+that wallet's screens; re-entering within two minutes reuses the last completed
 scan instead of re-running it (the manual Refresh always forces one).
 
 ## UTXOs
@@ -242,7 +270,7 @@ control, no freezing and no selection yet; those are v0.2.0.
 
 ## Addresses
 
-The addresses viewer shows the addresses derived from a signer's account key:
+The addresses viewer shows the addresses derived from a wallet's account key:
 external chain `0/i` under the **Receive** tab and internal chain `1/i` under
 **Change**, both native segwit P2WPKH. Each row shows its derivation index and,
 now, what the scan learned about it — *used*, *unused*, or the accent-marked
@@ -301,7 +329,7 @@ so it can be unit-tested on the JVM against a mock Electrum responder:
 ./gradlew testDebugUnitTest   # client handshake, ping, chain RPCs, JSON, failure modes
 ```
 
-The same client carries the three `blockchain.scripthash.*` queries the signer
+The same client carries the three `blockchain.scripthash.*` queries the wallet
 screen's balance and UTXOs are built from, plus `blockchain.transaction.get` and
 `blockchain.headers.subscribe` for the history rows, over one connection per scan
 (`withChainSession`). Scripthash requests never touch the connection log — a

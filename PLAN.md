@@ -184,21 +184,23 @@ What exists right now, in this repository:
 - Android/Kotlin + Compose (Material 3) single-module project, dark theme,
   Gradle Kotlin DSL, version catalog, state-based navigation (no nav library): a
   `Screen` enum over a small back stack — push to navigate, pop to go back one
-  level, with each per-signer entry carrying its own signer id (NavStack.kt).
-- A home screen, top to bottom: **Server**, **Add signer** and **Signers**.
+  level, with each per-wallet entry carrying its own wallet id, and the chooser's
+  declared import origin riding with the form it opened (NavStack.kt).
+- A home screen, top to bottom: **Server**, **Add wallet** and **Wallets**.
   Under the Server button the screen shows live server status — connected /
   disconnected / checking — refreshed by a heartbeat while it is on display.
-  Signers are a plain list: there is no "active signer". **Add signer** opens a
-  chooser — an intro naming both ways to pair, *Add watch-only xpub* leading to
-  the paste-and-validate form, and *Create hot wallet* shown disabled with a
-  *not available yet* tag, because seed generation on the phone is a capability
-  this build does not have. The Signers list shows every
-  saved signer oldest first, with its type badge and a head…tail key snippet, and
-  offers a confirm-gated remove per row. The
+  Wallets are a plain list: there is no "active wallet". **Add wallet** opens the
+  three-row chooser — **SeedSigner** and **Other signing device** (both animated
+  BC-UR exports, each declaring which device the user tapped) and **Watch-only
+  xpub** (a plain text QR). There is deliberately no *Create hot wallet* button:
+  seed generation on the phone is a capability this app does not have and will
+  not grow. The Wallets list shows every saved wallet oldest first, with its
+  origin tag (grey *watch-only*, orange *seedsigner*, blue *signing device*) and a
+  head…tail key snippet, and offers a confirm-gated remove per row. The
   old active-signer card, **Select active xpub** picker and standalone
-  **Addresses** button are gone; the Addresses viewer is reopened under a signer.
+  **Addresses** button are gone; the Addresses viewer is reopened under a wallet.
   The old Receive/Send placeholders are gone.
-- **Signer screens** (v0.1.0's first chain-data feature). Opening a signer shows
+- **Wallet screens** (v0.1.0's first chain-data feature). Opening a wallet shows
   its **balance** — confirmed plus unconfirmed satoshis of that xpub, read from
   the user's own Electrum server, with a visible loading state, a *Connect a
   server* state when no endpoint is saved, and a retryable error when the server
@@ -226,16 +228,18 @@ What exists right now, in this repository:
   RIPEMD-160 / HMAC-SHA512, bech32 + bech32m, secp256k1 public-point arithmetic,
   BIP-32 parsing and public-only child derivation, P2WPKH address building.
   Public keys only — there is no private-key, seed or signing code path.
-- **Storage** (`com.xbtwallet.app.data/`): a JSON signer list in
+- **Storage** (`com.xbtwallet.app.data/`): a JSON wallet list in
   SharedPreferences behind a `KeyValueStore` interface, so the store is
-  JVM-testable. A signer is an id, a name and a type — `WatchOnlyXpub(xpub)`
-  today; there is no active-signer id and no seed storage. Older `wallets` blobs
-  are migrated to watch-only signers on first read. Plus the Electrum server
+  JVM-testable. A wallet is an id, a name, a type — `WatchOnlyXpub(xpub)`
+  today — and the import origin its chooser row declared (`text-qr`,
+  `signing-device-ur` for the SeedSigner path, `other-signing-device-ur` for any
+  other device); there is no active-wallet id and no seed storage. Older `wallets`
+  blobs are migrated to watch-only wallets on first read. Plus the Electrum server
   settings from the previous iteration, behind a `ServerSettings` interface for
   the same reason.
 - **Networking**: a clean-room Electrum JSON-RPC client (direct TLS/TCP, no Tor
   yet) used by the private-server screen, via its quiet `server.ping` probe by
-  the home screen's status heartbeat, and via its scripthash RPCs by the signer
+  the home screen's status heartbeat, and via its scripthash RPCs by the wallet
   screens' balance and UTXO views.
 - **Tests**: 163 JVM unit tests, green, including the official BIP-84 and BIP-173
   vectors, the published RIPEMD-160 vectors, an Electrum scripthash vector, the

@@ -20,6 +20,7 @@ import com.xbtwallet.app.data.AppSettingsStore
 import com.xbtwallet.app.data.ServerSettingsStore
 import com.xbtwallet.app.data.SharedPreferencesKeyValueStore
 import com.xbtwallet.app.data.Signer
+import com.xbtwallet.app.data.SignerOrigin
 import com.xbtwallet.app.data.SignerStore
 import com.xbtwallet.app.data.SnapshotStore
 import com.xbtwallet.app.ui.home.HomeScreen
@@ -38,6 +39,7 @@ import com.xbtwallet.app.ui.signers.SignersScreen
 import com.xbtwallet.app.ui.signers.UtxosScreen
 import com.xbtwallet.app.ui.signers.rememberAddSigningDeviceScreenState
 import com.xbtwallet.app.ui.signers.rememberImportXpubScreenState
+import com.xbtwallet.app.ui.signers.routeFor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -97,12 +99,14 @@ enum class Screen { HOME, SERVER, SIGNERS, ADD_SIGNER, IMPORT_XPUB, ADD_SIGNING_
  * ([NavStack.Saver]); each entry then carries its own signer id, so a rotation
  * cannot land the user on a different signer's screen.
  *
- * **The add-signer walk.** [Screen.ADD_SIGNER] is the chooser and its live
- * branches push [Screen.IMPORT_XPUB] (text QR) or [Screen.ADD_SIGNING_DEVICE]
- * (animated BC-UR) for the form, so back from either form returns to the chooser
- * that sent you there. Both save into the same store through the same call.
- * Saving resets the stack to HOME → [Screen.SIGNERS]
- * rather than pushing on top of the form: the new signer is immediately visible
+ * **The add-wallet walk.** [Screen.ADD_SIGNER] is the chooser and its three rows
+ * push a form: **SeedSigner** and **Other signing device** both push
+ * [Screen.ADD_SIGNING_DEVICE] (declaring `SEEDSIGNER_UR` and
+ * `SIGNING_DEVICE_UR` respectively — the origin rides on the route), and
+ * **Watch-only xpub** pushes [Screen.IMPORT_XPUB]. So back from any form returns
+ * to the chooser that sent you there. All three save into the same store through
+ * the same call. Saving resets the stack to HOME → [Screen.SIGNERS]
+ * rather than pushing on top of the form: the new wallet is immediately visible
  * where the add most often starts, and a back press from the list goes Home, not
  * back into a form that has already been submitted.
  */
@@ -279,8 +283,11 @@ fun XbtWalletApp() {
         )
 
         Screen.ADD_SIGNER -> AddSignerScreen(
-            onAddWatchOnly = { nav.push(Route(Screen.IMPORT_XPUB)) },
-            onAddSigningDevice = { nav.push(Route(Screen.ADD_SIGNING_DEVICE)) },
+            // One handler for the three rows. What a row opens — destination *and*
+            // the origin its form will record — is [routeFor], so the two animated
+            // rows, which share a screen, cannot be wired to the same origin by
+            // accident, and a JVM test pins the mapping.
+            onChoose = { row -> nav.push(routeFor(row)) },
             onBack = { nav.pop() },
         )
 
@@ -302,8 +309,15 @@ fun XbtWalletApp() {
         // save, same signer record — a scanner that assembles animated BC-UR
         // `crypto-account` frames instead of reading one text QR. It lands the
         // user in the same place, for the same reason.
+        //
+        // Which chooser row opened it decides the origin the record is stamped
+        // with. A route saved by a build that had only one animated row restored
+        // with no origin at all, and that missing origin reads as the SeedSigner
+        // path — which is exactly what the store's own migration does to the
+        // records such a build wrote, so the two agree.
         Screen.ADD_SIGNING_DEVICE -> {
-            val state = rememberAddSigningDeviceScreenState(signerStore) { _: Signer ->
+            val origin = route.origin ?: SignerOrigin.SEEDSIGNER_UR
+            val state = rememberAddSigningDeviceScreenState(signerStore, origin) { _: Signer ->
                 homeState.refresh()
                 nav.reset()
                 nav.push(Route(Screen.SIGNERS))

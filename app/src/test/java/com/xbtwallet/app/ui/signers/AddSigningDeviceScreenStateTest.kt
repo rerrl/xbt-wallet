@@ -39,14 +39,25 @@ class AddSigningDeviceScreenStateTest {
     private val backing = InMemoryStore()
     private var saved: Signer? = null
 
-    private fun state(): AddSigningDeviceScreenState =
-        AddSigningDeviceScreenState(SignerStore(backing, now = { 42L }, newId = { "id-1" })) { saved = it }
+    /**
+     * The screen state for a scan, with the origin the chooser row declared.
+     *
+     * SeedSigner by default because that is the first row and the app's centre of
+     * gravity; the other-device tests pass their own.
+     */
+    private fun state(origin: SignerOrigin = SignerOrigin.SEEDSIGNER_UR): AddSigningDeviceScreenState =
+        AddSigningDeviceScreenState(
+            SignerStore(backing, now = { 42L }, newId = { "id-1" }),
+            origin,
+        ) { saved = it }
 
     private fun frames() = UrTestVectors.bcrAnimated
 
     /** Feed a whole export and return the state, leaving it on the completed screen. */
-    private fun stateAfterAnimatedScan(): AddSigningDeviceScreenState {
-        val state = state()
+    private fun stateAfterAnimatedScan(
+        origin: SignerOrigin = SignerOrigin.SEEDSIGNER_UR,
+    ): AddSigningDeviceScreenState {
+        val state = state(origin)
         state.onCameraPermissionGranted()
         frames().forEach(state::onScanFrame)
         return state
@@ -264,15 +275,29 @@ class AddSigningDeviceScreenStateTest {
     }
 
     @Test
-    fun `a signer imported from a signing device records that origin`() {
-        val state = stateAfterAnimatedScan()
+    fun `a wallet imported from the SeedSigner row records that origin`() {
+        val state = stateAfterAnimatedScan(SignerOrigin.SEEDSIGNER_UR)
         state.onNameChange("Cold storage")
 
         state.import()
 
-        // The origin is the only thing that tells this signer apart from one
-        // typed in as text, and it is what earns it the orange tag — so it has to
-        // survive the save, not just sit on the state object.
+        // The declared row is the only thing that tells a SeedSigner import apart
+        // from another device's — both read the very same BC-UR export — so it has
+        // to survive the save, not just sit on the state object. It is also what
+        // earns the wallet the orange tag.
+        assertEquals(SignerOrigin.SEEDSIGNER_UR, saved?.importedVia)
+        assertEquals(SignerOrigin.SEEDSIGNER_UR, SignerStore(backing).list().single().importedVia)
+    }
+
+    @Test
+    fun `a wallet imported from the other-device row records that origin`() {
+        val state = stateAfterAnimatedScan(SignerOrigin.SIGNING_DEVICE_UR)
+        state.onNameChange("Keystone")
+
+        state.import()
+
+        // Same scan, same record, different declared origin — and so a different
+        // tag: the blue "signing device" rather than the orange "seedsigner".
         assertEquals(SignerOrigin.SIGNING_DEVICE_UR, saved?.importedVia)
         assertEquals(SignerOrigin.SIGNING_DEVICE_UR, SignerStore(backing).list().single().importedVia)
     }

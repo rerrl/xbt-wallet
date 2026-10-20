@@ -61,8 +61,9 @@ class SignerPresentationTest {
     //
     // The tag is the one place the import path is visible to the user, so the
     // rule lives here as plain Kotlin and is pinned without a UI: a key that came
-    // off a signing device wears "seedsigner" in orange, and everything else
-    // keeps the original grey "watch-only" pill.
+    // off a SeedSigner wears "seedsigner" in orange, a key off any other signing
+    // device wears "signing device" in the distinct blue, and a text xpub keeps
+    // the original grey "watch-only" pill.
 
     private fun signer(
         importedVia: SignerOrigin = SignerOrigin.TEXT_QR,
@@ -83,11 +84,42 @@ class SignerPresentationTest {
     }
 
     @Test
-    fun `a signing-device signer wears the orange seedsigner tag`() {
-        val tag = signerTagFor(signer(SignerOrigin.SIGNING_DEVICE_UR))
+    fun `a seedsigner signer wears the orange seedsigner tag`() {
+        val tag = signerTagFor(signer(SignerOrigin.SEEDSIGNER_UR))
 
         assertEquals("seedsigner", tag.label)
         assertEquals(SignerTagAccent.ORANGE, tag.accent)
+    }
+
+    @Test
+    fun `an other-device signer wears the distinct signing-device tag`() {
+        val tag = signerTagFor(signer(SignerOrigin.SIGNING_DEVICE_UR))
+
+        // Not "seedsigner" (the user did not say the device was one) and not the
+        // grey of a text xpub (it did not arrive as text) — its own word, in its
+        // own accent.
+        assertEquals("signing device", tag.label)
+        assertEquals(SignerTagAccent.DEVICE, tag.accent)
+        assertTrue(
+            "the signing-device accent must not be the grey of a text xpub",
+            tag.accent != SignerTagAccent.NEUTRAL,
+        )
+    }
+
+    /** Every origin answers with a tag, and no two accents collide. */
+    @Test
+    fun `each origin has its own tag and its own accent`() {
+        val tags = SignerOrigin.entries.map { signerTagFor(signer(it)) }
+
+        assertEquals(
+            setOf("watch-only", "seedsigner", "signing device"),
+            tags.map { it.label }.toSet(),
+        )
+        assertEquals(
+            "one accent per origin, no sharing",
+            SignerOrigin.entries.size,
+            tags.map { it.accent }.toSet().size,
+        )
     }
 
     @Test

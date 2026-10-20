@@ -537,7 +537,7 @@ class SignerChainState(
             // The stored xpub is unreadable. There is nothing to scan and no
             // network to blame, so say exactly that.
             snapshot = null
-            errorMessage = "This signer's key could not be read. Delete it and import the xpub again."
+            errorMessage = "This wallet's key could not be read. Delete it and import the xpub again."
             phase = ChainPhase.ERROR
             isSyncing = false
             syncFailed = false

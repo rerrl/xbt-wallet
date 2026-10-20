@@ -40,12 +40,17 @@ sealed interface SignerType {
 /**
  * How a signer's account reached this phone.
  *
- * This is a *provenance* field, not a security property: both paths end by
- * storing the very same [SignerType.WatchOnlyXpub], and neither of them gives
- * the app anything it could sign with. What differs is only where the user got
- * the key — typed/pasted or scanned as text ([TEXT_QR]) versus read off an
- * air-gapped signing device over animated BC-UR ([SIGNING_DEVICE_UR]) — and the
+ * This is a *provenance* field, not a security property: every path ends by
+ * storing the very same [SignerType.WatchOnlyXpub], and none of them gives the
+ * app anything it could sign with. What differs is only where the user got the
+ * key — typed/pasted or scanned as text ([TEXT_QR]), read off a SeedSigner's
+ * crypto-account export over animated BC-UR ([SEEDSIGNER_UR]), or read off some
+ * *other* signing device's export the same way ([SIGNING_DEVICE_UR]) — and the
  * one place that matters today is the tag the UI shows.
+ *
+ * The three paths are also the three rows of the Add-wallet chooser, which is
+ * what makes the origin *declared* rather than inferred from the payload: the
+ * user says which device they are holding, and that answer is what is recorded.
  *
  * [storageValue] is the wire form written into the JSON blob. It is spelled out
  * rather than reusing [name] so a rename of the Kotlin constant can never
@@ -55,8 +60,32 @@ enum class SignerOrigin(val storageValue: String) {
     /** The key was scanned or pasted as a plain text xpub — the original path. */
     TEXT_QR("text-qr"),
 
-    /** The key came off a signing device's crypto-account export, over animated BC-UR. */
-    SIGNING_DEVICE_UR("signing-device-ur"),
+    /**
+     * The key came off a **SeedSigner's** crypto-account export, over animated
+     * BC-UR. This is the path the chooser's first row leads to, and the one that
+     * wears the orange "seedsigner" tag.
+     *
+     * Its wire value is deliberately the one this field has written for a BC-UR
+     * import from the beginning: before the origin was split in two, *every*
+     * signing-device import was recorded as `signing-device-ur`. Because the
+     * SeedSigner path is the only one that existed — and the only BC-UR signer
+     * this app was built around — reading a stored `signing-device-ur` back as
+     * [SEEDSIGNER_UR] *is* the migration. Nothing already on disk has to be
+     * rewritten, and a record Andrew imported before this build keeps exactly the
+     * tag it is showing today.
+     */
+    SEEDSIGNER_UR("signing-device-ur"),
+
+    /**
+     * The key came off some **other** signing device's crypto-account export
+     * (Keystone, Jade), over animated BC-UR.
+     *
+     * A wire value of its own, because the historical `signing-device-ur` now
+     * means SeedSigner: only this build writes this one, so no stored record
+     * needs a rule for it. It wears a neutral-but-distinct "signing device" tag,
+     * because the orange one would claim more than the user told us.
+     */
+    SIGNING_DEVICE_UR("other-signing-device-ur"),
     ;
 
     companion object {
@@ -65,10 +94,14 @@ enum class SignerOrigin(val storageValue: String) {
          *
          * Two cases land on that default and both want it: a blob written before
          * this field existed (no key at all) and a value this build does not
-         * recognise. Guessing [SIGNING_DEVICE_UR] would be the dangerous way to
-         * be wrong — it would claim a key came off a hardware screen when
-         * nothing says it did — whereas [TEXT_QR] is the conservative, "we only
-         * know it is a key" answer.
+         * recognise. Guessing a device path would be the dangerous way to be
+         * wrong — it would claim a key came off a hardware screen when nothing
+         * says it did — whereas [TEXT_QR] is the conservative, "we only know it
+         * is a key" answer.
+         *
+         * The one value that is *not* a fallback is the historical
+         * `signing-device-ur`, which belongs to [SEEDSIGNER_UR] and is matched by
+         * the ordinary lookup below — see that constant for why.
          */
         fun fromStorage(value: String?): SignerOrigin =
             SignerOrigin.entries.firstOrNull { it.storageValue == value } ?: TEXT_QR
