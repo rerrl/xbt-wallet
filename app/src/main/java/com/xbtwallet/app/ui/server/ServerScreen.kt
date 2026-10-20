@@ -1,6 +1,7 @@
 package com.xbtwallet.app.ui.server
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -13,9 +14,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -43,7 +48,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.text.KeyboardOptions
+import com.xbtwallet.app.data.SavedServer
+import com.xbtwallet.app.data.SavedServersStore
 import com.xbtwallet.app.data.ServerSettingsStore
+import com.xbtwallet.app.data.SharedPreferencesKeyValueStore
 import com.xbtwallet.app.electrum.ElectrumClient
 import com.xbtwallet.app.electrum.ElectrumProtocol
 import com.xbtwallet.app.electrum.ElectrumRouting
@@ -67,12 +75,17 @@ enum class ConnectionStatus { IDLE, TESTING, CONNECTED, FAILED }
  * connection log. Held outside the composable so the log survives recomposition
  * while a test is running.
  *
+ * It also owns the user's **saved presets** — named endpoints they can drop back
+ * into the fields. A preset only refills the form ([applyPreset]); saving,
+ * deleting and dialling all stay explicit actions.
+ *
  * Transport is one switch, not a protocol list — see [ServerSsl] for the rules
  * that keep the port field in step with it.
  */
 @Stable
 class ServerScreenState(
     private val store: ServerSettingsStore,
+    private val savedServersStore: SavedServersStore,
     private val scope: CoroutineScope,
 ) {
 
@@ -103,6 +116,34 @@ class ServerScreenState(
     /** The protocol matching the switch — what is dialled and stored. */
     val protocol: ElectrumProtocol
         get() = ServerSsl.protocolFor(useSsl)
+
+    /**
+     * Whether the entered endpoint would pass the same checks [testConnection]
+     * makes before dialling: a host is given, the port is in range, and an onion
+     * host is one Tor could actually serve.
+     *
+     * The save-preset action is gated on this, so a preset can never be a record
+     * of an endpoint the app itself would refuse to test.
+     */
+    val formIsValid: Boolean
+        get() {
+            val trimmedHost = host.trim()
+            val portNumber = port.toIntOrNull()
+            return trimmedHost.isNotEmpty() &&
+                portNumber != null && portNumber in 1..65535 &&
+                ElectrumRouting.onionAddressProblem(trimmedHost) == null
+        }
+
+    /**
+     * The user's saved connection presets, in the order they were added — the
+     * list the picker shows.
+     *
+     * Seeded from [SavedServersStore.list] and re-read from the store after every
+     * save or delete, so what is on screen is what is on disk. Only
+     * [SavedServer.name] is ever rendered: a preset's host is a server address,
+     * and a saved server address is never shown in this app's UI.
+     */
+    val presets = mutableStateListOf<SavedServer>().also { it.addAll(savedServersStore.list()) }
 
     /** One line per log entry, oldest first. */
     val log = mutableStateListOf<String>()
@@ -141,6 +182,60 @@ class ServerScreenState(
 
     fun clearLog() {
         log.clear()
+    }
+
+    /**
+     * Refills the form from [preset] — and only refills it.
+     *
+     * Nothing here dials or reconnects: the user still taps Test connection (or
+     * Save, by leaving the screen) themselves, which is what makes a preset a
+     * shortcut rather than an action.
+     *
+     * The port is marked as customized on purpose. A preset's port is a value the
+     * user chose deliberately when they saved it, so the SSL switch — which only
+     * ever rewrites a port still sitting on a convention default — must not snap
+     * it to 50001/50002 behind their back.
+     */
+    fun applyPreset(preset: SavedServer) {
+        host = preset.host
+        port = preset.port.toString()
+        useSsl = ServerSsl.useSslFor(preset.protocol)
+        portCustomized = true
+        persist()
+    }
+
+    /**
+     * Saves the form's current endpoint under [name], trimming the name first.
+     *
+     * A name that is already in the list is overwritten **in place** by the store,
+     * with no confirmation: the picker's Delete row is the deliberate way to
+     * remove one, and re-saving a name the user already chose is them saying
+     * "this one, not the old one". A blank name is not a preset, so it is
+     * ignored.
+     */
+    fun savePreset(name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        savedServersStore.save(
+            SavedServer(
+                name = trimmed,
+                host = host.trim(),
+                port = port.toIntOrNull() ?: ServerSsl.defaultPortFor(useSsl),
+                protocol = protocol,
+            ),
+        )
+        refreshPresets()
+    }
+
+    /** Removes the preset named [name], then re-reads the picker's list. */
+    fun deletePreset(name: String) {
+        savedServersStore.delete(name)
+        refreshPresets()
+    }
+
+    private fun refreshPresets() {
+        presets.clear()
+        presets.addAll(savedServersStore.list())
     }
 
     /**
@@ -228,9 +323,14 @@ class ServerScreenState(
 
 /** Remembers a [ServerScreenState] for the Server screen. */
 @Composable
-fun rememberServerScreenState(store: ServerSettingsStore): ServerScreenState {
+fun rememberServerScreenState(
+    store: ServerSettingsStore,
+    savedServersStore: SavedServersStore,
+): ServerScreenState {
     val scope = rememberCoroutineScope()
-    return remember(store, scope) { ServerScreenState(store, scope) }
+    return remember(store, savedServersStore, scope) {
+        ServerScreenState(store, savedServersStore, scope)
+    }
 }
 
 /**
@@ -277,6 +377,47 @@ fun ServerScreen(
             )
 
             Spacer(modifier = Modifier.height(16.dp))
+
+            if (state.presets.isNotEmpty()) {
+                // Names only, deliberately. A preset carries a host:port, and a
+                // saved server address never appears in this app's UI — the name
+                // is the whole of what the user sees here.
+                var menuOpen by remember { mutableStateOf(false) }
+                Box {
+                    OutlinedButton(onClick = { menuOpen = true }) {
+                        Text("Saved connections")
+                    }
+                    DropdownMenu(
+                        expanded = menuOpen,
+                        onDismissRequest = { menuOpen = false },
+                    ) {
+                        state.presets.forEach { preset ->
+                            DropdownMenuItem(
+                                text = {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = preset.name,
+                                            modifier = Modifier.weight(1f),
+                                        )
+                                        // A row of its own button, so deleting a
+                                        // preset is never the same tap as using it.
+                                        TextButton(onClick = { state.deletePreset(preset.name) }) {
+                                            Text("Delete")
+                                        }
+                                    }
+                                },
+                                onClick = {
+                                    // Populates the fields and nothing else: the
+                                    // user still taps Test connection themselves.
+                                    state.applyPreset(preset)
+                                    menuOpen = false
+                                },
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+            }
 
             OutlinedTextField(
                 value = state.host,
@@ -360,6 +501,9 @@ fun ServerScreen(
                 }
             }
 
+            var showSavePreset by remember { mutableStateOf(false) }
+            var presetName by remember { mutableStateOf("") }
+
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Button(
                     onClick = state::testConnection,
@@ -367,7 +511,19 @@ fun ServerScreen(
                 ) {
                     Text("Test connection")
                 }
-                Spacer(modifier = Modifier.width(12.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                // Disabled on the same input checks testConnection makes, so a
+                // preset can never record an endpoint the app would refuse.
+                TextButton(
+                    onClick = {
+                        presetName = ""
+                        showSavePreset = true
+                    },
+                    enabled = state.formIsValid,
+                ) {
+                    Text("Save as preset\u2026")
+                }
+                Spacer(modifier = Modifier.width(4.dp))
                 TextButton(onClick = state::clearLog, enabled = state.log.isNotEmpty()) {
                     Text("Clear log")
                 }
@@ -391,6 +547,40 @@ fun ServerScreen(
                     text = notice,
                     style = MaterialTheme.typography.bodySmall,
                     color = Color(0xFF2E7D32),
+                )
+            }
+
+            if (showSavePreset) {
+                // No path to a host or port is offered here: a preset is a name
+                // plus whatever the form currently holds.
+                AlertDialog(
+                    onDismissRequest = { showSavePreset = false },
+                    title = { Text("Save connection preset") },
+                    text = {
+                        OutlinedTextField(
+                            value = presetName,
+                            onValueChange = { presetName = it },
+                            label = { Text("Preset name") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                state.savePreset(presetName)
+                                showSavePreset = false
+                            },
+                            enabled = presetName.isNotBlank(),
+                        ) {
+                            Text("Save")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showSavePreset = false }) {
+                            Text("Cancel")
+                        }
+                    },
                 )
             }
 
@@ -474,7 +664,11 @@ private fun ConnectionLog(state: ServerScreenState, modifier: Modifier = Modifie
 @Composable
 private fun ServerScreenPreview() {
     val store = ServerSettingsStore(LocalContext.current)
+    val savedServersStore = SavedServersStore(SharedPreferencesKeyValueStore(LocalContext.current))
     XbtWalletTheme {
-        ServerScreen(state = rememberServerScreenState(store), onBack = {})
+        ServerScreen(
+            state = rememberServerScreenState(store, savedServersStore),
+            onBack = {},
+        )
     }
 }
