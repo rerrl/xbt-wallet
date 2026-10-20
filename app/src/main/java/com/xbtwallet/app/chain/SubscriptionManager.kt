@@ -197,9 +197,12 @@ sealed interface ChainEvent {
  * died: that re-subscribes and re-runs the status diff, which is exactly the
  * catch-up a reconnect needs (the diff sees everything that happened during the
  * gap). It only ever *subscribes*; deciding when to reconnect, with what backoff,
- * and whether the user is still on the screen is the caller's policy — see
- * [ChainEvent.SessionLost]. [close] stops this manager; the session's socket
- * belongs to whoever opened it.
+ * and whether the user is still on the screen is [ReconnectingSubscription]'s
+ * business, driven by [ChainEvent.SessionLost]. [close] stops this manager; the
+ * session's socket belongs to whoever opened it.
+ *
+ * It implements [SubscriptionEngine] — the seam the reconnect loop drives — with
+ * no member of this class changed for it.
  */
 class SubscriptionManager(
     private val store: SubscriptionStateStore,
@@ -210,7 +213,7 @@ class SubscriptionManager(
      * uses (see `buildTransactionRows`).
      */
     private val onTimestampFailure: (height: Int, error: Exception) -> Unit = { _, _ -> },
-) : AutoCloseable {
+) : SubscriptionEngine {
 
     /** The buffer every event is written to; unbounded, so [emit] never blocks. */
     private val channel: Channel<ChainEvent> = Channel(Channel.UNLIMITED)
@@ -219,7 +222,7 @@ class SubscriptionManager(
      * The manager's event stream. Collect it once, from whatever dispatcher the
      * consumer likes; events emitted before collection are buffered, not lost.
      */
-    val events: Flow<ChainEvent> = channel.receiveAsFlow()
+    override val events: Flow<ChainEvent> = channel.receiveAsFlow()
 
     /** Everything that guards the mutable state below. Held only for bookkeeping, never across a query. */
     private val lock = Any()
@@ -270,7 +273,7 @@ class SubscriptionManager(
     private var current: AccountSnapshot = AccountSnapshot.EMPTY
 
     /** The account state as the manager last left it. Updated before [ChainEvent.Resynced] is emitted. */
-    val snapshot: AccountSnapshot get() = current
+    override val snapshot: AccountSnapshot get() = current
 
     /** The one thread that runs every query. Daemon: it never keeps the process alive. */
     private val worker = Thread({ workerLoop() }, "electrum-subscriptions").apply {
@@ -294,7 +297,7 @@ class SubscriptionManager(
      * Calling it again with a new session re-subscribes and re-diffs against the
      * last-seen statuses — the reconnect catch-up.
      */
-    fun start(session: ChainSubscriptionSession, snapshot: AccountSnapshot) {
+    override fun start(session: ChainSubscriptionSession, snapshot: AccountSnapshot) {
         val run = generation.incrementAndGet()
         // Read outside the lock: the store may touch disk, and nothing here needs
         // to hold the bookkeeping lock across it.
@@ -333,7 +336,7 @@ class SubscriptionManager(
      * keeps the balance the sum of `get_balance` over the used addresses even
      * when the rescan changed an address this manager had not noticed.
      */
-    fun updateSnapshot(snapshot: AccountSnapshot) {
+    override fun updateSnapshot(snapshot: AccountSnapshot) {
         synchronized(lock) {
             if (closed) return
             current = snapshot

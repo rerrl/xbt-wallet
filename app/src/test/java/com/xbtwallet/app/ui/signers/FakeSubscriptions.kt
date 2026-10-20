@@ -48,6 +48,14 @@ internal class FakeSubscriptionEngine : SignerSubscriptionEngine {
     @Volatile
     var startedWith: Pair<ChainSubscriptionSession, AccountSnapshot>? = null
 
+    private val starts = AtomicInteger(0)
+
+    /**
+     * How many connections this engine has been handed — one for the first dial,
+     * one per reconnect. The real manager counts the same thing as a generation.
+     */
+    val startCount: Int get() = starts.get()
+
     /** Every snapshot handed to [updateSnapshot], in order — the rescan hand-offs. */
     val adopted: MutableList<AccountSnapshot> = CopyOnWriteArrayList()
 
@@ -68,6 +76,7 @@ internal class FakeSubscriptionEngine : SignerSubscriptionEngine {
 
     override fun start(session: ChainSubscriptionSession, snapshot: AccountSnapshot) {
         startedWith = session to snapshot
+        starts.incrementAndGet()
     }
 
     override fun updateSnapshot(snapshot: AccountSnapshot) {

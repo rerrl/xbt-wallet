@@ -2,7 +2,9 @@ package com.xbtwallet.app.ui.signers
 
 import com.xbtwallet.app.chain.AccountSnapshot
 import com.xbtwallet.app.chain.ChainEvent
+import com.xbtwallet.app.chain.ChainSubscriptionSession
 import com.xbtwallet.app.chain.ChainTip
+import com.xbtwallet.app.chain.ReconnectPolicy
 import com.xbtwallet.app.chain.ScripthashBalance
 import com.xbtwallet.app.chain.TransactionRow
 import com.xbtwallet.app.data.KeyValueStore
@@ -773,10 +775,61 @@ class SignerChainStateTest {
     }
 
     @Test
-    fun `a dead connection falls back to the pull path silently and the rescan still works`() {
+    fun `a dropped connection is re-dialled and resubscribed, silently`() {
+        val engine = FakeSubscriptionEngine()
+        val first = FakeSubscriptionSession()
+        val second = FakeSubscriptionSession()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        var opens = 0
+        val cached = AccountSnapshot(emptyList(), emptyList(), emptyList(), ScripthashBalance(5_000, 0))
+        val state = stateWithSubscriptions(
+            engine = engine,
+            session = first,
+            scope = scope,
+            snapshotStore = seededStore(cached),
+            scan = { _, _, _, _ -> cached },
+            open = {
+                opens++
+                if (opens == 1) first else second
+            },
+        )
+
+        state.startSubscriptions()
+        awaitUntil("the manager to be handed the connection") { engine.startCount == 1 }
+        assertEquals("the manager is seeded with what is on screen", cached, engine.startedWith?.second)
+
+        // The manager merges a live change into its own copy, which is the state a
+        // reconnect has to be diffed against.
+        val live = cached.copy(balance = ScripthashBalance(5_400, 0))
+        engine.current = live
+
+        // The Tor circuit drops mid-session. That is not the end of the live path:
+        // the state re-dials, resubscribes, and says nothing about it.
+        engine.emit(ChainEvent.SessionLost(IOException("the peer closed the connection")))
+
+        awaitUntil("the replacement connection to be resubscribed") { engine.startCount == 2 }
+        assertEquals("one re-dial, no storm", 2, opens)
+        assertEquals("the manager is handed the new connection, not torn down", second, engine.startedWith?.first)
+        assertEquals("and the resubscribe is diffed against the manager's own state", live, engine.startedWith?.second)
+        assertFalse("a reconnect is not a failure", engine.isClosed)
+        assertNull(state.errorMessage)
+        assertFalse(state.syncFailed)
+        assertEquals(5_000L, state.snapshot?.satoshis)
+
+        // And the subscription is still live afterwards: a push still moves the
+        // screen, through the very same manager.
+        engine.current = live.copy(balance = ScripthashBalance(6_000, 0))
+        engine.emit(ChainEvent.AddressChanged("sh-0", "status-2"))
+        awaitUntil("the push after the reconnect") { state.snapshot?.satoshis == 6_000L }
+        scope.cancel()
+    }
+
+    @Test
+    fun `a spent reconnect budget falls back to the pull path silently`() {
         val engine = FakeSubscriptionEngine()
         val session = FakeSubscriptionSession()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        var opens = 0
         val cached = AccountSnapshot(emptyList(), emptyList(), emptyList(), ScripthashBalance(5_000, 0))
         val fresh = AccountSnapshot(emptyList(), emptyList(), emptyList(), ScripthashBalance(6_000, 0))
         var scans = 0
@@ -789,27 +842,40 @@ class SignerChainStateTest {
                 scans++
                 fresh
             },
+            // The endpoint answers the first dial and then nothing at all — the
+            // "server is down, Tor is broken beyond self-heal" case.
+            open = {
+                opens++
+                if (opens == 1) session else throw ConnectException("Connection refused")
+            },
+            reconnectPolicy = ReconnectPolicy(maxAttempts = 2, jitterFraction = 0.0),
         )
 
         state.startSubscriptions()
-        awaitUntil("the manager to be handed the connection") { engine.startedWith != null }
+        awaitUntil("the manager to be handed the connection") { engine.startCount == 1 }
 
         engine.emit(ChainEvent.SessionLost(IOException("the peer closed the connection")))
 
-        // The fallback is silent: no error banner, no failed-sync line, and the
-        // cached numbers stay exactly where they were.
-        awaitUntil("the manager to be released") { engine.isClosed }
+        // Two attempts, then give up: the manager and the connection are closed,
+        // and nothing is said about it on screen.
+        awaitUntil("the manager to be released once the budget is spent") { engine.isClosed }
+        assertEquals("the first dial plus the policy's two attempts", 3, opens)
+        assertTrue("the dead connection is this state's to close", session.isClosed)
+        assertEquals("one connection, ever, was reported to the manager", 1, engine.startCount)
         assertNull(state.errorMessage)
         assertFalse(state.syncFailed)
-        assertEquals(5_000L, state.snapshot?.satoshis)
+        assertEquals("the cached numbers stay exactly where they were", 5_000L, state.snapshot?.satoshis)
 
-        // And the existing refresh path is untouched by any of it.
+        // And the existing refresh path is untouched by any of it — including the
+        // spent budget, which is not re-opened without the screen being re-entered.
         runBlocking { state.reload() }
 
         assertEquals(1, scans)
         assertEquals(fresh, state.snapshot)
         assertEquals(ChainPhase.READY, state.phase)
         assertFalse(state.syncFailed)
+        Thread.sleep(50)
+        assertEquals("a rescan does not resurrect a given-up subscription", 1, engine.startCount)
         scope.cancel()
     }
 
@@ -969,6 +1035,9 @@ class SignerChainStateTest {
         session: FakeSubscriptionSession = FakeSubscriptionSession(),
         server: ElectrumServer? = SERVER,
         onOpen: () -> Unit = {},
+        reconnectPolicy: ReconnectPolicy = INSTANT_RECONNECT,
+        reconnectBackoff: suspend (Long) -> Unit = {},
+        open: (() -> ChainSubscriptionSession)? = null,
     ) = SignerChainState(
         signer = signer(),
         serverSettings = FakeServerSettings(server),
@@ -978,9 +1047,11 @@ class SignerChainStateTest {
         subscriptionScope = scope,
         openSubscription = {
             onOpen()
-            session
+            open?.invoke() ?: session
         },
         newSubscriptionEngine = { engine },
+        reconnectPolicy = reconnectPolicy,
+        reconnectBackoff = reconnectBackoff,
         scan = scan,
     )
 
@@ -996,5 +1067,12 @@ class SignerChainStateTest {
 
     private companion object {
         val SERVER = ElectrumServer(host = "192.168.1.10", port = 50002, protocol = ElectrumProtocol.SSL)
+
+        /**
+         * A reconnect policy for the wiring tests: no waiting, and a budget short
+         * enough that "it reconnects" and "it gives up" are both reachable
+         * instantly. The schedule itself is `ReconnectPolicyTest`'s business.
+         */
+        val INSTANT_RECONNECT = ReconnectPolicy(maxAttempts = 2, jitterFraction = 0.0)
     }
 }

@@ -244,3 +244,129 @@ What exists right now, in this repository:
 
 Not yet: the receive QR flow, descriptors/BIP-380
 (the model still stores a bare xpub), Tor, precise/real fiat rates, and sending.
+
+---
+
+## 8. Live updates: subscriptions, catch-up, and reconnect
+
+A signer screen should move on its own — a payment lands and the balance,
+transactions and confirmations update without the user pulling. That is the
+**live-updates layer**, and it is deliberately four small pieces, each of which
+can fail without the screen failing.
+
+### 8.1 The session (`electrum/SubscriptionSession`)
+
+One long-lived socket to the user's Electrum server, opened through the *same*
+transport everything else uses: a `.onion` host goes through the bundled Tor
+SOCKS proxy, whose bootstrap probes its cached listener and re-bootstraps when it
+is dead, on every dial. The session subscribes to each address
+(`blockchain.scripthash.subscribe`) and to block headers
+(`blockchain.headers.subscribe`), hands every pushed notification to a callback
+on the reader thread, and reports terminal death exactly once. It is the only
+long-lived socket in the app; everything else opens, asks, and closes.
+
+### 8.2 The manager (`chain/SubscriptionManager`)
+
+The manager answers one question: **what changed here?** It records the status
+hash the server reports per address — a value that changes whenever that
+address's history changes — and compares it against the one it last saw.
+
+That single idea gives the whole feature, and it is why there is **no polling
+anywhere**:
+
+- a live push is "the status hash moved", and
+- the **missed window** — the app was closed, the phone slept, the connection
+  dropped — is "the status hash moved while nobody was listening", noticed the
+  moment a subscription is re-established.
+
+Both go down the same code path: *diff, then refresh exactly the addresses that
+mismatched*. A refresh is targeted: `get_history` for that address, plus
+`get_balance`/`list_unspent` only when it is used, merged into the snapshot
+through the same row builder the scan uses. The gap-limit walk is never repeated
+here — new addresses beyond the subscribed set stay the incremental rescan's
+business, which remains the backstop underneath.
+
+Practical rules that fall out of it: status hashes are persisted in their own
+blob (seeded on the first start, so an address paid while the app was closed is a
+mismatch next time); notifications coalesce (at most one follow-up refresh while
+one is in flight); a status is only committed once the refresh that acted on it
+has been applied; and everything runs on one private worker thread with events on
+a channel-backed flow. A completed rescan is handed to the manager
+(`updateSnapshot`) so the two writers to one snapshot cannot fight.
+
+### 8.3 The UI (`ui/signers/SignerChainState` + signer screen)
+
+The signer's detail screen is the subscription's lifetime. Entering it opens one
+connection and one manager; leaving it closes both and cancels the job. The
+manager's snapshot is mirrored into the state the screen renders, so a push
+recomposes the same composables a rescan would.
+
+Every part of this is optional and silent. No endpoint, no key, a dial that
+fails, a manager that throws — the screen behaves exactly like the pull-only one,
+whose rescan, its own retry budget for transport failures, and the Refresh/Retry
+button are all still there. **A subscription is an optimization over the rescan,
+never a requirement**, and it is never shown as an error.
+
+### 8.4 Reconnect (`chain/ReconnectingSubscription`, `ReconnectPolicy`)
+
+Long-lived connections through Tor drop far more often than direct ones — that
+is the normal cost of a circuit, not a fault. So a dropped connection is
+**reconnected, not given up on**, by a loop that owns exactly one manager and one
+job:
+
+- **Backoff:** 2s, doubling, capped at 60s, ±20% jitter, six consecutive attempts
+  (about two minutes). The cap stops a dead server being hammered; the jitter
+  stops two surfaces re-dialling in lockstep.
+- **A re-dial is the same dial:** the transport (and therefore the Tor bootstrap's
+  probe/re-bootstrap) is reused verbatim. There is no second Tor code path.
+- **A reconnect is a resubscribe, and a resubscribe is the catch-up:** the new
+  connection is subscribed and the status diff runs against the last-seen hashes,
+  so anything that happened during the gap is refreshed through the notification
+  path. One code path, no polling, no reconciliation step afterwards.
+- **A connection that stayed up is a new episode:** the attempt counter only
+  resets after a session has lived for at least 60s, so a server that accepts
+  every connection and drops it immediately still runs out of budget instead of
+  flapping forever.
+- **Giving up is graceful:** when the budget is spent the loop stops, the manager
+  is closed and the screen falls back to the pull path — silently. Reopening the
+  signer starts a fresh connection and a fresh budget; that is the user's retry.
+- **Cancellation is immediate, mid-backoff included:** the wait between attempts
+  runs in the screen's own job, so navigating away cancels the delay and nothing
+  dials.
+
+### 8.5 Why foreground-only — no foreground service
+
+The live subscription exists **only while a signer's screen is open**, and this
+is a deliberate decision rather than an unfinished edge:
+
+- **A background chain socket costs a permanent notification.** Keeping a socket
+  alive off-screen means a foreground service, which means an ongoing
+  notification the user cannot dismiss, plus wake locks and battery policy fights
+  — on a wallet, more moving parts in the privileged part of the app for a
+  feature that is only *visible* when a screen is showing it.
+- **Nothing is lost by not having it.** The cached snapshot the screen opens on
+  is correct when it is opened, and the status-hash diff catches anything that
+  happened while the app was closed — the missed window is a solved problem
+  without a background service. A background subscription would only make the
+  screen marginally fresher in the seconds between opening it and its rescan
+  landing.
+- **Foreground-only is a smaller attack surface.** A wallet is not a chat app: a
+  socket that lives in the background is a socket that can be attacked, watched
+  and woken by someone else's schedule. Tor circuits drop often; a reconnect loop
+  that runs only while the user is looking at the screen is the cheap half of
+  that trade.
+- **What would change it:** a user-visible feature that needs a push while the app
+  is closed (a payment notification) would justify a foreground service on its own
+  merits — with its own notification, its own consent flow and its own battery
+  story. That is unscheduled; it is not a gap in this design.
+
+### 8.6 Tests
+
+The schedule is pinned directly (`ReconnectPolicyTest`, 7 tests), and the loop is
+pinned end to end against a real `SubscriptionManager` and fake sessions
+(`ReconnectingSubscriptionTest`, 5): the reconnect→resubscribe→diff catch-up, the
+give-up path with its attempt count and schedule, the stable-session rule, the
+flapping-server case, and cancellation mid-backoff. The UI wiring is covered in
+`SignerChainStateTest` (a drop re-dials and resubscribes silently; a spent budget
+falls back to the pull path and a rescan does not resurrect it). `./gradlew test`:
+453 tests, 0 failures, with `./gradlew assembleDebug` building.
