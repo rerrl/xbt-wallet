@@ -11,6 +11,7 @@ import com.xbtwallet.app.chain.TransactionRow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -220,6 +221,110 @@ class SnapshotStoreTest {
         SnapshotStore(backing, now = { 1L }).save("id-9", full)
         assertEquals("snapshot_id-9", SnapshotStore.KEY_PREFIX + "id-9")
         assertEquals(setOf("snapshot_id-9"), backing.map.keys)
+    }
+
+    // --- the subscription manager's status hashes ---------------------------
+
+    @Test
+    fun `status hashes round-trip, null values included`() {
+        val backing = InMemoryStore()
+        val store = SnapshotStore(backing, now = { 1L })
+        val statuses = linkedMapOf(
+            "sh-0" to "a1b2",
+            // Fulcrum's answer for an address it has never seen a transaction for.
+            "sh-1" to null,
+        )
+
+        store.saveStatusHashes("id-1", statuses)
+
+        val loaded = store.loadStatusHashes("id-1")
+        assertEquals(statuses, loaded)
+        assertTrue("a null status must come back as a real entry", loaded.containsKey("sh-1"))
+        assertNull(loaded["sh-1"])
+        assertEquals(setOf("statuses_id-1"), backing.map.keys)
+    }
+
+    @Test
+    fun `status hashes are readable by a fresh store over the same storage`() {
+        val backing = InMemoryStore()
+        SnapshotStore(backing, now = { 1L }).saveStatusHashes("id-1", mapOf("sh-0" to "abc"))
+
+        assertEquals(mapOf("sh-0" to "abc"), SnapshotStore(backing).loadStatusHashes("id-1"))
+    }
+
+    @Test
+    fun `a status blob and a snapshot blob do not clobber each other`() {
+        val store = SnapshotStore(InMemoryStore(), now = { 1L })
+        store.save("id-1", full)
+        store.saveStatusHashes("id-1", mapOf("sh-0" to "abc"))
+
+        // The manager rewrites the statuses far more often than the snapshot.
+        store.saveStatusHashes("id-1", mapOf("sh-0" to "def"))
+
+        assertEquals(full, store.load("id-1")?.snapshot)
+        assertEquals(mapOf("sh-0" to "def"), store.loadStatusHashes("id-1"))
+    }
+
+    @Test
+    fun `status hashes are forgiven when missing, blank, corrupt or from a future schema`() {
+        val missing = InMemoryStore()
+        assertTrue(SnapshotStore(missing).loadStatusHashes("id-1").isEmpty())
+
+        val blank = InMemoryStore()
+        blank.putString(SnapshotStore.STATUS_KEY_PREFIX + "id-1", "")
+        assertTrue(SnapshotStore(blank).loadStatusHashes("id-1").isEmpty())
+
+        val corrupt = InMemoryStore()
+        corrupt.putString(SnapshotStore.STATUS_KEY_PREFIX + "id-1", "{not json at all")
+        assertTrue(SnapshotStore(corrupt).loadStatusHashes("id-1").isEmpty())
+
+        val future = InMemoryStore()
+        future.putString(SnapshotStore.STATUS_KEY_PREFIX + "id-1", """{"version":99,"statuses":{"sh-0":"a"}}""")
+        assertTrue(SnapshotStore(future).loadStatusHashes("id-1").isEmpty())
+
+        val notAStatusHash = InMemoryStore()
+        notAStatusHash.putString(SnapshotStore.STATUS_KEY_PREFIX + "id-1", """{"version":1,"statuses":{"sh-0":7}}""")
+        assertTrue(SnapshotStore(notAStatusHash).loadStatusHashes("id-1").isEmpty())
+    }
+
+    @Test
+    fun `each signer gets its own status hashes`() {
+        val store = SnapshotStore(InMemoryStore(), now = { 1L })
+        store.saveStatusHashes("alice", mapOf("sh-a" to "1"))
+        store.saveStatusHashes("bob", mapOf("sh-b" to "2"))
+
+        assertEquals(mapOf("sh-a" to "1"), store.loadStatusHashes("alice"))
+        assertEquals(mapOf("sh-b" to "2"), store.loadStatusHashes("bob"))
+    }
+
+    @Test
+    fun `clear drops the status hashes along with the snapshot`() {
+        val store = SnapshotStore(InMemoryStore(), now = { 1L })
+        store.save("id-1", full)
+        store.saveStatusHashes("id-1", mapOf("sh-0" to "1"))
+
+        store.clear("id-1")
+
+        assertNull(store.load("id-1"))
+        assertTrue(store.loadStatusHashes("id-1").isEmpty())
+    }
+
+    @Test
+    fun `the subscription state adapter reads and writes the same signer's records`() {
+        val store = SnapshotStore(InMemoryStore(), now = { 7L })
+        val state = store.subscriptionState("id-1")
+
+        state.saveStatusHashes(mapOf("sh-0" to "abc", "sh-1" to null))
+        state.saveSnapshot(full)
+
+        assertEquals(mapOf("sh-0" to "abc", "sh-1" to null), store.loadStatusHashes("id-1"))
+        assertEquals(full, store.load("id-1")?.snapshot)
+        assertEquals(mapOf("sh-0" to "abc", "sh-1" to null), state.loadStatusHashes())
+        assertEquals(
+            "another signer must see none of it",
+            emptyMap<String, String?>(),
+            store.loadStatusHashes("id-2"),
+        )
     }
 
     private companion object {
