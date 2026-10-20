@@ -161,6 +161,9 @@ class MockElectrumServer(
          *   `blockchain.transaction.get` answers. A txid not listed is answered
          *   as an RPC error, which is what a server does for a transaction it
          *   does not know.
+         * @param blockHeaders raw 80-byte headers by height — what
+         *   `blockchain.block.header` answers. A height not listed is answered as
+         *   an RPC error, the way a server answers a height it cannot serve.
          * @param tipHeight the height `blockchain.headers.subscribe` reports.
          */
         fun scripted(
@@ -168,6 +171,7 @@ class MockElectrumServer(
             balances: Map<String, Pair<Long, Long>> = emptyMap(),
             unspent: Map<String, List<Any?>> = emptyMap(),
             transactions: Map<String, String> = emptyMap(),
+            blockHeaders: Map<Int, String> = emptyMap(),
             tipHeight: Int = 800_000,
         ): MockElectrumServer = MockElectrumServer { method, params, _ ->
             val scripthash = params.firstOrNull() as? String ?: ""
@@ -191,6 +195,12 @@ class MockElectrumServer(
                 "blockchain.headers.subscribe" ->
                     Reply.Result(linkedMapOf<String, Any?>("height" to tipHeight, "hex" to "00"))
 
+                "blockchain.block.header" -> {
+                    val height = (params.firstOrNull() as? Number)?.toInt()
+                    blockHeaders[height]?.let { Reply.Result(it) }
+                        ?: Reply.Error(-32601, "unknown height $height")
+                }
+
                 else -> Reply.Error(-32601, "unknown method $method")
             }
         }
@@ -202,6 +212,33 @@ class MockElectrumServer(
         /** One `listunspent` fixture entry. */
         fun unspentEntry(txHash: String, txPos: Int, height: Int, value: Long): Map<String, Any?> =
             linkedMapOf("tx_hash" to txHash, "tx_pos" to txPos, "height" to height, "value" to value)
+
+        /**
+         * A block header as a chain that extends its header serves it: the
+         * ordinary 80-byte header with the 84-byte proof-of-work extension
+         * appended, i.e. 164 bytes / 328 hex characters.
+         *
+         * The Bitcoin Knots BLAKE2b hardfork — the chain the test server indexes
+         * — switches to BLAKE2b proof-of-work at height 961640 and, from there
+         * on, answers `blockchain.block.header` with this longer form. A client
+         * that demanded exactly 160 hex characters threw on every such reply,
+         * which is the regression these fixtures keep covered: the reply is
+         * still a bare hex string (only its length is different), so the fix is
+         * in how the header is *read*, not in how it is decoded.
+         */
+        fun postForkHeader(headerHex80: String, extensionHex: String = POST_FORK_HEADER_EXTENSION_HEX): String =
+            headerHex80 + extensionHex
+
+        /**
+         * The 84 bytes a post-hardfork header carries after its 80-byte prefix.
+         * Taken verbatim from a real reply (block 970000 of that chain — public
+         * chain data); its contents do not matter to these tests, only its
+         * length and that the prefix's timestamp is what gets read.
+         */
+        const val POST_FORK_HEADER_EXTENSION_HEX: String =
+            "e361d50be798a06a00000000b1ccf00f010000000000000000000000" +
+                "61000033024b85992956d664c320c43104b60c7510cd0e0000000000" +
+                "00000000000000000000000000000000000000000000000000000000"
     }
 }
 

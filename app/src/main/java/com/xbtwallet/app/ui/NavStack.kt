@@ -18,27 +18,56 @@ import androidx.compose.runtime.saveable.listSaver
  * @property screen the destination to render.
  * @property signerId the signer a per-signer screen is showing, or null for
  *   screens that need no argument.
+ * @property address the address a receive screen was opened *from* — the one the
+ *   user tapped in the addresses list — or null when the screen picks its own
+ *   (the "first unused" rule). It rides here rather than in shared mutable state
+ *   for the same reason the signer id does: a rotation must put the user back on
+ *   the address they were looking at, not on whatever the screen would choose by
+ *   default.
  */
 data class Route(
     val screen: Screen,
     val signerId: String? = null,
+    val address: String? = null,
 ) {
     /**
-     * One string, for [NavStack.Saver]: the screen name, and the signer id after
-     * a `|` when there is one. Kept deliberately tiny — a `Bundle` can hold a
-     * list of strings and nothing more exotic is needed.
+     * One string, for [NavStack.Saver]: the screen name, then the signer id, then
+     * a requested address, each after its own `|`. Segments are emitted only as
+     * far as they are needed, and an id is always present when an address is —
+     * a lone `name||address` would decode back to a route with a null id, i.e. a
+     * *different* route from the one written. Kept deliberately tiny — a `Bundle`
+     * can hold a list of strings and nothing more exotic is needed.
      */
-    fun encode(): String = signerId?.let { "${screen.name}|$it" } ?: screen.name
+    fun encode(): String = when {
+        signerId == null -> screen.name
+        address == null -> "${screen.name}|$signerId"
+        else -> "${screen.name}|$signerId|$address"
+    }
 
     companion object {
-        /** The inverse of [encode]; anything unreadable falls back to [Screen.HOME]. */
+        /**
+         * The inverse of [encode]; anything unreadable falls back to [Screen.HOME].
+         *
+         * Forgiving on purpose. A stack saved by an older build holds only the
+         * one- and two-segment forms, and those must still read back exactly as
+         * they did; the address segment is simply absent and comes back null. The
+         * separator is `|` and each field is split at the *first* `|` after it —
+         * so a *later* segment may itself contain one without being truncated —
+         * which is why a signer id must not contain one (they are UUIDs).
+         */
         fun decode(text: String): Route {
             val separator = text.indexOf('|')
             if (separator < 0) return Route(screenNamed(text))
+            val screen = screenNamed(text.substring(0, separator))
+            val rest = text.substring(separator + 1)
+            val addressSeparator = rest.indexOf('|')
+            if (addressSeparator < 0) {
+                return Route(screen = screen, signerId = rest.ifEmpty { null })
+            }
             return Route(
-                screen = screenNamed(text.substring(0, separator)),
-                // Split at the *first* `|` only, so an id is never truncated.
-                signerId = text.substring(separator + 1).ifEmpty { null },
+                screen = screen,
+                signerId = rest.substring(0, addressSeparator).ifEmpty { null },
+                address = rest.substring(addressSeparator + 1).ifEmpty { null },
             )
         }
 

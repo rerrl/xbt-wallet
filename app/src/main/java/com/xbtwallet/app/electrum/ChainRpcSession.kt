@@ -7,9 +7,10 @@ import com.xbtwallet.app.chain.ScripthashBalance
 
 /**
  * The three Electrum scripthash RPCs, decoded into the chain layer's types,
- * plus the two the transaction list needs: `blockchain.transaction.get` (the
- * raw transaction whose net effect a row shows) and `blockchain.headers.subscribe`
- * (the tip height confirmations are counted from).
+ * plus the three the transaction list needs: `blockchain.transaction.get` (the
+ * raw transaction whose net effect a row shows), `blockchain.headers.subscribe`
+ * (the tip height confirmations are counted from) and `blockchain.block.header`
+ * (the block time a row is dated with).
  *
  * One instance is bound to one open connection: the constructor takes the
  * "send a request and give me its `result`" callback, which
@@ -81,6 +82,21 @@ class ChainRpcSession internal constructor(
         val fields = result as? Map<*, *>
             ?: throw ElectrumException("headers.subscribe did not answer with an object: ${MiniJson.encode(result)}")
         return fields.int("height")
+    }
+
+    override fun blockHeader(height: Int): String {
+        val result = call("blockchain.block.header", listOf(height))
+        // Every implementation answers with the header as a bare hex string —
+        // only the *length* varies (80 bytes on ElectrumX/electrs, 164 on the
+        // BLAKE2b hardfork the test server indexes). A wrapper object keyed
+        // `hex` is accepted too, because a server build that did that would
+        // otherwise look like a dating failure rather than a protocol quirk.
+        return when (result) {
+            is String -> result
+            is Map<*, *> -> result["hex"] as? String
+                ?: throw ElectrumException("block.header did not answer with hex: ${MiniJson.encode(result)}")
+            else -> throw ElectrumException("block.header did not answer with hex: ${MiniJson.encode(result)}")
+        }
     }
 
     private fun Map<*, *>.string(key: String): String = this[key] as? String

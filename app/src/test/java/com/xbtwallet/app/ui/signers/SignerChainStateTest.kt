@@ -7,10 +7,12 @@ import com.xbtwallet.app.data.ServerSettings
 import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerType
 import com.xbtwallet.app.data.SnapshotStore
+import com.xbtwallet.app.electrum.ElectrumException
 import com.xbtwallet.app.electrum.ElectrumProtocol
 import com.xbtwallet.app.electrum.ElectrumServer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -18,6 +20,7 @@ import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.net.ConnectException
+import java.net.SocketTimeoutException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
@@ -97,7 +100,11 @@ class SignerChainStateTest {
 
     @Test
     fun `a failing scan reports the endpoint and the reason`() {
-        val state = SignerChainState(signer(), FakeServerSettings(SERVER)) { _, _, _, _ ->
+        val state = SignerChainState(
+            signer(),
+            FakeServerSettings(SERVER),
+            retryDelaysSeconds = emptyList(),
+        ) { _, _, _, _ ->
             throw ConnectException("Connection refused")
         }
 
@@ -177,7 +184,13 @@ class SignerChainStateTest {
     @Test
     fun `retry after a failure can succeed`() {
         var attempt = 0
-        val state = SignerChainState(signer(), FakeServerSettings(SERVER)) { _, _, _, _ ->
+        val state = SignerChainState(
+            signer(),
+            FakeServerSettings(SERVER),
+            // No automatic retry here: this test is about the *user's* retry
+            // (reload) working after the cold path has given up.
+            retryDelaysSeconds = emptyList(),
+        ) { _, _, _, _ ->
             attempt++
             if (attempt == 1) throw ConnectException("Connection refused") else AccountSnapshot.EMPTY
         }
@@ -187,6 +200,164 @@ class SignerChainStateTest {
 
         runBlocking { state.reload() }
         assertEquals(ChainPhase.READY, state.phase)
+        assertNull(state.errorMessage)
+    }
+
+    // --- transient-failure retries ------------------------------------------
+
+    @Test
+    fun `a cold scan retries a transient failure and lands ready without ever showing an error`() {
+        var scans = 0
+        val phasesDuringScan = mutableListOf<ChainPhase>()
+        val expected = AccountSnapshot(emptyList(), emptyList(), emptyList(), ScripthashBalance(7, 0))
+        lateinit var state: SignerChainState
+        state = SignerChainState(
+            signer(),
+            FakeServerSettings(SERVER),
+            retryDelaysSeconds = listOf(0L, 0L),
+        ) { _, _, _, _ ->
+            scans++
+            phasesDuringScan += state.phase
+            if (scans < 3) throw ConnectException("Connection refused") else expected
+        }
+
+        runBlocking { state.load() }
+
+        assertEquals("two failures then a success is three attempts", 3, scans)
+        assertEquals(ChainPhase.READY, state.phase)
+        assertEquals(expected, state.snapshot)
+        assertNull("a retried scan must never flash an error", state.errorMessage)
+        assertEquals(
+            "the screen stays on loading for every attempt",
+            listOf(ChainPhase.LOADING, ChainPhase.LOADING, ChainPhase.LOADING),
+            phasesDuringScan,
+        )
+    }
+
+    @Test
+    fun `a cold scan that keeps failing is an error only once the retry budget is spent`() {
+        var scans = 0
+        val state = SignerChainState(
+            signer(),
+            FakeServerSettings(SERVER),
+            retryDelaysSeconds = listOf(0L, 0L),
+        ) { _, _, _, _ ->
+            scans++
+            throw SocketTimeoutException("read timed out")
+        }
+
+        runBlocking { state.load() }
+
+        assertEquals("one attempt plus one per retry delay", 3, scans)
+        assertEquals(ChainPhase.ERROR, state.phase)
+        assertNull("a cold failure leaves no snapshot", state.snapshot)
+        assertTrue(
+            state.errorMessage.orEmpty(),
+            state.errorMessage.orEmpty().contains("did not answer in time"),
+        )
+    }
+
+    @Test
+    fun `a protocol error is not retried`() {
+        var scans = 0
+        val state = SignerChainState(
+            signer(),
+            FakeServerSettings(SERVER),
+            retryDelaysSeconds = listOf(0L, 0L),
+        ) { _, _, _, _ ->
+            scans++
+            throw ElectrumException("'blockchain.scripthash.listunspent' returned an error: bad request")
+        }
+
+        runBlocking { state.load() }
+
+        assertEquals("an ElectrumException is an answer, not a transport blip", 1, scans)
+        assertEquals(ChainPhase.ERROR, state.phase)
+        assertTrue(state.errorMessage.orEmpty().contains("192.168.1.10:50002"))
+    }
+
+    @Test
+    fun `a cancellation during the retry backoff is rethrown and leaves the state re-startable`() {
+        var attempts = 0
+        val state = SignerChainState(
+            signer(),
+            FakeServerSettings(SERVER),
+            // Long enough that the first retry is still waiting when the scan is
+            // cancelled; the short timeout below provides that cancellation.
+            retryDelaysSeconds = listOf(60L),
+        ) { _, _, _, _ ->
+            attempts++
+            if (attempts == 1) throw ConnectException("Connection refused") else AccountSnapshot.EMPTY
+        }
+
+        assertThrows(CancellationException::class.java) {
+            runBlocking { withTimeout(50) { state.load() } }
+        }
+
+        assertEquals("the failed attempt must not have been retried after the cancel", 1, attempts)
+        assertEquals("a cancelled scan must not sit on LOADING", ChainPhase.IDLE, state.phase)
+        assertFalse(state.isSyncing)
+
+        runBlocking { state.reload() }
+
+        assertEquals(ChainPhase.READY, state.phase)
+        assertEquals("the state must still be able to run a real scan", 2, attempts)
+    }
+
+    @Test
+    fun `a warm refresh retries transient failures and only fails once the budget is spent`() {
+        val snapshotStore = seededStore(ScripthashBalance(5_000, 0))
+        var scans = 0
+        var snapshotDuringScan: AccountSnapshot? = null
+        lateinit var state: SignerChainState
+        state = SignerChainState(
+            signer(),
+            FakeServerSettings(SERVER),
+            scan = { _, _, _, _ ->
+                scans++
+                snapshotDuringScan = state.snapshot
+                throw SocketTimeoutException("read timed out")
+            },
+            snapshotStore = snapshotStore,
+            retryDelaysSeconds = listOf(0L, 0L),
+        )
+
+        runBlocking { state.load() }
+
+        assertEquals(3, scans)
+        assertEquals("a failed refresh must not blank the screen", ChainPhase.READY, state.phase)
+        assertEquals(
+            "the cached snapshot stays on screen for every attempt",
+            5_000L,
+            snapshotDuringScan?.satoshis,
+        )
+        assertEquals(5_000L, state.snapshot?.satoshis)
+        assertTrue("spending the retry budget is what raises the failure", state.syncFailed)
+        assertFalse(state.isSyncing)
+    }
+
+    @Test
+    fun `a warm refresh that recovers on a retry publishes the fresh snapshot`() {
+        val snapshotStore = seededStore(ScripthashBalance(5_000, 0))
+        val fresh = AccountSnapshot(emptyList(), emptyList(), emptyList(), ScripthashBalance(6_000, 0))
+        var attempts = 0
+        val state = SignerChainState(
+            signer(),
+            FakeServerSettings(SERVER),
+            scan = { _, _, _, _ ->
+                attempts++
+                if (attempts < 3) throw ConnectException("Connection refused") else fresh
+            },
+            snapshotStore = snapshotStore,
+            retryDelaysSeconds = listOf(0L, 0L),
+        )
+
+        runBlocking { state.load() }
+
+        assertEquals(3, attempts)
+        assertEquals(fresh, state.snapshot)
+        assertFalse("a refresh that recovered is not a failure", state.syncFailed)
+        assertFalse(state.isSyncing)
         assertNull(state.errorMessage)
     }
 
@@ -243,6 +414,7 @@ class SignerChainStateTest {
             FakeServerSettings(SERVER),
             scan = { _, _, _, _ -> throw ConnectException("Connection refused") },
             snapshotStore = seededStore(cached.balance),
+            retryDelaysSeconds = emptyList(),
         )
 
         runBlocking { state.load() }

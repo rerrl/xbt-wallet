@@ -1,6 +1,7 @@
 package com.xbtwallet.app.chain
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -384,7 +385,164 @@ class TransactionDetailsTest {
         assertTrue("the spend's funding predecessor must be fetched", query.fetched.contains(fund.first))
     }
 
+    // --- block timestamps -------------------------------------------------
+
+    @Test
+    fun `mined rows are dated once per distinct block, and an unmined row is not dated`() {
+        val mempool = TestTransactions.buildWithId(
+            inputs = listOf(foreignOutpoint),
+            outputs = listOf(5_000L to receiveScript),
+        )
+        val query = FakeTxQuery(
+            transactions = mapOf(fund.first to fund.second, spend.first to spend.second, mempool.first to mempool.second),
+            tipHeight = 800_010,
+            // One header per mined height; the same header value proves nothing
+            // about the height, only that the timestamp is read off it.
+            blockHeaders = mapOf(800_010 to genesisHeader, 800_005 to genesisHeader),
+        )
+        val rows = buildTransactionRows(
+            transactions = listOf(
+                ScannedTransaction(txHash = spend.first, height = 800_010),
+                ScannedTransaction(txHash = fund.first, height = 800_005),
+                ScannedTransaction(txHash = mempool.first, height = 0),
+            ),
+            addresses = listOf(
+                address(AddressChain.RECEIVE, 0, receiveScript),
+                address(AddressChain.CHANGE, 0, changeScript),
+            ),
+            query = query,
+        )
+
+        // Two distinct mined heights, one call each — and none for the mempool.
+        assertEquals(setOf(800_005, 800_010), query.headerCalls.toSet())
+        assertEquals(1231006505L, rows.first { it.txHash == spend.first }.blockTimestampEpochSeconds)
+        assertEquals(1231006505L, rows.first { it.txHash == fund.first }.blockTimestampEpochSeconds)
+        assertNull(rows.first { it.txHash == mempool.first }.blockTimestampEpochSeconds)
+    }
+
+    @Test
+    fun `a mined row whose header cannot be read is left undated, not failed`() {
+        val query = FakeTxQuery(transactions = mapOf(fund.first to fund.second), tipHeight = 800_000)
+        val rows = buildTransactionRows(
+            transactions = listOf(ScannedTransaction(txHash = fund.first, height = 800_000)),
+            addresses = listOf(address(AddressChain.RECEIVE, 0, receiveScript)),
+            query = query,
+        )
+
+        assertEquals(100_000L, rows.single().netSatoshis)
+        assertNull("no header fixture: the date stays unknown", rows.single().blockTimestampEpochSeconds)
+    }
+
+    @Test
+    fun `a header that cannot be read is reported to the caller, and its row stays undated`() {
+        // The failure must never be silent: an undated row with no explanation
+        // anywhere is exactly the bug this callback exists to expose. The fake
+        // answers a height with no fixture with an exception, and the callback
+        // must receive that height and that exception once.
+        val failures = mutableListOf<Pair<Int, Exception>>()
+        val query = FakeTxQuery(transactions = mapOf(fund.first to fund.second), tipHeight = 800_000)
+
+        val rows = buildTransactionRows(
+            transactions = listOf(ScannedTransaction(txHash = fund.first, height = 800_000)),
+            addresses = listOf(address(AddressChain.RECEIVE, 0, receiveScript)),
+            query = query,
+            onTimestampFailure = { height, error -> failures += height to error },
+        )
+
+        assertNull(rows.single().blockTimestampEpochSeconds)
+        assertEquals(listOf(800_000), failures.map { it.first })
+        assertTrue(
+            "the exception itself must travel with the height, got ${failures.single().second::class.java.simpleName}",
+            failures.single().second is IllegalStateException,
+        )
+    }
+
+    @Test
+    fun `an unconfirmed row is not reported as a dating failure`() {
+        // A mempool transaction has no block to read, which is normal — only a
+        // confirmed row whose header failed is worth reporting.
+        val failures = mutableListOf<Int>()
+        val query = FakeTxQuery(transactions = mapOf(fund.first to fund.second), tipHeight = 800_000)
+
+        val rows = buildTransactionRows(
+            transactions = listOf(ScannedTransaction(txHash = fund.first, height = 0)),
+            addresses = listOf(address(AddressChain.RECEIVE, 0, receiveScript)),
+            query = query,
+            onTimestampFailure = { height, _ -> failures += height },
+        )
+
+        assertNull(rows.single().blockTimestampEpochSeconds)
+        assertTrue("no header call, no failure", failures.isEmpty())
+        assertTrue("nothing was asked for either", query.headerCalls.isEmpty())
+    }
+
+    @Test
+    fun `a header longer than eighty bytes dates a row without reporting a failure`() {
+        // The real server's shape: 164 bytes. The date comes off the 80-byte
+        // prefix, and the longer reply is not a failure.
+        val failures = mutableListOf<Int>()
+        val query = FakeTxQuery(
+            transactions = mapOf(fund.first to fund.second),
+            tipHeight = 800_000,
+            blockHeaders = mapOf(800_000 to genesisHeader + "00".repeat(84)),
+        )
+
+        val rows = buildTransactionRows(
+            transactions = listOf(ScannedTransaction(txHash = fund.first, height = 800_000)),
+            addresses = listOf(address(AddressChain.RECEIVE, 0, receiveScript)),
+            query = query,
+            onTimestampFailure = { height, _ -> failures += height },
+        )
+
+        assertEquals(1_231_006_505L, rows.single().blockTimestampEpochSeconds)
+        assertTrue("an extended header is not a failure: $failures", failures.isEmpty())
+    }
+
+    // --- the undated-rows signal the UI renders one line for ---------------
+
+    @Test
+    fun `undated confirmed rows are detected as a whole-list condition`() {
+        val dated = rowFor(netSatoshis = 1).copy(blockTimestampEpochSeconds = 1_700_000_000L)
+        val undatedConfirmed = rowFor(netSatoshis = 1)
+        val undatedUnconfirmed = rowFor(netSatoshis = 1).copy(height = 0, confirmations = 0)
+
+        assertTrue(listOf(undatedConfirmed).hasUndatedConfirmedRows())
+        assertTrue(listOf(dated, undatedConfirmed).hasUndatedConfirmedRows())
+        assertTrue(
+            "an unconfirmed row alone is not a dating failure",
+            !listOf(undatedUnconfirmed).hasUndatedConfirmedRows(),
+        )
+        assertTrue("a fully dated list says nothing", !listOf(dated).hasUndatedConfirmedRows())
+        assertTrue("an empty list says nothing", !emptyList<TransactionRow>().hasUndatedConfirmedRows())
+    }
+
+    @Test
+    fun `a reused cached row keeps the date it already carried`() {
+        val query = FakeTxQuery(transactions = emptyMap(), tipHeight = 800_010)
+        val rows = buildTransactionRows(
+            transactions = listOf(ScannedTransaction(txHash = fund.first, height = 800_005)),
+            addresses = listOf(address(AddressChain.RECEIVE, 0, receiveScript)),
+            query = query,
+            cachedRows = mapOf(
+                fund.first to TransactionRow(
+                    txHash = fund.first,
+                    height = 800_005,
+                    confirmations = 1,
+                    netSatoshis = 100_000,
+                    blockTimestampEpochSeconds = 1_700_000_000L,
+                ),
+            ),
+        )
+
+        assertEquals(1_700_000_000L, rows.single().blockTimestampEpochSeconds)
+        assertTrue("no transaction fetch for a reused row", query.fetched.isEmpty())
+    }
+
     // --- helpers ----------------------------------------------------------
+
+    /** The mainnet genesis header, whose timestamp is 1231006505. */
+    private val genesisHeader =
+        "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c"
 
     private fun rowFor(netSatoshis: Long) = TransactionRow(
         txHash = "00".repeat(32),
@@ -406,8 +564,15 @@ class TransactionDetailsTest {
     private class FakeTxQuery(
         private val transactions: Map<String, String>,
         private val tipHeight: Int,
+        /**
+         * Raw 80-byte headers by height. A height not listed answers as an error
+         * — the row-dating path tolerates it and leaves the date null, so a test
+         * scripts only the headers it asserts on.
+         */
+        private val blockHeaders: Map<Int, String> = emptyMap(),
     ) : ChainQuery {
         val fetched = mutableListOf<String>()
+        val headerCalls = mutableListOf<Int>()
 
         override fun getHistory(scripthash: String): List<HistoryEntry> = emptyList()
 
@@ -421,5 +586,10 @@ class TransactionDetailsTest {
         }
 
         override fun getTipHeight(): Int = tipHeight
+
+        override fun blockHeader(height: Int): String {
+            headerCalls += height
+            return blockHeaders[height] ?: throw IllegalStateException("no header fixture for height $height")
+        }
     }
 }

@@ -32,6 +32,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.xbtwallet.app.chain.AddressChain
@@ -62,10 +64,21 @@ import kotlinx.coroutines.withContext
  * "Show more" grows the page by [PAGE_SIZE] and the derivation effect fills the
  * new tail *in a coroutine on the default dispatcher*, so even that work stays
  * off the UI thread.
+ *
+ * **Two ways to act on a row.** Tapping a row copies its address, as it always
+ * has. On the **Receive** chain each row also carries a small **QR** control
+ * that opens the receive screen for *that* address ([onShowQr]) — a QR for an
+ * address the user picked, not the first unused one. The Change chain has no
+ * such control: nobody hands out a change address as a QR, and offering one
+ * would be an invitation to reuse it.
+ *
+ * @param onShowQr opens the receive screen for the tapped row's address. Only
+ *   wired on the Receive chain.
  */
 @Composable
 fun AddressesScreen(
     state: SignerChainState,
+    onShowQr: (String) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -157,6 +170,10 @@ fun AddressesScreen(
                 rows = rows,
                 firstUnusedIndex = firstUnusedIndex(rows),
                 deriving = deriving,
+                // Only the Receive chain offers a QR per row: a change address
+                // is not something to hand out.
+                showQr = chain == AddressChain.RECEIVE,
+                onShowQr = onShowQr,
                 onShowMore = { pageCount++ },
                 modifier = Modifier.weight(1f),
             )
@@ -169,6 +186,8 @@ private fun AddressList(
     rows: List<AddressRowModel>,
     firstUnusedIndex: Int?,
     deriving: Boolean,
+    showQr: Boolean,
+    onShowQr: (String) -> Unit,
     onShowMore: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -183,6 +202,8 @@ private fun AddressList(
             AddressRow(
                 row = row,
                 firstUnused = row.index == firstUnusedIndex,
+                showQr = showQr,
+                onShowQr = { onShowQr(row.address) },
                 onClick = {
                     copyToClipboard(context, row.address)
                     Toast.makeText(context, "Address copied", Toast.LENGTH_SHORT).show()
@@ -199,7 +220,13 @@ private fun AddressList(
 }
 
 @Composable
-private fun AddressRow(row: AddressRowModel, firstUnused: Boolean, onClick: () -> Unit) {
+private fun AddressRow(
+    row: AddressRowModel,
+    firstUnused: Boolean,
+    showQr: Boolean,
+    onShowQr: () -> Unit,
+    onClick: () -> Unit,
+) {
     // The one address the next receive would hand out is tinted; everything else
     // sits on the plain background so the highlight stays meaningful.
     val background = if (firstUnused) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
@@ -236,6 +263,20 @@ private fun AddressRow(row: AddressRowModel, firstUnused: Boolean, onClick: () -
                     MaterialTheme.colorScheme.onSurfaceVariant
                 },
             )
+            if (showQr) {
+                Spacer(modifier = Modifier.width(4.dp))
+                // The receive QR for *this* address. A text control rather than
+                // an icon: this app carries no icon pack, and a new Android
+                // dependency for one glyph is the kind of surface this project
+                // deliberately keeps small. The label is the affordance.
+                TextButton(
+                    onClick = onShowQr,
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                    modifier = Modifier.semantics { contentDescription = "Show QR" },
+                ) {
+                    Text("QR", style = MaterialTheme.typography.labelMedium)
+                }
+            }
         }
     }
 }

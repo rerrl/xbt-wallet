@@ -3,6 +3,7 @@ package com.xbtwallet.app.chain
 import com.xbtwallet.app.crypto.ExtendedPublicKey
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -57,11 +58,18 @@ class AccountScannerTest {
          */
         private val transactions: Map<String, String> = emptyMap(),
         private val tipHeight: Int = 800_000,
+        /**
+         * Raw 80-byte block headers by height. A height not listed is answered
+         * as a server error, which the row-dating path tolerates (a null date)
+         * — so a test only scripts the headers it asserts on.
+         */
+        private val blockHeaders: Map<Int, String> = emptyMap(),
     ) : ChainQuery {
 
         val historyCalls = mutableListOf<Pair<AddressChain, Int>>()
         val balanceCalls = mutableListOf<Pair<AddressChain, Int>>()
         val unspentCalls = mutableListOf<Pair<AddressChain, Int>>()
+        val headerCalls = mutableListOf<Int>()
 
         private val lookup: Map<String, Pair<AddressChain, Int>> = buildMap {
             for (chain in AddressChain.entries) {
@@ -100,6 +108,11 @@ class AccountScannerTest {
             transactions[txHash] ?: DEFAULT_TX_HEX
 
         override fun getTipHeight(): Int = tipHeight
+
+        override fun blockHeader(height: Int): String {
+            headerCalls += height
+            return blockHeaders[height] ?: throw IllegalStateException("no header fixture for height $height")
+        }
     }
 
     @Test
@@ -294,6 +307,53 @@ class AccountScannerTest {
         assertTrue(snapshot.transactions[1].confirmed)
     }
 
+    @Test
+    fun `confirmed rows are dated from their block header, unconfirmed rows are not`() {
+        val scanner = scanner()
+        // TX_A and TX_B were mined in the SAME block, TX_D is in the mempool. One
+        // header call must date both mined rows; the mempool row gets none.
+        val query = FakeChainQuery(
+            scanner,
+            usedReceive = setOf(0, 1),
+            history = mapOf(
+                (AddressChain.RECEIVE to 0) to listOf(HistoryEntry(txHash = TX_A, height = 800_000)),
+                (AddressChain.RECEIVE to 1) to listOf(
+                    HistoryEntry(txHash = TX_B, height = 800_000),
+                    HistoryEntry(txHash = TX_D, height = 0),
+                ),
+            ),
+            blockHeaders = mapOf(800_000 to GENESIS_HEADER),
+            tipHeight = 800_010,
+        )
+
+        val snapshot = scanner.scan(query)
+
+        assertEquals(listOf(800_000), query.headerCalls)
+        val mined = snapshot.transactions.filter { it.confirmed }
+        assertEquals(setOf(TX_A, TX_B), mined.map { it.txHash }.toSet())
+        assertTrue(mined.all { it.blockTimestampEpochSeconds == 1231006505L })
+        assertNull(snapshot.transactions.first { it.txHash == TX_D }.blockTimestampEpochSeconds)
+    }
+
+    @Test
+    fun `a missing header leaves the row's date null instead of failing the scan, and is reported`() {
+        val scanner = scanner()
+        // No header fixture at all: every block.header call errors.
+        val query = FakeChainQuery(
+            scanner,
+            usedReceive = setOf(0),
+            history = mapOf((AddressChain.RECEIVE to 0) to listOf(HistoryEntry(txHash = TX_A, height = 800_000))),
+        )
+        val failures = mutableListOf<Int>()
+
+        val snapshot = scanner.scan(query, onTimestampFailure = { height, _ -> failures += height })
+
+        assertEquals(1, snapshot.transactions.size)
+        assertNull(snapshot.transactions.single().blockTimestampEpochSeconds)
+        assertEquals("the header was still asked for; only its reading failed", listOf(800_000), query.headerCalls)
+        assertEquals("and the failure reached the caller instead of vanishing", listOf(800_000), failures)
+    }
+
     // --- incremental rescan -------------------------------------------------
 
     /** A cached address derived from the same scanner, so its scripthash matches. */
@@ -453,6 +513,43 @@ class AccountScannerTest {
         assertEquals((1..60).toList(), counts)
     }
 
+    // --- row dating failures are reported, not swallowed --------------------
+
+    @Test
+    fun `a header longer than eighty bytes dates a row and is not a failure`() {
+        // The real server's shape from the BLAKE2b hardfork's activation height
+        // on: 164 bytes. The scan must date the row off the 80-byte prefix and
+        // report nothing — this is the regression the whole card is about.
+        val scanner = scanner()
+        val query = FakeChainQuery(
+            scanner,
+            usedReceive = setOf(0),
+            history = mapOf((AddressChain.RECEIVE to 0) to listOf(HistoryEntry(txHash = TX_A, height = 800_000))),
+            blockHeaders = mapOf(800_000 to GENESIS_HEADER + "00".repeat(84)),
+        )
+        val failures = mutableListOf<Int>()
+
+        val snapshot = scanner.scan(query, onTimestampFailure = { height, _ -> failures += height })
+
+        assertEquals(1231006505L, snapshot.transactions.single().blockTimestampEpochSeconds)
+        assertTrue("an extended header is not a failure: $failures", failures.isEmpty())
+    }
+
+    @Test
+    fun `a rescan reports a header failure the same way the cold scan does`() {
+        val scanner = scanner()
+        val cached = cachedSnapshot(scanner, receiveCount = 20)
+        val failures = mutableListOf<Int>()
+
+        scanner.rescan(
+            FakeChainQuery(scanner, usedReceive = setOf(0)),
+            cached,
+            onTimestampFailure = { height, _ -> failures += height },
+        )
+
+        assertEquals(listOf(800_000), failures)
+    }
+
     // --- memoisation --------------------------------------------------------
 
     @Test
@@ -508,6 +605,14 @@ class AccountScannerTest {
         const val LOOKUP_RANGE = 200
 
         const val TXID = "00000000000000000000000000000000000000000000000000000000000000aa"
+
+        /**
+         * The mainnet genesis block header — the one header whose timestamp is
+         * beyond argument (1231006505). Used as a stand-in block time for any
+         * height a row-dating test scripts.
+         */
+        const val GENESIS_HEADER =
+            "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c"
         const val TX_A = "00000000000000000000000000000000000000000000000000000000000000a1"
         const val TX_B = "00000000000000000000000000000000000000000000000000000000000000b2"
         const val TX_C = "00000000000000000000000000000000000000000000000000000000000000c3"

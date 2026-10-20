@@ -17,6 +17,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Stable
@@ -414,7 +415,8 @@ fun rememberHomeScreenState(
  *
  * Top to bottom: **Server** (private Electrum endpoint) with its live status
  * line, then the two things you do with signers — **Add signer** and
- * **Signers**. The old standalone "Import xpub", "Select active xpub" and
+ * **Signers** — then a small **Preferences** section (see below). The old
+ * standalone "Import xpub", "Select active xpub" and
  * "Addresses" buttons are gone: xpubs are signers now, they live in a list
  * rather than behind an "active" selection, and everything that works on one
  * signer (addresses included) is reached by opening that signer. **Add signer**
@@ -432,10 +434,24 @@ fun rememberHomeScreenState(
  * guessing at a connection it cannot make yet.
  *
  * The screen owns no state: it renders [state] and forwards taps.
+ *
+ * **Preferences.** Below the signer buttons sits a small *Preferences* section
+ * with the app-level flags — today just *Keep screen awake while syncing*, which
+ * holds the display on for as long as a scan is in flight so the socket is not
+ * torn down when the screen sleeps (see the keep-awake effect in `XbtWalletApp`).
+ * It is about the app, not about one signer, which is why it lives here rather
+ * than on a signer's screen; the value is owned by the navigation layer and
+ * persisted the moment the switch is flipped.
+ *
+ * @param keepScreenAwake the current value of the keep-awake preference.
+ * @param onKeepScreenAwakeChange called with the new value when the switch is
+ *   flipped; the caller persists it.
  */
 @Composable
 fun HomeScreen(
     state: HomeScreenState,
+    keepScreenAwake: Boolean,
+    onKeepScreenAwakeChange: (Boolean) -> Unit,
     onOpenServer: () -> Unit,
     onAddSigner: () -> Unit,
     onOpenSigners: () -> Unit,
@@ -500,6 +516,35 @@ fun HomeScreen(
             )
 
             Spacer(modifier = Modifier.height(32.dp))
+
+            // 4. Preferences — app-level behaviour, not per-signer setup. One
+            //    switch today: holding the screen awake for the length of a scan,
+            //    so a sync cannot die with the display. Flipping it writes
+            //    straight through to the store (the caller owns that).
+            Text(
+                text = "Preferences",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Keep screen awake while syncing",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                Switch(
+                    checked = keepScreenAwake,
+                    onCheckedChange = onKeepScreenAwakeChange,
+                )
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
 
             Text(
                 text = "XBT / SeedSigner coordinator — watch-only",
@@ -599,6 +644,8 @@ private fun HomeScreenPreview() {
     XbtWalletTheme {
         HomeScreen(
             state = previewState,
+            keepScreenAwake = true,
+            onKeepScreenAwakeChange = {},
             onOpenServer = {},
             onAddSigner = {},
             onOpenSigners = {},
@@ -616,6 +663,8 @@ private fun HomeScreenEmptyPreview() {
     XbtWalletTheme {
         HomeScreen(
             state = previewState,
+            keepScreenAwake = true,
+            onKeepScreenAwakeChange = {},
             onOpenServer = {},
             onAddSigner = {},
             onOpenSigners = {},

@@ -25,6 +25,8 @@ import com.xbtwallet.app.chain.TransactionDirection
 import com.xbtwallet.app.chain.TransactionRow
 import com.xbtwallet.app.chain.confirmationBucket
 import com.xbtwallet.app.chain.confirmationLabel
+import com.xbtwallet.app.chain.formatBlockTimestamp
+import com.xbtwallet.app.chain.hasUndatedConfirmedRows
 import kotlinx.coroutines.launch
 
 /**
@@ -46,6 +48,9 @@ import kotlinx.coroutines.launch
  * The list is capped at [MAX_TRANSACTIONS] rows, with a line saying so when the
  * account has more — a watch-only coordinator with years of history should not
  * ask a phone to lay out thousands of rows in one column.
+ *
+ * A row that could not be dated is explained once, above the list, rather than
+ * row by row (see [hasUndatedConfirmedRows]).
  */
 @Composable
 internal fun TransactionsSection(state: SignerChainState, modifier: Modifier = Modifier) {
@@ -90,7 +95,20 @@ private fun TransactionsReady(state: SignerChainState) {
         TextButton(onClick = { scope.launch { state.reload() } }) { Text("Retry") }
         Spacer(modifier = Modifier.height(6.dp))
     }
-    TransactionsList(state.snapshot?.transactions.orEmpty())
+    val transactions = state.snapshot?.transactions.orEmpty()
+    // One line for the whole list when a block header did not come back, so a
+    // row with no date reads as a known gap rather than a rendering mistake. It
+    // is said once, above the list — the failure is per block, and several rows
+    // mined in the same block share it. See `hasUndatedConfirmedRows`.
+    if (transactions.hasUndatedConfirmedRows()) {
+        Text(
+            text = "Some transaction dates couldn't be loaded.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+    }
+    TransactionsList(transactions)
 }
 
 @Composable
@@ -210,7 +228,33 @@ private fun TransactionRowItem(transaction: TransactionRow) {
             fontFamily = FontFamily.Monospace,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        // When the transaction happened: the block's own timestamp for a mined
+        // row, the word "Unconfirmed" for one still in the mempool, and nothing
+        // at all for a mined row whose header we could not read — a failure to
+        // date a transaction must not put invented text on screen.
+        transactionTimestampLabel(transaction)?.let { label ->
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
+}
+
+/**
+ * The date line for one row, or null when there is nothing honest to say.
+ *
+ * An unmined transaction has no block to read a time from, so it reads
+ * "Unconfirmed" — the same word the badge uses, in the date line's place. A
+ * mined row with a known timestamp is formatted in the device's time zone; a
+ * mined row whose header could not be fetched stays blank rather than guessing.
+ */
+private fun transactionTimestampLabel(transaction: TransactionRow): String? = when {
+    transaction.confirmations <= 0 -> "Unconfirmed"
+    transaction.blockTimestampEpochSeconds != null -> formatBlockTimestamp(transaction.blockTimestampEpochSeconds)
+    else -> null
 }
 
 /**
