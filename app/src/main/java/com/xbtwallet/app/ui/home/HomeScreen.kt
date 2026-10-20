@@ -44,6 +44,7 @@ import com.xbtwallet.app.electrum.TorStatus
 import com.xbtwallet.app.ui.theme.XbtSuccessDark
 import com.xbtwallet.app.ui.theme.XbtWalletTheme
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
@@ -201,7 +202,8 @@ class HomeScreenState(
      * minute, and a tick that waited on it would freeze the live "Tor starting…
      * N%" line on a stale "Connecting…" for the whole cold start — the regression
      * this loop exists to avoid. Because the dial is a child, a slow or wedged
-     * one never stops the ticks behind it.
+     * one never stops the ticks behind it. [refreshOnVisible] runs before the
+     * first tick on the same terms: it starts its dial as a child too.
      *
      * The caller is the composable that shows the home screen (`XbtWalletApp`),
      * so the loop stops when the user leaves the screen or the process goes to
@@ -215,6 +217,16 @@ class HomeScreenState(
      */
     suspend fun runHeartbeat(tickMillis: Long = TICK_INTERVAL_MILLIS) {
         supervisorScope {
+            // 0. The entry probe: the loop is keyed on the screen being on
+            //    display, so the moment it (re)starts is exactly the moment the
+            //    home screen became visible again — returning from Server,
+            //    Signers or a signer's detail screen, or coming back from the
+            //    background. That is the instant the last verdict stops being
+            //    trustworthy: the user may have just watched "Test connection"
+            //    succeed on the Server screen, so a remembered red must not sit
+            //    there until the next scheduled tick. One immediate check, no
+            //    waiting.
+            refreshOnVisible()
             while (currentCoroutineContext().isActive) {
                 try {
                     applyDisplay()
@@ -299,6 +311,72 @@ class HomeScreenState(
     }
 
     /**
+     * The one-shot probe that greets a return to the home screen, run before the
+     * first tick of [runHeartbeat].
+     *
+     * Re-entering the screen is a claim on the user's attention that the last
+     * verdict has expired: they navigated away and back, very often *because*
+     * they just changed something on the Server screen. Waiting out the loop's
+     * [STALE_AFTER_MILLIS] then shows them an answer they no longer believe, in
+     * red, for up to a minute. So the loop starts with a check (see
+     * [shouldProbeOnEntry]) and only skips it when a dial is already in flight or
+     * the remembered answer is a *fresh, successful* one.
+     *
+     * While that probe is in flight the line must never read a stale red: a
+     * remembered **failure** is forgotten first, so [applyDisplay] falls through
+     * to the neutral "Connecting…" (or the live "Tor starting… N%") until the
+     * probe answers. A remembered **success** is kept instead — an established
+     * connection must not blink to "Connecting…" merely because a background
+     * re-check started.
+     *
+     * Extracted as a [CoroutineScope] extension so the probe can be a child of
+     * the heartbeat, exactly like a tick's dial: a slow one must not freeze the
+     * live Tor percentage the loop renders.
+     */
+    private fun CoroutineScope.refreshOnVisible() {
+        applyDisplay()
+        if (!shouldProbeOnEntry()) return
+        if (lastAnswerStatus == ServerStatus.DISCONNECTED) forgetAnswer()
+        dialJob = launch { performDial() }
+    }
+
+    /**
+     * Whether the entry probe is due, i.e. whether a return to the home screen
+     * should check the server right now instead of waiting out a tick. All must
+     * hold:
+     *
+     * - an endpoint is saved;
+     * - no dial is in flight — a probe already running is reused, never doubled;
+     * - the route can dial (the same Tor gate as [shouldDial] — an onion server
+     *   is not dialled while Tor is bootstrapping or dead);
+     * - the remembered answer is not a *very fresh success*: no answer yet, an
+     *   answer about a different endpoint, one older than [FRESH_AFTER_MILLIS],
+     *   or a failure — a failure is never fresh enough to keep for a return, and
+     *   rendering it is precisely the misleading red this probe removes.
+     */
+    internal fun shouldProbeOnEntry(): Boolean {
+        val server = configuredServer() ?: return false
+        if (dialJob?.isActive == true) return false
+        if (!canDialNow(server)) return false
+        val answeredAt = lastAnswerAtMillis ?: return true
+        if (lastAnswerServerKey != serverKey) return true
+        if (now() - answeredAt >= FRESH_AFTER_MILLIS) return true
+        return lastAnswerStatus != ServerStatus.CONNECTED &&
+            lastAnswerStatus != ServerStatus.CONNECTED_VIA_TOR
+    }
+
+    /**
+     * Drops the remembered answer, so [applyDisplay] falls back to the neutral
+     * [ServerStatus.CONNECTING] while a fresh probe is in flight. Used only for a
+     * remembered failure on re-entry — a remembered success stays put.
+     */
+    private fun forgetAnswer() {
+        lastAnswerStatus = null
+        lastAnswerAtMillis = null
+        lastAnswerServerKey = null
+    }
+
+    /**
      * Whether a dial should start now. All must hold:
      *
      * - no dial is in flight;
@@ -313,13 +391,22 @@ class HomeScreenState(
     internal fun shouldDial(): Boolean {
         val server = configuredServer() ?: return false
         if (dialJob?.isActive == true) return false
-        if (ElectrumRouting.isOnionHost(server.host)) {
-            val phase = torStatus().phase
-            if (phase != TorPhase.READY && phase != TorPhase.OFF) return false
-        }
+        if (!canDialNow(server)) return false
         val answeredAt = lastAnswerAtMillis ?: return true
         if (lastAnswerServerKey != serverKey) return true
         return now() - answeredAt >= STALE_AFTER_MILLIS
+    }
+
+    /**
+     * Whether the current route may be dialled: always for clearnet, and for an
+     * onion only once Tor is [TorPhase.READY] or [TorPhase.OFF]. OFF is allowed
+     * on purpose — the connection path starts Tor itself, and the loop then
+     * renders live progress while the dial blocks on the bootstrap.
+     */
+    private fun canDialNow(server: ElectrumServer): Boolean {
+        if (!ElectrumRouting.isOnionHost(server.host)) return true
+        val phase = torStatus().phase
+        return phase == TorPhase.READY || phase == TorPhase.OFF
     }
 
     /**
@@ -385,6 +472,17 @@ class HomeScreenState(
          * is rendered as-is and no dial is paid.
          */
         const val STALE_AFTER_MILLIS: Long = 60_000L
+
+        /**
+         * How fresh a **successful** answer must be for a return to the home
+         * screen to reuse it instead of probing again (see
+         * [HomeScreenState.shouldProbeOnEntry]). Deliberately much shorter than
+         * [STALE_AFTER_MILLIS]: on the loop's own cadence one check a minute is
+         * plenty, but a return to the screen is the user asking "is it up now?",
+         * so anything older than a few seconds is worth one immediate check —
+         * and a remembered *failure* is never reusable at all.
+         */
+        const val FRESH_AFTER_MILLIS: Long = 5_000L
 
         /**
          * Cap on a single dial. Safely past Tor's 120s bootstrap cap, so a dial

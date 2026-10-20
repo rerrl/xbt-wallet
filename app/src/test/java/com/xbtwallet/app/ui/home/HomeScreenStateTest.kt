@@ -351,9 +351,10 @@ class HomeScreenStateTest {
         assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
         assertEquals(1, fixture.pinged.size)
 
-        // Coming back well within the stale window: the loop ticks but never
-        // dials, and the last answer stays on screen.
-        fixture.clock = 10_000
+        // Coming back inside the reuse window (a *successful* answer younger
+        // than FRESH_AFTER_MILLIS): the loop ticks but never dials, and the last
+        // answer stays on screen.
+        fixture.clock = HomeScreenState.FRESH_AFTER_MILLIS - 1_000
         runBlocking {
             val heartbeat = launch { fixture.state.runHeartbeat(tickMillis = 10) }
             delay(200)
@@ -453,6 +454,162 @@ class HomeScreenStateTest {
         }
 
         assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
+    }
+
+    // --- re-entering the home screen: the entry probe ------------------------
+
+    @Test
+    fun `returning to home re-probes immediately instead of reusing a stale red verdict`() {
+        // The reported bug, end to end: "Test connection" succeeded on the
+        // Server screen, but Home kept reading "Server disconnected" because the
+        // remembered verdict was reused until the next scheduled tick.
+        val fixture = Fixture(server = CLEARNET, results = listOf(false, true))
+        runBlocking { fixture.state.checkServerStatus() }
+        assertEquals(ServerStatus.DISCONNECTED, fixture.state.serverStatus)
+
+        // Well inside the loop's 60s staleness window, so only the entry probe
+        // can explain a second dial here.
+        fixture.clock = 10_000
+        val gate = CompletableDeferred<Unit>()
+        fixture.hold = gate
+
+        runBlocking {
+            val heartbeat = launch { fixture.state.runHeartbeat(tickMillis = 10) }
+            withTimeout(5_000) { while (fixture.pinged.size < 2) delay(5) }
+
+            assertEquals(
+                "the stale red must not be rendered while the fresh probe is in flight",
+                ServerStatus.CONNECTING,
+                fixture.state.serverStatus,
+            )
+
+            gate.complete(Unit)
+            withTimeout(5_000) {
+                while (fixture.state.serverStatus != ServerStatus.CONNECTED) delay(5)
+            }
+            heartbeat.cancelAndJoin()
+        }
+
+        assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
+    }
+
+    @Test
+    fun `re-entering re-probes a not-so-fresh success without blanking the connection`() {
+        val fixture = Fixture(server = CLEARNET)
+        runBlocking { fixture.state.checkServerStatus() }
+        assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
+
+        // Older than the reuse window: the entry probe is due…
+        fixture.clock = HomeScreenState.FRESH_AFTER_MILLIS + 1
+        val gate = CompletableDeferred<Unit>()
+        fixture.hold = gate
+
+        runBlocking {
+            val heartbeat = launch { fixture.state.runHeartbeat(tickMillis = 10) }
+            withTimeout(5_000) { while (fixture.pinged.size < 2) delay(5) }
+
+            // …but it is a green answer, so it stays on screen rather than
+            // blinking to "Connecting…" the way a red one must.
+            assertEquals(
+                "an established connection must not blink on a background re-check",
+                ServerStatus.CONNECTED,
+                fixture.state.serverStatus,
+            )
+
+            gate.complete(Unit)
+            heartbeat.cancelAndJoin()
+        }
+
+        assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
+    }
+
+    @Test
+    fun `a very fresh successful answer is reused on re-entry, with no extra dial`() {
+        val fixture = Fixture(server = CLEARNET)
+        runBlocking { fixture.state.checkServerStatus() }
+        assertEquals(1, fixture.pinged.size)
+
+        fixture.clock = HomeScreenState.FRESH_AFTER_MILLIS - 1_000
+        runBlocking {
+            val heartbeat = launch { fixture.state.runHeartbeat(tickMillis = 10) }
+            delay(200)
+            heartbeat.cancelAndJoin()
+        }
+
+        assertEquals("a fresh success must not be re-dialled on re-entry", 1, fixture.pinged.size)
+        assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
+    }
+
+    @Test
+    fun `re-entering while a probe is in flight does not start a second one`() {
+        val fixture = Fixture(server = CLEARNET)
+        val gate = CompletableDeferred<Unit>()
+        fixture.hold = gate
+
+        runBlocking {
+            val heartbeat = launch { fixture.state.runHeartbeat(tickMillis = 10) }
+            withTimeout(5_000) { while (fixture.pinged.isEmpty()) delay(5) }
+
+            // The user leaves and comes straight back: the entry probe runs
+            // again, finds the first dial still in flight and reuses it.
+            val revisit = launch { fixture.state.runHeartbeat(tickMillis = 10) }
+            delay(200)
+
+            assertEquals("one dial in flight is reused, never doubled", 1, fixture.pinged.size)
+            assertEquals(ServerStatus.CONNECTING, fixture.state.serverStatus)
+
+            gate.complete(Unit)
+            withTimeout(5_000) {
+                while (fixture.state.serverStatus != ServerStatus.CONNECTED) delay(5)
+            }
+            heartbeat.cancelAndJoin()
+            revisit.cancelAndJoin()
+        }
+
+        assertEquals(1, fixture.pinged.size)
+    }
+
+    @Test
+    fun `coming back after editing the server re-checks the new endpoint at once`() {
+        val fixture = Fixture(server = CLEARNET)
+        runBlocking { fixture.state.checkServerStatus() }
+        assertEquals(listOf(CLEARNET), fixture.pinged)
+
+        // Edited on the Server screen while the home screen was off display: the
+        // remembered answer belongs to an endpoint that is no longer saved.
+        fixture.serverSettings.server = OTHER
+        fixture.clock = 1_000
+        runBlocking {
+            val heartbeat = launch { fixture.state.runHeartbeat(tickMillis = 10) }
+            withTimeout(5_000) { while (fixture.pinged.size < 2) delay(5) }
+            heartbeat.cancelAndJoin()
+        }
+
+        assertEquals(listOf(CLEARNET, OTHER), fixture.pinged)
+        assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
+    }
+
+    @Test
+    fun `re-entering an onion home with tor bootstrapping does not dial`() {
+        val fixture = Fixture(server = ONION)
+        fixture.tor = TorStatus(TorPhase.READY, 100)
+        runBlocking { fixture.state.checkServerStatus() }
+        assertEquals(1, fixture.pinged.size)
+
+        // Tor went back to bootstrapping (a fresh app entry, say): the entry
+        // probe must respect the same gate the ticks do.
+        fixture.tor = TorStatus(TorPhase.STARTING, 10)
+        fixture.clock = HomeScreenState.FRESH_AFTER_MILLIS + 1
+        runBlocking {
+            val heartbeat = launch { fixture.state.runHeartbeat(tickMillis = 10) }
+            withTimeout(5_000) {
+                while (fixture.state.serverStatus != ServerStatus.TOR_STARTING) delay(5)
+            }
+            delay(100)
+
+            assertEquals("no dialing while Tor bootstraps", 1, fixture.pinged.size)
+            heartbeat.cancelAndJoin()
+        }
     }
 
     @Test
