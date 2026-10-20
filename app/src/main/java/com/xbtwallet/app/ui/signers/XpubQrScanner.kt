@@ -5,12 +5,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -20,8 +22,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.google.zxing.BarcodeFormat
+import com.journeyapps.barcodescanner.BarcodeCallback
+import com.journeyapps.barcodescanner.BarcodeResult
 import com.journeyapps.barcodescanner.DecoratedBarcodeView
 import com.journeyapps.barcodescanner.DefaultDecoderFactory
+import kotlinx.coroutines.delay
 
 /**
  * The xpub scanner as a panel, not a screen.
@@ -98,6 +103,127 @@ fun XpubQrScannerPanel(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(280.dp),
+            )
+
+            TextButton(
+                onClick = onCancel,
+                modifier = Modifier.align(Alignment.End),
+            ) {
+                Text("Cancel")
+            }
+        }
+    }
+}
+
+/**
+ * How long the animated scan waits for a *new* part before it gives up.
+ *
+ * The clock restarts on every newly assembled part, so this is "no progress for
+ * this long", not "the whole scan took this long". A signer's animation delivers
+ * a full export in a few seconds; a minute of no new part means the camera is
+ * not seeing the signer (or is seeing only some of its frames), and saying so is
+ * more useful than spinning forever. Timing out closes the panel and leaves the
+ * screen exactly as usable as cancelling does.
+ */
+private const val ANIMATED_SCAN_TIMEOUT_MILLIS = 60_000L
+
+/**
+ * The **animated** scanner: the same panel as [XpubQrScannerPanel], but decoding
+ * every frame instead of stopping at the first.
+ *
+ * A `crypto-account` export is usually too long for one QR code, so the signer
+ * animates it as a fountain-coded sequence of frames. The frames may be shown in
+ * any order and any sufficiently large subset completes the message, so the
+ * scanner must not treat a frame as "the answer" and stop: it hands each one to
+ * [onFrame] and keeps going until the caller dismisses it (which it does when
+ * the assembly reports the export complete). The caller owns that decision, not
+ * this panel — the panel knows nothing about UR.
+ *
+ * `decodeContinuous` is what makes that possible, and it is the whole reason
+ * this is a second composable rather than a flag on the first: the xpub panel's
+ * `decodeSingle` deliberately stops the decode loop after one hit.
+ *
+ * [progress] is the caller's assembly estimate (0–100) and is rendered here as a
+ * percentage and a bar, so the user can see the export filling in — the
+ * fountain-code equivalent of a download progress bar. It is also what arms the
+ * timeout: each new value means a new part arrived, which restarts the clock.
+ *
+ * The payload is passed on verbatim. Routing and decoding are
+ * [com.xbtwallet.app.crypto.UrAccountAssembler]'s job, not this file's.
+ */
+@Composable
+fun UrQrScannerPanel(
+    progress: Int,
+    onFrame: (String) -> Unit,
+    onCancel: () -> Unit,
+    onTimeout: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+
+    // The callbacks outlive any single composition, so they are read through
+    // rememberUpdatedState rather than captured once.
+    val currentOnFrame by rememberUpdatedState(onFrame)
+    val currentOnTimeout by rememberUpdatedState(onTimeout)
+
+    val barcodeView = remember {
+        DecoratedBarcodeView(context).apply {
+            decoderFactory = DefaultDecoderFactory(listOf(BarcodeFormat.QR_CODE))
+            setStatusText("")
+        }
+    }
+
+    // Continuous decoding: every frame the camera reads is offered to the
+    // assembler, duplicates included (the fountain decoder dedupes them itself).
+    // The camera lives exactly as long as this composable does — resume on
+    // enter, pause on dispose — because the screen underneath stays composed.
+    DisposableEffect(barcodeView) {
+        barcodeView.decodeContinuous(object : BarcodeCallback {
+            override fun barcodeResult(result: BarcodeResult) {
+                result.text?.let { text -> currentOnFrame(text) }
+            }
+        })
+        barcodeView.resume()
+        onDispose { barcodeView.pause() }
+    }
+
+    // Re-keyed on progress: every newly assembled part restarts the clock, so
+    // the timeout measures a stall in the animation rather than the length of
+    // the scan. Dismissing the panel (which completion does) cancels this.
+    LaunchedEffect(progress) {
+        delay(ANIMATED_SCAN_TIMEOUT_MILLIS)
+        currentOnTimeout()
+    }
+
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+                text = "Point the camera at the signer's animated export QR",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            AndroidView(
+                factory = { barcodeView },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(280.dp),
+            )
+
+            LinearProgressIndicator(
+                progress = { progress.coerceIn(0, 100) / 100f },
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            Text(
+                text = "Assembling the export \u2014 $progress%",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 6.dp),
             )
 
             TextButton(

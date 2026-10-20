@@ -75,6 +75,14 @@ dependencies {
     // gradle/libs.versions.toml). Used only to read a public xpub.
     implementation(libs.zxing.android.embedded)
 
+    // BC-UR decode for the "add signing device" screen: assembles the animated
+    // fountain-code QR frames a signer (SeedSigner, Keystone, Jade) shows when
+    // exporting an account, and decodes the `crypto-account` payload inside.
+    // Plain Java, Apache-2.0, no Google Play services; the decoder itself lives
+    // in crypto/UrAccountImport.kt and is Android-free, so it is unit-tested on
+    // the JVM (see app/src/test). One artifact, plus cbor transitively.
+    implementation(libs.hummingbird)
+
     debugImplementation(libs.androidx.ui.tooling)
 
     // JVM unit tests: the Electrum client is Android-free on purpose so it can

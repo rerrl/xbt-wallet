@@ -1,5 +1,8 @@
 package com.xbtwallet.app.ui.signers
 
+import com.xbtwallet.app.data.Signer
+import com.xbtwallet.app.data.SignerOrigin
+import com.xbtwallet.app.data.SignerType
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -52,5 +55,87 @@ class SignerPresentationTest {
     @Test
     fun `an empty key stays empty`() {
         assertEquals("", shortenedXpub(""))
+    }
+
+    // --- which tag a signer wears -------------------------------------------
+    //
+    // The tag is the one place the import path is visible to the user, so the
+    // rule lives here as plain Kotlin and is pinned without a UI: a key that came
+    // off a SeedSigner wears "seedsigner" in orange, a key off any other signing
+    // device wears "signing device" in the distinct blue, and a text xpub keeps
+    // the original grey "watch-only" pill.
+
+    private fun signer(
+        importedVia: SignerOrigin = SignerOrigin.TEXT_QR,
+    ) = Signer(
+        id = "id-1",
+        name = "Cold storage",
+        type = SignerType.WatchOnlyXpub(bip84Zpub),
+        createdAtEpochSeconds = 0L,
+        importedVia = importedVia,
+    )
+
+    @Test
+    fun `a text-qr signer wears the grey watch-only tag`() {
+        val tag = signerTagFor(signer(SignerOrigin.TEXT_QR))
+
+        assertEquals("watch-only", tag.label)
+        assertEquals(SignerTagAccent.NEUTRAL, tag.accent)
+    }
+
+    @Test
+    fun `a seedsigner signer wears the orange seedsigner tag`() {
+        val tag = signerTagFor(signer(SignerOrigin.SEEDSIGNER_UR))
+
+        assertEquals("seedsigner", tag.label)
+        assertEquals(SignerTagAccent.ORANGE, tag.accent)
+    }
+
+    @Test
+    fun `an other-device signer wears the distinct signing-device tag`() {
+        val tag = signerTagFor(signer(SignerOrigin.SIGNING_DEVICE_UR))
+
+        // Not "seedsigner" (the user did not say the device was one) and not the
+        // grey of a text xpub (it did not arrive as text) — its own word, in its
+        // own accent.
+        assertEquals("signing device", tag.label)
+        assertEquals(SignerTagAccent.DEVICE, tag.accent)
+        assertTrue(
+            "the signing-device accent must not be the grey of a text xpub",
+            tag.accent != SignerTagAccent.NEUTRAL,
+        )
+    }
+
+    /** Every origin answers with a tag, and no two accents collide. */
+    @Test
+    fun `each origin has its own tag and its own accent`() {
+        val tags = SignerOrigin.entries.map { signerTagFor(signer(it)) }
+
+        assertEquals(
+            setOf("watch-only", "seedsigner", "signing device"),
+            tags.map { it.label }.toSet(),
+        )
+        assertEquals(
+            "one accent per origin, no sharing",
+            SignerOrigin.entries.size,
+            tags.map { it.accent }.toSet().size,
+        )
+    }
+
+    @Test
+    fun `a signer with no recorded origin wears the grey watch-only tag`() {
+        // The default on [Signer] is the text-QR path, so a record that predates
+        // the field (or a call site that does not set it) is tagged as before.
+        val tag = signerTagFor(
+            Signer(
+                id = "id-1",
+                name = "Cold storage",
+                type = SignerType.WatchOnlyXpub(bip84Zpub),
+                createdAtEpochSeconds = 0L,
+            ),
+        )
+
+        assertEquals("watch-only", tag.label)
+        assertEquals(SignerTagAccent.NEUTRAL, tag.accent)
     }
 }

@@ -1,7 +1,12 @@
 package com.xbtwallet.app.ui.signers
 
 import com.xbtwallet.app.chain.AccountSnapshot
+import com.xbtwallet.app.chain.ChainEvent
+import com.xbtwallet.app.chain.ChainSubscriptionSession
+import com.xbtwallet.app.chain.ChainTip
+import com.xbtwallet.app.chain.ReconnectPolicy
 import com.xbtwallet.app.chain.ScripthashBalance
+import com.xbtwallet.app.chain.TransactionRow
 import com.xbtwallet.app.data.KeyValueStore
 import com.xbtwallet.app.data.ServerSettings
 import com.xbtwallet.app.data.Signer
@@ -11,6 +16,10 @@ import com.xbtwallet.app.electrum.ElectrumException
 import com.xbtwallet.app.electrum.ElectrumProtocol
 import com.xbtwallet.app.electrum.ElectrumServer
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
@@ -19,10 +28,12 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
 /**
@@ -115,6 +126,105 @@ class SignerChainStateTest {
         val message = state.errorMessage.orEmpty()
         assertTrue(message, message.contains("192.168.1.10:50002"))
         assertTrue(message, message.contains("refused"))
+    }
+
+    // --- errno-aware wording -------------------------------------------------
+    //
+    // The balance path shares the Server screen's errno vocabulary. A raw-socket
+    // errno says which side is at fault: EACCES/EPERM is the OS rejecting the
+    // socket on the phone, so the sentence must send the user to the phone's
+    // permissions — not to their server — and an unreachable host or network is
+    // not the same failure as a dial that simply ran out of time.
+
+    /** A state whose scan fails with [error] on the first attempt, with no retries. */
+    private fun failingScanState(error: Exception): SignerChainState =
+        SignerChainState(
+            signer(),
+            FakeServerSettings(SERVER),
+            retryDelaysSeconds = emptyList(),
+        ) { _, _, _, _ -> throw error }
+
+    @Test
+    fun `an EACCES balance failure names the on-device causes, not the server`() {
+        val state = failingScanState(
+            ConnectException(
+                "failed to connect to /192.168.1.10 (port 50002) from /192.168.1.5 after 10000ms: " +
+                    "isConnected failed: EACCES (Permission denied)",
+            ),
+        )
+
+        runBlocking { state.load() }
+
+        assertEquals(ChainPhase.ERROR, state.phase)
+        val message = state.errorMessage.orEmpty()
+        assertTrue(message, message.contains("192.168.1.10:50002"))
+        assertTrue(message, message.contains("Network permission"))
+        assertTrue(message, message.contains("VPN lockdown"))
+        assertTrue(message, message.contains("firewall"))
+        assertTrue(message, message.contains("Data Saver"))
+        assertFalse("the server never refused anything here", message.contains("refused"))
+        assertFalse(message, message.contains("the connection failed"))
+    }
+
+    @Test
+    fun `an unreachable host is not reported as a refusal`() {
+        val state = failingScanState(ConnectException("connect failed: EHOSTUNREACH (No route to host)"))
+
+        runBlocking { state.load() }
+
+        val message = state.errorMessage.orEmpty()
+        assertTrue(message, message.contains("host unreachable"))
+        assertFalse(message, message.contains("network unreachable"))
+        assertFalse(message, message.contains("refused"))
+    }
+
+    @Test
+    fun `an unreachable network is distinguished from an unreachable host`() {
+        val state = failingScanState(ConnectException("connect failed: ENETUNREACH (Network is unreachable)"))
+
+        runBlocking { state.load() }
+
+        val message = state.errorMessage.orEmpty()
+        assertTrue(message, message.contains("network unreachable"))
+        assertFalse(message, message.contains("host unreachable"))
+        assertFalse(message, message.contains("refused"))
+    }
+
+    @Test
+    fun `a timed-out dial is distinguished from the server not answering`() {
+        val dial = failingScanState(ConnectException("failed to connect to /192.168.1.10 (port 50002): ETIMEDOUT"))
+        val slowServer = failingScanState(SocketTimeoutException("read timed out"))
+
+        runBlocking { dial.load() }
+        runBlocking { slowServer.load() }
+
+        assertTrue(
+            dial.errorMessage.orEmpty(),
+            dial.errorMessage.orEmpty().contains("the connection attempt timed out"),
+        )
+        assertTrue(
+            slowServer.errorMessage.orEmpty(),
+            slowServer.errorMessage.orEmpty().contains("the server did not answer in time"),
+        )
+    }
+
+    @Test
+    fun `an errno-free IOException keeps its generic wording`() {
+        val state = failingScanState(IOException("socket closed"))
+
+        runBlocking { state.load() }
+
+        val message = state.errorMessage.orEmpty()
+        assertTrue(message, message.contains("the connection failed (socket closed)"))
+    }
+
+    @Test
+    fun `an errno-free refusal keeps the refused wording`() {
+        val state = failingScanState(ConnectException("Connection refused"))
+
+        runBlocking { state.load() }
+
+        assertTrue(state.errorMessage.orEmpty(), state.errorMessage.orEmpty().contains("the connection was refused"))
     }
 
     @Test
@@ -640,6 +750,414 @@ class SignerChainStateTest {
         assertEquals("Refresh/Retry always rescans", 2, scans)
     }
 
+    // --- the live subscription ----------------------------------------------
+    //
+    // These drive the seam rather than a socket: a fake engine whose events and
+    // snapshot the test sets, and a fake session that only records its own
+    // closing. What is pinned here is the wiring the card specifies — a push
+    // reaches the screen, the rescan and the manager never both fetch the same
+    // address, leaving the screen closes the connection, and a dead connection
+    // falls back to the pull path without an error.
+
+    @Test
+    fun `a push updates the balance, the transactions and the confirmations the screen shows`() {
+        val engine = FakeSubscriptionEngine()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val cached = AccountSnapshot(emptyList(), emptyList(), emptyList(), ScripthashBalance(5_000, 0))
+        val mempool = cached.copy(
+            balance = ScripthashBalance(5_000, 400),
+            transactions = listOf(TransactionRow(txHash = "aa", height = 0, confirmations = 0, netSatoshis = 400)),
+        )
+        val state = stateWithSubscriptions(
+            engine = engine,
+            scope = scope,
+            snapshotStore = seededStore(cached),
+            scan = { _, _, _, _ -> cached },
+        )
+
+        // The seeded cache is what the screen opens on, before anything is live.
+        assertEquals(5_000L, state.snapshot?.satoshis)
+
+        state.startSubscriptions()
+        awaitUntil("the manager to be handed the connection") { engine.startedWith != null }
+        assertEquals("the manager is seeded with what is on screen", cached, engine.startedWith?.second)
+
+        // A payment lands in the mempool: the manager's snapshot moves, and the
+        // change arrives as a push.
+        engine.current = mempool
+        engine.emit(ChainEvent.AddressChanged("sh-0", "status-1"))
+        awaitUntil("the mempool row on screen") { state.snapshot?.transactions?.size == 1 }
+
+        assertEquals("an unconfirmed row arrives as an unconfirmed row", 0, state.snapshot?.transactions?.single()?.confirmations)
+        assertEquals(5_400L, state.snapshot?.satoshis)
+        assertEquals(400L, state.snapshot?.balance?.unconfirmedSatoshis)
+
+        // The next block mines it: the conf count ticks up on the NewBlock push.
+        engine.current = mempool.copy(
+            balance = ScripthashBalance(5_400, 0),
+            transactions = listOf(TransactionRow(txHash = "aa", height = 800_001, confirmations = 1, netSatoshis = 400)),
+        )
+        engine.emit(ChainEvent.NewBlock(ChainTip(800_001, "hex")))
+        awaitUntil("the confirmation to tick") { state.snapshot?.transactions?.single()?.confirmations == 1 }
+
+        assertEquals(5_400L, state.snapshot?.satoshis)
+        scope.cancel()
+    }
+
+    @Test
+    fun `a completed rescan is handed to the manager so one address is never refreshed twice`() {
+        val engine = FakeSubscriptionEngine()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val cached = AccountSnapshot(emptyList(), emptyList(), emptyList(), ScripthashBalance(5_000, 0))
+        val fresh = AccountSnapshot(emptyList(), emptyList(), emptyList(), ScripthashBalance(7_000, 0))
+        var syncingDuringScan: Boolean? = null
+        lateinit var state: SignerChainState
+        state = stateWithSubscriptions(
+            engine = engine,
+            scope = scope,
+            snapshotStore = seededStore(cached),
+            scan = { _, _, _, _ ->
+                syncingDuringScan = state.isSyncing
+                fresh
+            },
+        )
+
+        state.startSubscriptions()
+        awaitUntil("the manager to be handed the connection") { engine.startedWith != null }
+
+        runBlocking { state.load() }
+
+        assertEquals("the rescan still runs and still lands", fresh, state.snapshot)
+        assertTrue("the rescan still reports itself through isSyncing", syncingDuringScan == true)
+        assertFalse("subscriptions are not a sync the user has to wait for", state.isSyncing)
+        // The manager adopts the rescan's snapshot: it is the fresher writer, and
+        // adopting it is what stops a notification for an address the rescan just
+        // covered from being fetched a second time (see the manager's
+        // updateSnapshot).
+        awaitUntil("the rescan to reach the manager") { engine.adopted.contains(fresh) }
+        assertEquals(fresh, engine.current)
+        scope.cancel()
+    }
+
+    @Test
+    fun `leaving the screen closes the connection and the manager`() {
+        val engine = FakeSubscriptionEngine()
+        val session = FakeSubscriptionSession()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val cached = AccountSnapshot(emptyList(), emptyList(), emptyList(), ScripthashBalance(5_000, 0))
+        val state = stateWithSubscriptions(
+            engine = engine,
+            session = session,
+            scope = scope,
+            snapshotStore = seededStore(cached),
+            scan = { _, _, _, _ -> cached },
+        )
+
+        state.startSubscriptions()
+        awaitUntil("the manager to be handed the connection") { engine.startedWith != null }
+
+        state.stopSubscriptions()
+
+        awaitUntil("the manager to close") { engine.isClosed }
+        assertTrue("the connection is this state's to close", session.isClosed)
+        assertEquals("and closing twice is a no-op", 1, engine.closeCount)
+
+        // Nothing that arrives after the screen is gone may move the state.
+        engine.emit(ChainEvent.Resynced)
+        Thread.sleep(50)
+        assertEquals(5_000L, state.snapshot?.satoshis)
+
+        // The screen closing is idempotent too.
+        state.stopSubscriptions()
+        assertEquals(1, engine.closeCount)
+        scope.cancel()
+    }
+
+    @Test
+    fun `a dropped connection is re-dialled and resubscribed, silently`() {
+        val engine = FakeSubscriptionEngine()
+        val first = FakeSubscriptionSession()
+        val second = FakeSubscriptionSession()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        var opens = 0
+        val cached = AccountSnapshot(emptyList(), emptyList(), emptyList(), ScripthashBalance(5_000, 0))
+        val state = stateWithSubscriptions(
+            engine = engine,
+            session = first,
+            scope = scope,
+            snapshotStore = seededStore(cached),
+            scan = { _, _, _, _ -> cached },
+            open = {
+                opens++
+                if (opens == 1) first else second
+            },
+        )
+
+        state.startSubscriptions()
+        awaitUntil("the manager to be handed the connection") { engine.startCount == 1 }
+        assertEquals("the manager is seeded with what is on screen", cached, engine.startedWith?.second)
+
+        // The manager merges a live change into its own copy, which is the state a
+        // reconnect has to be diffed against.
+        val live = cached.copy(balance = ScripthashBalance(5_400, 0))
+        engine.current = live
+
+        // The Tor circuit drops mid-session. That is not the end of the live path:
+        // the state re-dials, resubscribes, and says nothing about it.
+        engine.emit(ChainEvent.SessionLost(IOException("the peer closed the connection")))
+
+        awaitUntil("the replacement connection to be resubscribed") { engine.startCount == 2 }
+        assertEquals("one re-dial, no storm", 2, opens)
+        assertEquals("the manager is handed the new connection, not torn down", second, engine.startedWith?.first)
+        assertEquals("and the resubscribe is diffed against the manager's own state", live, engine.startedWith?.second)
+        assertFalse("a reconnect is not a failure", engine.isClosed)
+        assertNull(state.errorMessage)
+        assertFalse(state.syncFailed)
+        assertEquals(5_000L, state.snapshot?.satoshis)
+
+        // And the subscription is still live afterwards: a push still moves the
+        // screen, through the very same manager.
+        engine.current = live.copy(balance = ScripthashBalance(6_000, 0))
+        engine.emit(ChainEvent.AddressChanged("sh-0", "status-2"))
+        awaitUntil("the push after the reconnect") { state.snapshot?.satoshis == 6_000L }
+        scope.cancel()
+    }
+
+    @Test
+    fun `a spent reconnect budget falls back to the pull path silently`() {
+        val engine = FakeSubscriptionEngine()
+        val session = FakeSubscriptionSession()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        var opens = 0
+        val cached = AccountSnapshot(emptyList(), emptyList(), emptyList(), ScripthashBalance(5_000, 0))
+        val fresh = AccountSnapshot(emptyList(), emptyList(), emptyList(), ScripthashBalance(6_000, 0))
+        var scans = 0
+        val state = stateWithSubscriptions(
+            engine = engine,
+            session = session,
+            scope = scope,
+            snapshotStore = seededStore(cached),
+            scan = { _, _, _, _ ->
+                scans++
+                fresh
+            },
+            // The endpoint answers the first dial and then nothing at all — the
+            // "server is down, Tor is broken beyond self-heal" case.
+            open = {
+                opens++
+                if (opens == 1) session else throw ConnectException("Connection refused")
+            },
+            reconnectPolicy = ReconnectPolicy(maxAttempts = 2, jitterFraction = 0.0),
+        )
+
+        state.startSubscriptions()
+        awaitUntil("the manager to be handed the connection") { engine.startCount == 1 }
+
+        engine.emit(ChainEvent.SessionLost(IOException("the peer closed the connection")))
+
+        // Two attempts, then give up: the manager and the connection are closed,
+        // and nothing is said about it on screen.
+        awaitUntil("the manager to be released once the budget is spent") { engine.isClosed }
+        assertEquals("the first dial plus the policy's two attempts", 3, opens)
+        assertTrue("the dead connection is this state's to close", session.isClosed)
+        assertEquals("one connection, ever, was reported to the manager", 1, engine.startCount)
+        assertNull(state.errorMessage)
+        assertFalse(state.syncFailed)
+        assertEquals("the cached numbers stay exactly where they were", 5_000L, state.snapshot?.satoshis)
+
+        // And the existing refresh path is untouched by any of it — including the
+        // spent budget, which is not re-opened without the screen being re-entered.
+        runBlocking { state.reload() }
+
+        assertEquals(1, scans)
+        assertEquals(fresh, state.snapshot)
+        assertEquals(ChainPhase.READY, state.phase)
+        assertFalse(state.syncFailed)
+        Thread.sleep(50)
+        assertEquals("a rescan does not resurrect a given-up subscription", 1, engine.startCount)
+        scope.cancel()
+    }
+
+    @Test
+    fun `opening the screen twice opens one connection`() {
+        val engine = FakeSubscriptionEngine()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val opens = AtomicInteger(0)
+        val cached = AccountSnapshot(emptyList(), emptyList(), emptyList(), ScripthashBalance(5_000, 0))
+        val state = stateWithSubscriptions(
+            engine = engine,
+            scope = scope,
+            snapshotStore = seededStore(cached),
+            scan = { _, _, _, _ -> cached },
+            onOpen = { opens.incrementAndGet() },
+        )
+
+        state.startSubscriptions()
+        awaitUntil("the connection to open") { engine.startedWith != null }
+        state.startSubscriptions()
+        Thread.sleep(50)
+
+        assertEquals("a recomposition is not a second connection", 1, opens.get())
+        scope.cancel()
+    }
+
+    @Test
+    fun `a cold screen starts its subscription once the first scan lands`() {
+        val engine = FakeSubscriptionEngine()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val opens = AtomicInteger(0)
+        val fresh = AccountSnapshot(emptyList(), emptyList(), emptyList(), ScripthashBalance(1_000, 0))
+        val state = stateWithSubscriptions(
+            engine = engine,
+            scope = scope,
+            snapshotStore = null,
+            scan = { _, _, _, _ -> fresh },
+            onOpen = { opens.incrementAndGet() },
+        )
+
+        // Nothing cached: there is no account to subscribe to yet, so asking must
+        // not open a connection to nothing.
+        state.startSubscriptions()
+        Thread.sleep(50)
+        assertEquals(0, opens.get())
+
+        runBlocking { state.load() }
+
+        awaitUntil("the subscription to open once the scan landed") { engine.startedWith != null }
+        assertEquals("the manager is seeded with the fresh scan", fresh, engine.startedWith?.second)
+        assertEquals(1, opens.get())
+        scope.cancel()
+    }
+
+    @Test
+    fun `a scan that lands after the screen closed opens no connection`() {
+        val engine = FakeSubscriptionEngine()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val opens = AtomicInteger(0)
+        val fresh = AccountSnapshot(emptyList(), emptyList(), emptyList(), ScripthashBalance(1_000, 0))
+        val state = stateWithSubscriptions(
+            engine = engine,
+            scope = scope,
+            snapshotStore = null,
+            scan = { _, _, _, _ -> fresh },
+            onOpen = { opens.incrementAndGet() },
+        )
+
+        // The screen opens and closes before the (cold) scan has answered — the
+        // scan keeps running in the app scope, and must not resurrect a
+        // connection for a screen the user has left.
+        state.startSubscriptions()
+        state.stopSubscriptions()
+        runBlocking { state.load() }
+        Thread.sleep(50)
+
+        assertEquals(0, opens.get())
+        assertNull(engine.startedWith)
+        assertEquals(ChainPhase.READY, state.phase)
+        scope.cancel()
+    }
+
+    @Test
+    fun `no saved endpoint means no subscription and nothing else changes`() {
+        val engine = FakeSubscriptionEngine()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val opens = AtomicInteger(0)
+        val state = stateWithSubscriptions(
+            engine = engine,
+            scope = scope,
+            snapshotStore = null,
+            server = null,
+            scan = { _, _, _, _ -> AccountSnapshot.EMPTY },
+            onOpen = { opens.incrementAndGet() },
+        )
+
+        state.startSubscriptions()
+        runBlocking { state.load() }
+        Thread.sleep(50)
+
+        assertEquals(ChainPhase.NO_SERVER, state.phase)
+        assertEquals(0, opens.get())
+        assertNull(state.errorMessage)
+        scope.cancel()
+    }
+
+    @Test
+    fun `a connection that cannot be opened leaves the pull path exactly as it was`() {
+        val engine = FakeSubscriptionEngine()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val fresh = AccountSnapshot(emptyList(), emptyList(), emptyList(), ScripthashBalance(1_000, 0))
+        val state = stateWithSubscriptions(
+            engine = engine,
+            scope = scope,
+            snapshotStore = null,
+            scan = { _, _, _, _ -> fresh },
+            onOpen = { throw ConnectException("Connection refused") },
+        )
+
+        state.startSubscriptions()
+        runBlocking { state.load() }
+
+        // A cold scan that succeeded is READY, with no failure and no manager:
+        // exactly master's behaviour.
+        assertEquals(ChainPhase.READY, state.phase)
+        assertEquals(fresh, state.snapshot)
+        assertNull(state.errorMessage)
+        assertFalse(state.syncFailed)
+        assertNull("no engine is built when there is no connection", engine.startedWith)
+        scope.cancel()
+    }
+
+    @Test
+    fun `a state with no subscription scope never subscribes`() {
+        // The default for every caller that only ever pulls — including a test —
+        // and the reason adding the live path cannot change their behaviour.
+        val state = SignerChainState(signer(), FakeServerSettings(SERVER), retryDelaysSeconds = emptyList()) { _, _, _, _ ->
+            AccountSnapshot.EMPTY
+        }
+
+        state.startSubscriptions()
+        runBlocking { state.load() }
+
+        assertEquals(ChainPhase.READY, state.phase)
+        assertFalse(state.isSyncing)
+    }
+
+    /**
+     * A state wired for the live path: a fake engine, a fake connection, and a
+     * scope the test cancels at the end.
+     */
+    private fun stateWithSubscriptions(
+        engine: FakeSubscriptionEngine,
+        scope: CoroutineScope,
+        snapshotStore: SnapshotStore?,
+        scan: ChainScan,
+        session: FakeSubscriptionSession = FakeSubscriptionSession(),
+        server: ElectrumServer? = SERVER,
+        onOpen: () -> Unit = {},
+        reconnectPolicy: ReconnectPolicy = INSTANT_RECONNECT,
+        reconnectBackoff: suspend (Long) -> Unit = {},
+        open: (() -> ChainSubscriptionSession)? = null,
+    ) = SignerChainState(
+        signer = signer(),
+        serverSettings = FakeServerSettings(server),
+        snapshotStore = snapshotStore,
+        now = { 1_000L },
+        retryDelaysSeconds = emptyList(),
+        subscriptionScope = scope,
+        openSubscription = {
+            onOpen()
+            open?.invoke() ?: session
+        },
+        newSubscriptionEngine = { engine },
+        reconnectPolicy = reconnectPolicy,
+        reconnectBackoff = reconnectBackoff,
+        scan = scan,
+    )
+
+    /** A store seeded with a whole snapshot, old enough that `load` rescans it. */
+    private fun seededStore(snapshot: AccountSnapshot): SnapshotStore =
+        SnapshotStore(InMemoryStore(), now = { 1L }).apply { save("id-1", snapshot) }
+
     private fun seededStore(balance: ScripthashBalance): SnapshotStore {
         val store = SnapshotStore(InMemoryStore(), now = { 1L })
         store.save("id-1", AccountSnapshot(emptyList(), emptyList(), emptyList(), balance))
@@ -648,5 +1166,12 @@ class SignerChainStateTest {
 
     private companion object {
         val SERVER = ElectrumServer(host = "192.168.1.10", port = 50002, protocol = ElectrumProtocol.SSL)
+
+        /**
+         * A reconnect policy for the wiring tests: no waiting, and a budget short
+         * enough that "it reconnects" and "it gives up" are both reachable
+         * instantly. The schedule itself is `ReconnectPolicyTest`'s business.
+         */
+        val INSTANT_RECONNECT = ReconnectPolicy(maxAttempts = 2, jitterFraction = 0.0)
     }
 }

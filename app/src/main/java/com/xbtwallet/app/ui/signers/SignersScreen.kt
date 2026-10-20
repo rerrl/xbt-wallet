@@ -34,21 +34,24 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerType
+import com.xbtwallet.app.ui.theme.XbtDeviceTagDark
+import com.xbtwallet.app.ui.theme.XbtPrimary
 
 /**
- * The list of saved signers — the app's inventory.
+ * The list of saved wallets — the app's inventory.
  *
- * Every signer is here by the name the user gave it, with its *watch-only* type
- * badge and a head…tail snippet of its key. Nothing is selected and nothing is
- * "active": tapping a row opens that signer's own screen, which is the only
- * place a per-signer action lives.
+ * Every wallet is here by the name the user gave it, with its *type* tag
+ * ("watch-only", "seedsigner" or "signing device" — see [signerTagFor]) and a
+ * head…tail snippet of its key. Nothing is selected and nothing is "active":
+ * tapping a row opens that wallet's own screen, which is the only place a
+ * per-wallet action lives.
  *
  * The screen is otherwise stateless — [signers] is passed in from the same
  * [com.xbtwallet.app.ui.home.HomeScreenState] the home screen counts, so the two
  * screens can never disagree about what is saved. The only state it keeps is
- * local to the interaction: which row's overflow menu is open, and which signer
+ * local to the interaction: which row's overflow menu is open, and which wallet
  * is waiting on a delete confirmation. Neither outlives the screen, and neither
- * touches storage — removing a signer is [onDeleteSigner]'s job, on the screen
+ * touches storage — removing a wallet is [onDeleteSigner]'s job, on the screen
  * that owns the store.
  *
  * Deletion is a two-step (menu → confirm dialog) on purpose: a watch-only xpub
@@ -81,7 +84,7 @@ fun SignersScreen(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onBack) { Text("\u2190 Back") }
                 Spacer(modifier = Modifier.width(4.dp))
-                Text("Signers", style = MaterialTheme.typography.titleLarge)
+                Text("Wallets", style = MaterialTheme.typography.titleLarge)
             }
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -90,12 +93,12 @@ fun SignersScreen(
                 // The empty state does the explaining and offers the way out of
                 // itself, so an empty list is never a dead end.
                 Text(
-                    text = "No signers yet.",
+                    text = "No wallets yet.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Add a signer to watch an account: paste the account xpub " +
+                    text = "Add a wallet to watch an account: scan the account xpub " +
                         "from your air-gapped signer and this phone can see it without " +
                         "ever holding its keys.",
                     style = MaterialTheme.typography.bodySmall,
@@ -106,13 +109,13 @@ fun SignersScreen(
                     onClick = onAddSigner,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text("Add signer")
+                    Text("Add wallet")
                 }
                 return@Column
             }
 
             Text(
-                text = "Tap a signer to open it. Its xpub stays on this phone.",
+                text = "Tap a wallet to open it. Its xpub stays on this phone.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -143,7 +146,7 @@ fun SignersScreen(
     if (pendingDelete != null) {
         AlertDialog(
             onDismissRequest = { confirmingDeleteId = null },
-            title = { Text("Remove signer?") },
+            title = { Text("Remove wallet?") },
             text = {
                 Text(
                     "\u201c${pendingDelete.name}\u201d will be removed from this phone. " +
@@ -198,7 +201,10 @@ private fun SignerRow(
             )
         }
         Spacer(modifier = Modifier.width(8.dp))
-        TypeBadge(label = signer.typeLabel)
+        // The tag is chosen by the signer's origin, not by hand here — the same
+        // rule the signer's own screen uses, so the two cannot disagree.
+        val tag = signerTagFor(signer)
+        TypeBadge(label = tag.label, accent = tag.accent)
         Spacer(modifier = Modifier.width(4.dp))
         Box {
             // A text glyph rather than an icon dependency: one character keeps
@@ -211,7 +217,7 @@ private fun SignerRow(
                 onDismissRequest = { onMenuOpenChange(false) },
             ) {
                 DropdownMenuItem(
-                    text = { Text("Remove signer") },
+                    text = { Text("Remove wallet") },
                     onClick = onRemoveClick,
                 )
             }
@@ -219,18 +225,41 @@ private fun SignerRow(
     }
 }
 
-/** The little "watch-only" pill next to a signer's name. */
+/**
+ * The little pill next to a wallet's name — "watch-only" in grey, "seedsigner"
+ * in the theme's orange for a SeedSigner export, or "signing device" in the
+ * theme's steel blue for an export from any other device.
+ *
+ * The accent comes in as [SignerTagAccent] rather than a colour so the choice of
+ * which wallet wears which tag stays in [signerTagFor], where a unit test can
+ * reach it, and this composable only maps the chosen accent onto the palette.
+ */
 @Composable
-internal fun TypeBadge(label: String, modifier: Modifier = Modifier) {
+internal fun TypeBadge(
+    label: String,
+    accent: SignerTagAccent = SignerTagAccent.NEUTRAL,
+    modifier: Modifier = Modifier,
+) {
     Surface(
         shape = MaterialTheme.shapes.small,
-        color = MaterialTheme.colorScheme.surfaceVariant,
+        color = when (accent) {
+            SignerTagAccent.NEUTRAL -> MaterialTheme.colorScheme.surfaceVariant
+            // A translucent wash of the accent rather than a solid fill: the
+            // pill stays quiet next to the wallet's name while still reading as
+            // orange (or blue), and the label colour carries the contrast.
+            SignerTagAccent.ORANGE -> XbtPrimary.copy(alpha = 0.16f)
+            SignerTagAccent.DEVICE -> XbtDeviceTagDark.copy(alpha = 0.16f)
+        },
         modifier = modifier,
     ) {
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = when (accent) {
+                SignerTagAccent.NEUTRAL -> MaterialTheme.colorScheme.onSurfaceVariant
+                SignerTagAccent.ORANGE -> XbtPrimary
+                SignerTagAccent.DEVICE -> XbtDeviceTagDark
+            },
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
         )
     }

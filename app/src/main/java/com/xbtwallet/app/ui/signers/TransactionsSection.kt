@@ -172,6 +172,14 @@ private fun TransactionsList(transactions: List<TransactionRow>) {
     }
 
     val shown = transactions.take(MAX_TRANSACTIONS)
+    // A live-arriving row (a push from the subscription manager) simply appears
+    // in the next recomposition, in the order the snapshot already put it in —
+    // no animation is layered on, deliberately. Item-placement animation is a
+    // `LazyColumn` feature (`Modifier.animateItem`), and this list cannot be one:
+    // it is a section inside the detail screen's own `verticalScroll` column, and
+    // nesting a lazy list in a scrolling column is a runtime crash, not a
+    // polish. The update itself is atomic — one new snapshot, one recomposition —
+    // so there is nothing here to flicker.
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(4.dp),

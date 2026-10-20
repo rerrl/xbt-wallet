@@ -21,6 +21,14 @@ torAndroid = "0.4.9.6"
 # that will decode the animated-QR PSBT frames later), and adds one artifact
 # instead of three. com.google.zxing:core comes along transitively.
 zxingEmbedded = "4.3.0"
+# BC-UR (Uniform Resources) for the SeedSigner-native import: the animated
+# fountain-code QR frames a signer shows when exporting its account. hummingbird
+# is Sparrow's implementation of the UR spec (a direct port of URKit), Apache-2.0,
+# plain Java with no Android dependency at all — so the whole decoder runs on the
+# JVM in unit tests — and its only transitive dependency is co.nstant.in:cbor.
+# Used by the "add signing device" screen (crypto/UrAccountImport.kt), not by the
+# text-QR watch-only path, which needs no UR support.
+hummingbird = "1.7.6"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -36,6 +44,7 @@ kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 tor-android = { group = "info.guardianproject", name = "tor-android", version.ref = "torAndroid" }
 zxing-android-embedded = { group = "com.journeyapps", name = "zxing-android-embedded", version.ref = "zxingEmbedded" }
+hummingbird = { group = "com.sparrowwallet", name = "hummingbird", version.ref = "hummingbird" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

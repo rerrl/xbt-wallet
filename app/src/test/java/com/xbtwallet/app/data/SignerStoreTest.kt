@@ -357,6 +357,136 @@ class SignerStoreTest {
         assertNull(type.derivationPath)
     }
 
+    // --- the import origin --------------------------------------------------
+    //
+    // The origin is what tells a SeedSigner import, an other-device import and a
+    // text xpub apart in the UI. It is additive: a blob written before it existed
+    // must keep loading, and a text-QR signer — the default — must not grow the
+    // key on the way out.
+
+    @Test
+    fun `a signing-device origin persists across a reload`() {
+        val backing = InMemoryStore()
+        newStore(backing).add(
+            name = "Keystone",
+            xpub = "zpub6xyz",
+            importedVia = SignerOrigin.SIGNING_DEVICE_UR,
+        )
+
+        val reloaded = SignerStore(backing).list().single()
+        assertEquals(SignerOrigin.SIGNING_DEVICE_UR, reloaded.importedVia)
+    }
+
+    @Test
+    fun `a seedsigner origin persists across a reload`() {
+        val backing = InMemoryStore()
+        newStore(backing).add(
+            name = "SeedSigner",
+            xpub = "zpub6xyz",
+            importedVia = SignerOrigin.SEEDSIGNER_UR,
+        )
+
+        val reloaded = SignerStore(backing).list().single()
+        assertEquals(SignerOrigin.SEEDSIGNER_UR, reloaded.importedVia)
+    }
+
+    @Test
+    fun `a seedsigner import writes the historical signing-device value`() {
+        val backing = InMemoryStore()
+        newStore(backing).add("SeedSigner", "zpub6xyz", importedVia = SignerOrigin.SEEDSIGNER_UR)
+
+        // `signing-device-ur` is the value this field has written for a BC-UR
+        // import since the origin existed; before the split it meant "a signing
+        // device", which was always a SeedSigner. Reusing it is what makes the
+        // migration free — and what keeps a blob written by this build readable
+        // by the build before it.
+        val json = backing.map[SignerStore.STORAGE_KEY].orEmpty()
+        assertTrue(json.contains("\"importedVia\":\"signing-device-ur\""))
+    }
+
+    @Test
+    fun `an other-device import writes a value of its own`() {
+        val backing = InMemoryStore()
+        newStore(backing).add("Keystone", "zpub6xyz", importedVia = SignerOrigin.SIGNING_DEVICE_UR)
+
+        // It must not collide with the historical value: a stored
+        // `signing-device-ur` now means SeedSigner, so the other-device path has
+        // a wire value only this build writes.
+        val json = backing.map[SignerStore.STORAGE_KEY].orEmpty()
+        assertTrue(json.contains("\"importedVia\":\"other-signing-device-ur\""))
+        assertFalse(json.contains("\"importedVia\":\"signing-device-ur\""))
+    }
+
+    /**
+     * The migration, stated as the rule it is: every record an earlier build
+     * wrote with the unsplit `SIGNING_DEVICE_UR` origin reads back as
+     * [SignerOrigin.SEEDSIGNER_UR] — because the SeedSigner path was the only one
+     * that existed, and Andrew's only BC-UR wallet is a SeedSigner.
+     */
+    @Test
+    fun `the old signing-device-ur value reads back as the seedsigner origin`() {
+        val backing = InMemoryStore()
+        backing.putString(
+            SignerStore.STORAGE_KEY,
+            """{"signers":[{"id":"a","name":"SeedSigner","type":"watch-only","xpub":"zpub6old","importedVia":"signing-device-ur","createdAt":7}]}""",
+        )
+
+        assertEquals(SignerOrigin.SEEDSIGNER_UR, SignerStore(backing).list().single().importedVia)
+    }
+
+    @Test
+    fun `a text-qr signer writes no origin key and stays the default`() {
+        val backing = InMemoryStore()
+        newStore(backing).add("Cold", "zpub6xyz", importedVia = SignerOrigin.TEXT_QR)
+
+        // The default is not written, so a text-QR blob keeps the exact shape an
+        // earlier build produced — nothing to migrate, nothing to misread.
+        val json = backing.map[SignerStore.STORAGE_KEY].orEmpty()
+        assertFalse("importedVia must be absent", json.contains(SignerStore.IMPORTED_VIA_KEY))
+
+        assertEquals(SignerOrigin.TEXT_QR, SignerStore(backing).list().single().importedVia)
+    }
+
+    @Test
+    fun `every origin survives a round-trip`() {
+        val backing = InMemoryStore()
+        val store = newStore(backing)
+        SignerOrigin.entries.forEachIndexed { index, origin ->
+            store.add("Wallet $index", "zpub6$index", importedVia = origin)
+        }
+
+        val reloaded = SignerStore(backing).list()
+        assertEquals(
+            "order and origin both survive storage",
+            SignerOrigin.entries.toList(),
+            reloaded.map { it.importedVia },
+        )
+    }
+
+    /** The blob an earlier build wrote: no origin key at all. */
+    @Test
+    fun `a pre-origin blob loads as the text-qr default`() {
+        val backing = InMemoryStore()
+        backing.putString(
+            SignerStore.STORAGE_KEY,
+            """{"signers":[{"id":"a","name":"Cold","type":"watch-only","xpub":"zpub6old","createdAt":7}]}""",
+        )
+
+        assertEquals(SignerOrigin.TEXT_QR, SignerStore(backing).list().single().importedVia)
+    }
+
+    /** An origin this build does not know must not be guessed at as the device path. */
+    @Test
+    fun `an unrecognised origin value reads as the text-qr default`() {
+        val backing = InMemoryStore()
+        backing.putString(
+            SignerStore.STORAGE_KEY,
+            """{"signers":[{"id":"a","name":"Cold","type":"watch-only","xpub":"zpub6x","importedVia":"something-new","createdAt":7}]}""",
+        )
+
+        assertEquals(SignerOrigin.TEXT_QR, SignerStore(backing).list().single().importedVia)
+    }
+
     // --- migration from the old `wallets` shape ----------------------------
     //
     // Before the rename, saved xpubs lived under the `wallets` key as

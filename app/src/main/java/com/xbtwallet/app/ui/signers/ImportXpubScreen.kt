@@ -39,6 +39,7 @@ import com.xbtwallet.app.crypto.XpubImport
 import com.xbtwallet.app.crypto.XpubScanRoute
 import com.xbtwallet.app.crypto.validateXpubInput
 import com.xbtwallet.app.data.Signer
+import com.xbtwallet.app.data.SignerOrigin
 import com.xbtwallet.app.data.SignerStore
 
 /**
@@ -179,9 +180,9 @@ class ImportXpubScreenState(
         }
     }
 
-    /** Validates and, when everything checks out, stores a new watch-only signer. */
+    /** Validates and, when everything checks out, stores a new watch-only wallet. */
     fun import() {
-        nameError = if (name.isBlank()) "Give this signer a name." else null
+        nameError = if (name.isBlank()) "Give this wallet a name." else null
 
         val key = scannedKey
         if (key == null) {
@@ -196,13 +197,17 @@ class ImportXpubScreenState(
 
         val xpub = scannedXpub ?: return
         // The metadata is stored as scanned (fingerprint lowercased, path
-        // normalized by XpubScanRoute); `key` proves the xpub parsed.
+        // normalized by XpubScanRoute); `key` proves the xpub parsed. The origin
+        // is spelled out as the text-QR default: this key came in as a plain
+        // xpub QR, not off a signing device, and that is what keeps it wearing
+        // the grey "watch-only" tag rather than the orange "seedsigner" one.
         onSaved(
             signerStore.add(
                 name = name,
                 xpub = xpub,
                 masterFingerprint = masterFingerprint,
                 derivationPath = derivationPath,
+                importedVia = SignerOrigin.TEXT_QR,
             ),
         )
     }
@@ -226,8 +231,8 @@ fun rememberImportXpubScreenState(
 }
 
 /**
- * Add a signer by scanning its account xpub — the half of the Add-signer flow
- * reached from [AddSignerScreen]'s **Add watch-only xpub** button.
+ * Add a wallet by scanning its account xpub — the row of the Add-wallet flow
+ * reached from [AddSignerScreen]'s **Watch-only xpub** button.
  *
  * Import is **QR-only**. The QR is the air-gapped channel between the signer and
  * this phone, and it is the only channel that can carry the account's metadata
@@ -309,7 +314,7 @@ fun ImportXpubScreen(
             OutlinedTextField(
                 value = state.name,
                 onValueChange = state::onNameChange,
-                label = { Text("signer name") },
+                label = { Text("wallet name") },
                 placeholder = { Text("Cold storage") },
                 singleLine = true,
                 isError = state.nameError != null,
@@ -329,7 +334,7 @@ fun ImportXpubScreen(
             if (state.cameraDenied) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Camera permission is required \u2014 signers are imported by " +
+                    text = "Camera permission is required \u2014 wallets are imported by " +
                         "scanning the signer's QR.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -379,7 +384,7 @@ fun ImportXpubScreen(
                 onClick = state::import,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Add signer")
+                Text("Add wallet")
             }
 
             Spacer(modifier = Modifier.height(24.dp))

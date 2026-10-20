@@ -7,6 +7,7 @@ import com.xbtwallet.app.chain.HistoryEntry
 import com.xbtwallet.app.chain.ScannedAddress
 import com.xbtwallet.app.chain.ScannedUtxo
 import com.xbtwallet.app.chain.ScripthashBalance
+import com.xbtwallet.app.chain.SubscriptionStateStore
 import com.xbtwallet.app.chain.TransactionRow
 import com.xbtwallet.app.electrum.JsonParseException
 import com.xbtwallet.app.electrum.MiniJson
@@ -111,10 +112,79 @@ class SnapshotStore(
      * A blank string rather than a real delete, because [KeyValueStore] has no
      * delete and adding one for this would widen an interface the Android shell
      * and every test fake implement. [load] treats blank as absent, so the effect
-     * is the same.
+     * is the same. The signer's persisted status hashes go the same way: they are
+     * per-signer state, and a signer that no longer exists must not leave any.
      */
     fun clear(signerId: String) {
         storage.putString(key(signerId), "")
+        storage.putString(statusKey(signerId), "")
+    }
+
+    // ---- the subscription manager's status hashes ----------------------------
+
+    /**
+     * The last status hash the server reported for each of [signerId]'s
+     * subscribed addresses, keyed by scripthash.
+     *
+     * Kept in its own blob rather than inside the snapshot, and for a practical
+     * reason: the subscription manager rewrites the statuses on *every*
+     * notification, where a snapshot is a much larger record that only changes
+     * when an address's data does. The two have different write rates, so they
+     * get different keys.
+     *
+     * A value of `null` is stored and returned as a real entry: it is Fulcrum's
+     * answer for an address it has never seen a transaction for, and it is what
+     * makes "this address was paid while the app was closed" a visible change on
+     * the next start. An absent key means the address was never subscribed.
+     *
+     * Forgiving, like everything else here: a corrupt, blank, missing or
+     * future-schema blob reads as an empty map, which costs one round of
+     * redundant refreshes after a restart and never crashes.
+     */
+    fun loadStatusHashes(signerId: String): Map<String, String?> {
+        val raw = storage.getString(statusKey(signerId))?.takeIf { it.isNotBlank() } ?: return emptyMap()
+        val root = try {
+            MiniJson.parse(raw) as? Map<*, *> ?: return emptyMap()
+        } catch (error: JsonParseException) {
+            return emptyMap()
+        }
+        if ((root["version"] as? Number)?.toInt() != STATUS_VERSION) return emptyMap()
+        val entries = root["statuses"] as? Map<*, *> ?: return emptyMap()
+        val result = LinkedHashMap<String, String?>(entries.size)
+        for ((key, value) in entries) {
+            val scripthash = key as? String ?: return emptyMap()
+            // A status hash is a string, or null for "never seen a transaction".
+            // Anything else is a blob we do not understand.
+            result[scripthash] = when (value) {
+                null -> null
+                is String -> value
+                else -> return emptyMap()
+            }
+        }
+        return result
+    }
+
+    /** Replaces the persisted status hashes for [signerId]. */
+    fun saveStatusHashes(signerId: String, statuses: Map<String, String?>) {
+        val root = mapOf("version" to STATUS_VERSION, "statuses" to statuses)
+        storage.putString(statusKey(signerId), MiniJson.encode(root))
+    }
+
+    /**
+     * The [SubscriptionStateStore] the [com.xbtwallet.app.chain.SubscriptionManager]
+     * persists through, bound to one signer.
+     *
+     * The manager lives in `chain/` and must not import `data/` (the dependency
+     * runs this way), so this is where the two meet: one signer's snapshot and
+     * one signer's status hashes, behind the manager's own small interface.
+     */
+    fun subscriptionState(signerId: String): SubscriptionStateStore = object : SubscriptionStateStore {
+        override fun loadStatusHashes(): Map<String, String?> = this@SnapshotStore.loadStatusHashes(signerId)
+
+        override fun saveStatusHashes(statuses: Map<String, String?>) =
+            this@SnapshotStore.saveStatusHashes(signerId, statuses)
+
+        override fun saveSnapshot(snapshot: AccountSnapshot) = this@SnapshotStore.save(signerId, snapshot)
     }
 
     private fun encodeAddress(address: ScannedAddress): Map<String, Any?> = mapOf(
@@ -236,6 +306,8 @@ class SnapshotStore(
 
     private fun key(signerId: String): String = "$KEY_PREFIX$signerId"
 
+    private fun statusKey(signerId: String): String = "$STATUS_KEY_PREFIX$signerId"
+
     companion object {
         /** Schema version; a blob bearing any other value is discarded unread. */
         const val VERSION: Int = 1
@@ -245,5 +317,14 @@ class SnapshotStore(
          * signer gets its own blob in the same prefs file as the signer list.
          */
         const val KEY_PREFIX: String = "snapshot_"
+
+        /** Schema version of the status-hash blob — its own, since it ships its own key. */
+        const val STATUS_VERSION: Int = 1
+
+        /**
+         * Key prefix for one signer's last-seen status hashes. A separate key from
+         * the snapshot's (see [loadStatusHashes]): it is rewritten far more often.
+         */
+        const val STATUS_KEY_PREFIX: String = "statuses_"
     }
 }

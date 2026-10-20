@@ -14,3 +14,10 @@ val XbtOnBackgroundDark = Color(0xFFE6E8EB)
 val XbtOutlineDark = Color(0xFF3A4048)
 val XbtErrorDark = Color(0xFFFF6B6B)
 val XbtSuccessDark = Color(0xFF4CAF50) // "connected" dot on the home screen
+val XbtWarningDark = Color(0xFFE0A800) // non-fatal warnings, never the success path
+
+// The tag accent for a key that came off a signing device that is *not* a
+// SeedSigner (Keystone, Jade): calmly distinct from the orange that means
+// SeedSigner and from the grey that means a plain text xpub, and never mistakable
+// for the green/amber/red of a status.
+val XbtDeviceTagDark = Color(0xFF5B9BD5) // steel blue

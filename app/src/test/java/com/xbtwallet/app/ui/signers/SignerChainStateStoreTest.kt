@@ -1,9 +1,12 @@
 package com.xbtwallet.app.ui.signers
 
 import com.xbtwallet.app.chain.AccountSnapshot
+import com.xbtwallet.app.chain.ScripthashBalance
+import com.xbtwallet.app.data.KeyValueStore
 import com.xbtwallet.app.data.ServerSettings
 import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerType
+import com.xbtwallet.app.data.SnapshotStore
 import com.xbtwallet.app.electrum.ElectrumProtocol
 import com.xbtwallet.app.electrum.ElectrumServer
 import kotlinx.coroutines.CancellationException
@@ -126,6 +129,60 @@ class SignerChainStateStoreTest {
         assertNotSame("remove() must forget the state", before, store.stateFor(target))
 
         scope.cancel()
+    }
+
+    // --- the live subscription ----------------------------------------------
+
+    @Test
+    fun `the store's state subscribes in the store's scope, and remove closes it`() {
+        // The one thing the store adds to the live path: it hands each state the
+        // app-scoped scope (so a subscription outlives a recomposition but not the
+        // signer) and it is what closes a deleted signer's connection.
+        val engine = FakeSubscriptionEngine()
+        val session = FakeSubscriptionSession()
+        val opens = AtomicInteger(0)
+        val snapshots = SnapshotStore(InMemoryStore(), now = { 1L }).apply {
+            save("id-1", AccountSnapshot(emptyList(), emptyList(), emptyList(), ScripthashBalance(5_000, 0)))
+        }
+        val scope = scope()
+        val store = SignerChainStateStore(
+            serverSettings = FakeServerSettings(SERVER),
+            snapshotStore = snapshots,
+            scope = scope,
+            now = { 1_000L },
+            openSubscription = {
+                opens.incrementAndGet()
+                session
+            },
+            newSubscriptionEngine = { engine },
+            scan = { _, _, _, _ -> AccountSnapshot.EMPTY },
+        )
+
+        val target = signer("id-1")
+        val state = store.stateFor(target)
+        state.startSubscriptions()
+
+        awaitUntil("the connection to open") { engine.startedWith != null }
+        assertEquals(1, opens.get())
+        assertEquals(5_000L, engine.startedWith?.second?.satoshis)
+
+        store.remove(target.id)
+
+        awaitUntil("remove() to close the live subscription") { engine.isClosed }
+        assertTrue("the connection goes with the deleted signer", session.isClosed)
+
+        scope.cancel()
+    }
+
+    /** The simplest possible [KeyValueStore]: a map that survives instances. */
+    private class InMemoryStore : KeyValueStore {
+        private val map = mutableMapOf<String, String>()
+
+        override fun getString(key: String): String? = map[key]
+
+        override fun putString(key: String, value: String) {
+            map[key] = value
+        }
     }
 
     private companion object {

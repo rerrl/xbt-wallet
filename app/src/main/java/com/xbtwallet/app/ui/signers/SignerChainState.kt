@@ -7,6 +7,17 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.xbtwallet.app.chain.AccountScanner
 import com.xbtwallet.app.chain.AccountSnapshot
+import com.xbtwallet.app.chain.ChainEvent
+import com.xbtwallet.app.chain.ChainSubscriptionSession
+import com.xbtwallet.app.chain.ChainTip
+import com.xbtwallet.app.chain.ChainUtxo
+import com.xbtwallet.app.chain.HistoryEntry
+import com.xbtwallet.app.chain.ReconnectPolicy
+import com.xbtwallet.app.chain.ReconnectingSubscription
+import com.xbtwallet.app.chain.ScripthashBalance
+import com.xbtwallet.app.chain.SubscriptionEngine
+import com.xbtwallet.app.chain.SubscriptionManager
+import com.xbtwallet.app.chain.SubscriptionStateStore
 import com.xbtwallet.app.crypto.ExtendedPublicKey
 import com.xbtwallet.app.data.ServerSettings
 import com.xbtwallet.app.data.Signer
@@ -15,8 +26,15 @@ import com.xbtwallet.app.data.SnapshotStore
 import com.xbtwallet.app.electrum.ElectrumClient
 import com.xbtwallet.app.electrum.ElectrumException
 import com.xbtwallet.app.electrum.ElectrumServer
+import com.xbtwallet.app.electrum.SubscriptionSession
+import com.xbtwallet.app.electrum.socketErrnoOf
+import com.xbtwallet.app.electrum.socketErrnoReason
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.launch
 import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
@@ -67,6 +85,35 @@ import java.net.UnknownHostException
  * failure. A protocol *answer* ([ElectrumException]) is not transient and is not
  * retried, and a [CancellationException] still rethrows immediately.
  *
+ * **Live updates are an enhancement, never a requirement.** While the signer's
+ * own screen is open, [startSubscriptions] opens one long-lived connection and
+ * hands it to a [SubscriptionManager], which pushes address changes into
+ * [snapshot] as they happen; [stopSubscriptions] closes it on the way out. Every
+ * step of that is fallible and *silent*: no endpoint, no scope, an unreadable
+ * key, a dial that fails, a manager that throws, or a push connection that later
+ * dies all leave the pull path above exactly as it is — a rescan, its retry
+ * budget, and the Refresh/Retry button. A subscription that cannot be opened is
+ * not an error state and must never be shown as one.
+ *
+ * **A dropped connection is reconnected, not given up on.** Tor circuits die more
+ * often than direct connections, so a [ChainEvent.SessionLost] is not the end of
+ * the live path: [ReconnectingSubscription] re-dials the same endpoint with
+ * exponential backoff and jitter (2s, doubling, capped at 60s) and resubscribes —
+ * and because subscribing *diffs the status hashes the server reports against the
+ * ones last seen*, whatever happened while the connection was down is refreshed
+ * through the same targeted-refresh path a live notification takes. The gap and
+ * the push are one code path, with no polling. Only when the reconnect budget is
+ * spent (six consecutive attempts at the default policy, the flapping-server
+ * case included) does the screen fall back to the pull path, silently, and only
+ * until the signer is opened again — which starts a fresh connection and a fresh
+ * budget. Reopening the screen is the user's retry; nothing is ever shown about
+ * any of it.
+ *
+ * **One writer per snapshot, and the rescan wins.** A completed scan is handed
+ * to the manager through `updateSnapshot`, so a live refresh and a rescan cannot
+ * clobber each other and a live change to an address the rescan just covered is
+ * never fetched twice. See [publishScan].
+ *
  * @param signer the signer being shown. Read once: the navigation layer is what
  *   notices a signer being deleted, and sends the user Home instead.
  * @param serverSettings read access to the saved Electrum endpoint.
@@ -80,6 +127,23 @@ import java.net.UnknownHostException
  *   default `listOf(3, 10)` retries a dead scan at +3s and again at +10s, and
  *   only a third failure is reported. Empty means "never retry", which is what
  *   most tests want (and what makes them instant).
+ * @param subscriptionScope the scope [startSubscriptions] runs the live
+ *   connection in, or null for "this state never subscribes" — which is what a
+ *   test that is not about subscriptions wants, and what keeps a caller that
+ *   only ever pulls behaving exactly as before.
+ * @param openSubscription opens one long-lived connection to the saved
+ *   endpoint. Defaults to a real one over the transport (Tor for `.onion`);
+ *   injectable so the subscription lifecycle can be exercised with no socket.
+ * @param newSubscriptionEngine builds the live-updates engine around a
+ *   [SubscriptionStateStore]. Defaults to the real [SubscriptionManager];
+ *   injectable so a test can drive the manager's events by hand.
+ * @param reconnectPolicy the backoff schedule, attempt budget and stable-session
+ *   rule the live connection is kept alive with. See [ReconnectPolicy]; defaults
+ *   to the production one, and a test substitutes a budget with no waiting.
+ * @param reconnectBackoff the wait between reconnect attempts. Defaults to a
+ *   cancellable `delay` in [subscriptionScope]; injectable so a test can assert
+ *   the reconnect schedule without spending it in real time. Cancelling the job
+ *   (navigating away) still interrupts it when it *is* a `delay`.
  * @param scan one whole-account scan; defaults to a real one over the socket.
  *   Last so a test can pass it as a trailing lambda.
  */
@@ -90,6 +154,11 @@ class SignerChainState(
     private val snapshotStore: SnapshotStore? = null,
     private val now: () -> Long = { System.currentTimeMillis() / 1000 },
     private val retryDelaysSeconds: List<Long> = DEFAULT_RETRY_DELAYS_SECONDS,
+    private val subscriptionScope: CoroutineScope? = null,
+    private val openSubscription: SubscriptionOpener = ::openLiveSubscription,
+    private val newSubscriptionEngine: SubscriptionEngineFactory = ::managerEngine,
+    private val reconnectPolicy: ReconnectPolicy = ReconnectPolicy(),
+    private val reconnectBackoff: suspend (Long) -> Unit = { delay(it) },
     private val scan: ChainScan = ::scanOverElectrum,
 ) {
 
@@ -165,6 +234,37 @@ class SignerChainState(
      */
     private var lastCompletedSyncAt: Long? = null
 
+    // ---- the live subscription ---------------------------------------------
+
+    /**
+     * What the manager persists through: this signer's own snapshot and status
+     * hashes. When there is no [SnapshotStore] (a cold caller, or a test that is
+     * not about persistence) the values are kept for this state's lifetime
+     * instead, so the live path still works — it just cannot remember anything
+     * across a restart, which is exactly what "no cache" already means.
+     */
+    private val subscriptionStore: SubscriptionStateStore =
+        snapshotStore?.subscriptionState(signer.id) ?: TransientSubscriptionStateStore()
+
+    /** Guards the four fields below, which are written from the UI and the subscription job. */
+    private val subscriptionLock = Any()
+
+    /** The coroutine running the live connection, if one is. */
+    private var subscriptionJob: Job? = null
+
+    /** The live-updates engine, once it exists. */
+    private var subscriptionEngine: SignerSubscriptionEngine? = null
+
+    /** The long-lived connection the engine is attached to. This state owns it. */
+    private var subscriptionSession: ChainSubscriptionSession? = null
+
+    /**
+     * True between [startSubscriptions] and [stopSubscriptions] — i.e. while the
+     * signer's screen is open. It is what stops a rescan that finishes *after*
+     * the user navigated away from opening a subscription behind their back.
+     */
+    private var subscriptionsWanted = false
+
     init {
         // Seed from the last saved scan, if there is one. The screen is READY
         // immediately; [load] then refreshes that snapshot in the background —
@@ -203,6 +303,206 @@ class SignerChainState(
     /** Re-runs the scan, whatever the current phase — the Refresh/Retry button. */
     suspend fun reload() = scanNow(snapshot)
 
+    // ---- the live subscription's lifecycle ---------------------------------
+
+    /**
+     * Opens this signer's live-update subscription, if there is one to open.
+     *
+     * Called when the signer's screen appears. It is idempotent (a second call
+     * while a connection is already up does nothing) and it returns immediately:
+     * the dial happens on [subscriptionScope], never on the caller, so a slow or
+     * unresponsive server cannot delay the screen or the rescan that is starting
+     * beside it.
+     *
+     * Nothing here is required for the screen to work. With no scope, no saved
+     * endpoint, or an unreadable key there is simply no subscription; with no
+     * snapshot yet it waits for the first completed scan (see
+     * [maybeLaunchSubscriptions]) rather than subscribing to an account it has
+     * not read.
+     */
+    fun startSubscriptions() {
+        if (subscriptionScope == null) return
+        synchronized(subscriptionLock) { subscriptionsWanted = true }
+        maybeLaunchSubscriptions()
+    }
+
+    /**
+     * Closes the live subscription and cancels the manager: what navigating away
+     * from the signer's screen, switching signer, and process death all do.
+     *
+     * Idempotent, safe to call with nothing running, and synchronous — by the
+     * time it returns the connection is closed and no further event can reach
+     * [snapshot]. Reopening the signer starts a fresh connection; anything that
+     * happened in the gap is found by the manager's status-hash diff on the next
+     * [startSubscriptions], which is the same code path a live notification takes.
+     */
+    fun stopSubscriptions() {
+        val job: Job?
+        val engine: SignerSubscriptionEngine?
+        val session: ChainSubscriptionSession?
+        synchronized(subscriptionLock) {
+            subscriptionsWanted = false
+            job = subscriptionJob
+            engine = subscriptionEngine
+            session = subscriptionSession
+            subscriptionEngine = null
+            subscriptionSession = null
+        }
+        job?.cancel()
+        // Both are idempotent, and the job's own `finally` closes them again on
+        // its way out — whichever runs first wins and the other is a no-op.
+        runCatching { engine?.close() }
+        runCatching { session?.close() }
+    }
+
+    /**
+     * Starts the live connection if the screen wants one and there is nothing to
+     * build on yet stopping us.
+     *
+     * Called both by [startSubscriptions] (the screen opening) and by a completed
+     * scan (a cold screen has no snapshot when it first asks). The
+     * [subscriptionsWanted] check is what keeps the second caller honest: a scan
+     * that lands after the user navigated away must not open a connection.
+     */
+    private fun maybeLaunchSubscriptions() {
+        synchronized(subscriptionLock) {
+            if (!subscriptionsWanted) return
+            if (subscriptionJob?.isActive == true) return
+            val scope = subscriptionScope ?: return
+            val server = configuredServer() ?: return
+            if (scanner == null) return
+            // Nothing to subscribe to yet: the completed scan will ask again.
+            if (snapshot == null) return
+            subscriptionJob = scope.launch { runSubscriptions(server) }
+        }
+    }
+
+    /**
+     * The subscription's whole life: open, attach, keep alive, close.
+     *
+     * Every failure is swallowed on purpose. A subscription is an optimization
+     * over the rescan, and the card's rule is that a signer screen behaves
+     * exactly like the pull-only one when it cannot be had — so a dial that fails
+     * or a manager that cannot be built ends here quietly, with today's
+     * Refresh/Retry still working above. A connection that dies mid-flight is
+     * reconnected and resubscribed instead (see [ReconnectingSubscription]), and
+     * only a spent reconnect budget ends the live path — silently too.
+     */
+    private suspend fun runSubscriptions(server: ElectrumServer) {
+        val session = try {
+            openSubscription(server)
+        } catch (cancellation: CancellationException) {
+            // The user navigated away while the dial was in flight. (A socket
+            // opened a moment before the cancellation is the one case this
+            // cannot clean up — the session hands it back only on success — and
+            // the process going away is the usual reason for being here.)
+            throw cancellation
+        } catch (failure: Exception) {
+            Log.w(SUBSCRIPTION_LOG_TAG, "could not open the live connection", failure)
+            return
+        }
+
+        val engine = try {
+            newSubscriptionEngine(subscriptionStore)
+        } catch (cancellation: CancellationException) {
+            runCatching { session.close() }
+            throw cancellation
+        } catch (failure: Exception) {
+            Log.w(SUBSCRIPTION_LOG_TAG, "could not start the live-updates manager", failure)
+            runCatching { session.close() }
+            return
+        }
+
+        // Re-read the snapshot *now*, not when the job was launched: a rescan may
+        // have finished while the dial was in flight, and the manager must be
+        // seeded with the freshest state we have or its first merge would put
+        // stale numbers on screen.
+        val initial = synchronized(subscriptionLock) {
+            val current = snapshot
+            if (!subscriptionsWanted || current == null) {
+                // The screen went away (or the data did) while we were dialling:
+                // nothing owns this connection any more, so it goes back.
+                runCatching { engine.close() }
+                runCatching { session.close() }
+                return
+            }
+            subscriptionEngine = engine
+            subscriptionSession = session
+            current
+        }
+
+        try {
+            // The whole subscription, reconnects included. A connection that dies
+            // is re-dialled and resubscribed with backoff — and resubscribing is
+            // what diffs the status hashes, so whatever happened while it was
+            // down is refreshed through the same path a live push takes. The wait
+            // between attempts runs in this job, so leaving the screen cancels it
+            // mid-backoff.
+            val outcome = ReconnectingSubscription(
+                engine = engine,
+                open = { openSubscription(server) },
+                policy = reconnectPolicy,
+                log = ::logSubscription,
+                backoff = reconnectBackoff,
+                onSession = { connected ->
+                    synchronized(subscriptionLock) {
+                        if (subscriptionsWanted) subscriptionSession = connected
+                    }
+                },
+                onEvent = { publishSubscriptionState(engine) },
+            ).run(session, initial)
+
+            // The reconnect budget is spent (or the manager stopped): today's
+            // behaviour — pull, Refresh, Retry — takes over from here, with
+            // nothing said about it on screen. Reopening the signer opens a fresh
+            // connection and a fresh budget.
+            synchronized(subscriptionLock) { subscriptionsWanted = false }
+            Log.i(SUBSCRIPTION_LOG_TAG, "the live connection is over: $outcome")
+        } finally {
+            val owned = synchronized(subscriptionLock) {
+                if (subscriptionEngine === engine) subscriptionEngine = null
+                // The live connection is whichever one the loop ended up on — a
+                // reconnect replaces it — and either way it is this state's to
+                // close (the loop closes it too; both are idempotent).
+                subscriptionSession.also { subscriptionSession = null }
+            }
+            runCatching { engine.close() }
+            runCatching { owned?.close() }
+        }
+    }
+
+    /** Mirrors the manager's snapshot (and the fact that it is fresh) into this state. */
+    private fun publishSubscriptionState(engine: SignerSubscriptionEngine) {
+        val latest = try {
+            engine.snapshot
+        } catch (failure: Throwable) {
+            return
+        }
+        if (snapshot == latest) return
+        snapshot = latest
+        // The data on screen came from the server a moment ago, so a line saying
+        // "couldn't refresh" over it would be a lie. (Only reachable while
+        // subscribed: the pull-only path never calls this.)
+        syncFailed = false
+    }
+
+    /**
+     * Hands a completed scan to the running manager, and lets a cold screen start
+     * its subscription at last.
+     *
+     * The hand-off is the rule that keeps two writers to one snapshot from
+     * fighting: the rescan has just produced fresher data than anything the
+     * manager holds, so the manager adopts it (`updateSnapshot`) instead of
+     * merging into its own copy — and a live notification for an address the
+     * rescan just covered is therefore never fetched a second time.
+     */
+    private fun publishScan(result: AccountSnapshot) {
+        synchronized(subscriptionLock) { subscriptionEngine }?.let { engine ->
+            runCatching { engine.updateSnapshot(result) }
+        }
+        maybeLaunchSubscriptions()
+    }
+
     companion object {
         /**
          * How long a completed sync stays "fresh". [load] skips a rescan while the
@@ -237,7 +537,7 @@ class SignerChainState(
             // The stored xpub is unreadable. There is nothing to scan and no
             // network to blame, so say exactly that.
             snapshot = null
-            errorMessage = "This signer's key could not be read. Delete it and import the xpub again."
+            errorMessage = "This wallet's key could not be read. Delete it and import the xpub again."
             phase = ChainPhase.ERROR
             isSyncing = false
             syncFailed = false
@@ -281,6 +581,7 @@ class SignerChainState(
             phase = ChainPhase.READY
             started = false
             snapshotStore?.save(signer.id, result)
+            publishScan(result)
         } catch (cancellation: CancellationException) {
             // Teardown (the app scope being cancelled) or the signer being
             // deleted while the scan is in flight must stay a cancellation, not
@@ -314,6 +615,11 @@ class SignerChainState(
             lastCompletedSyncAt = now()
             phase = ChainPhase.READY
             snapshotStore?.save(signer.id, result)
+            // A completed rescan is the freshest the account can be, so the live
+            // manager adopts it rather than merging into its own copy — that is
+            // what makes "a notification and a rescan both touching one address"
+            // one refresh, not two.
+            publishScan(result)
         } catch (cancellation: CancellationException) {
             // Cancelling (teardown, or the signer being deleted) is not a failure:
             // the cached data is untouched and a later visit rescans. Clear the
@@ -383,17 +689,28 @@ class SignerChainState(
      *
      * These are the same failures the Server screen's connection test reports;
      * the wording is repeated here rather than shared because this screen needs
-     * it as a *message*, not as log lines.
+     * it as a *message*, not as log lines. The one thing genuinely shared is the
+     * socket-errno vocabulary ([SocketErrno]): `EACCES`/`EPERM` is the OS
+     * rejecting the socket — a phone-side cause — and saying "the connection
+     * failed" (or worse, "refused") over it sends the user to debug a server
+     * that never heard the request. A type the JVM explains fully keeps its own
+     * wording first, exactly as on the Server screen, so the one deliberate
+     * distinction is the timeout: a dial that reports `ETIMEDOUT` is a failed
+     * connection attempt, while a [SocketTimeoutException] is the server not
+     * answering.
      */
     private fun describe(server: ElectrumServer, error: Exception): String {
         val where = "${server.host}:${server.port}"
         val reason = when (error) {
             is UnknownHostException -> "that host name could not be resolved"
-            is SocketTimeoutException -> "the server did not answer in time"
-            is ConnectException -> "the connection was refused"
             is ElectrumException -> "the server rejected the request (${error.message})"
-            is IOException -> "the connection failed (${error.message ?: "no details"})"
-            else -> error.message ?: error::class.java.simpleName
+            is SocketTimeoutException -> "the server did not answer in time"
+            else -> socketErrnoOf(error)?.let { socketErrnoReason(it) }
+                ?: when (error) {
+                    is ConnectException -> "the connection was refused"
+                    is IOException -> "the connection failed (${error.message ?: "no details"})"
+                    else -> error.message ?: error::class.java.simpleName
+                }
         }
         return "Could not read the balance from $where — $reason."
     }
@@ -463,3 +780,149 @@ internal suspend fun scanOverElectrum(
 
 /** Logcat tag for the scan's own diagnostics (see [scanOverElectrum]). */
 private const val SCAN_LOG_TAG = "SignerChainScan"
+
+/** Logcat tag for the live subscription's own diagnostics (see [SignerChainState.startSubscriptions]). */
+private const val SUBSCRIPTION_LOG_TAG = "SignerSubscriptions"
+
+/**
+ * The live path's Logcat line, best-effort.
+ *
+ * The reconnect loop calls its logger constantly — every drop, every attempt,
+ * every give-up — and a logger that can throw would turn "the connection
+ * dropped" into "the subscription died with an exception", so this one swallows
+ * its own failures. That is not hypothetical: the JVM unit tests run against a
+ * stubbed `android.util.Log` that throws on every call, which would otherwise
+ * make the reconnect loop untestable in this project's own test setup.
+ *
+ * Only the socket-level story is logged, never an address or a balance.
+ */
+private fun logSubscription(message: String) {
+    runCatching { Log.i(SUBSCRIPTION_LOG_TAG, message) }
+}
+
+/**
+ * The live-updates engine, as [SignerChainState] sees it: something it hands a
+ * connection to, collects events from, mirrors a snapshot out of, and closes.
+ *
+ * This is a seam and nothing more — and it is the chain layer's
+ * [SubscriptionEngine] with a UI-side name, so the reconnect loop
+ * ([ReconnectingSubscription]) can drive the real manager *and* a test's double
+ * without either layer importing the other. The real implementation is
+ * [SubscriptionManager] in `chain/`, wrapped by [managerEngine] — a wrapper and
+ * not a supertype on the manager itself, because `chain/` must not know about
+ * the UI.
+ */
+interface SignerSubscriptionEngine : SubscriptionEngine
+
+/** How a [SignerChainState] builds the engine for its signer. Injectable for tests. */
+typealias SubscriptionEngineFactory = (SubscriptionStateStore) -> SignerSubscriptionEngine
+
+/**
+ * Opens one long-lived, subscribable connection to [server]. Injectable for
+ * tests, which hand back a fake instead of dialling anything.
+ */
+typealias SubscriptionOpener = suspend (ElectrumServer) -> ChainSubscriptionSession
+
+/** The real engine: the chain layer's [SubscriptionManager], narrowed to [SignerSubscriptionEngine]. */
+internal fun managerEngine(store: SubscriptionStateStore): SignerSubscriptionEngine =
+    ManagerSubscriptionEngine(SubscriptionManager(store))
+
+/** Adapts a real [SubscriptionManager] to the one seam this package needs. */
+private class ManagerSubscriptionEngine(private val manager: SubscriptionManager) : SignerSubscriptionEngine {
+    override val events: Flow<ChainEvent> get() = manager.events
+
+    override val snapshot: AccountSnapshot get() = manager.snapshot
+
+    override fun start(session: ChainSubscriptionSession, snapshot: AccountSnapshot) =
+        manager.start(session, snapshot)
+
+    override fun updateSnapshot(snapshot: AccountSnapshot) = manager.updateSnapshot(snapshot)
+
+    override fun close() = manager.close()
+}
+
+/**
+ * The real live connection: one socket through the app's own transport (Tor for
+ * a `.onion` host, see `ElectrumTransport`), with no read timeout — an idle
+ * subscription is silent by design.
+ *
+ * [com.xbtwallet.app.electrum.SubscriptionSession] answers `subscribeHeaders`
+ * with `BlockHeaderTip` while `chain/`'s interface asks for [ChainTip], and this
+ * is the one line that bridges them: delegation for everything else, an explicit
+ * override for the one method whose *type* differs. Doing it here — rather than
+ * importing `electrum` into `chain` — is what keeps the layering one-way.
+ */
+internal suspend fun openLiveSubscription(server: ElectrumServer): ChainSubscriptionSession =
+    LiveSubscriptionSession(ElectrumClient(server = server, log = {}).openSubscriptionSession())
+
+/**
+ * The session, seen as `chain/`'s [ChainSubscriptionSession].
+ *
+ * Every member is a straight pass-through to the real
+ * [com.xbtwallet.app.electrum.SubscriptionSession] — the same socket, the same
+ * queries, the same callbacks — with exactly one translation: the session's
+ * `subscribeHeaders` answers with `BlockHeaderTip`, this interface with
+ * [ChainTip]. Writing that once here is what keeps `chain/` from having to
+ * import `electrum/` (the dependency runs the other way).
+ */
+private class LiveSubscriptionSession(
+    private val session: SubscriptionSession,
+) : ChainSubscriptionSession {
+
+    override var onNotification: (method: String, params: Any?) -> Unit
+        get() = session.onNotification
+        set(value) {
+            session.onNotification = value
+        }
+
+    override var onClosed: (error: Throwable) -> Unit
+        get() = session.onClosed
+        set(value) {
+            session.onClosed = value
+        }
+
+    override val isClosed: Boolean get() = session.isClosed
+
+    override fun subscribeScripthash(scripthash: String): String? = session.subscribeScripthash(scripthash)
+
+    override fun subscribeHeaders(): ChainTip =
+        session.subscribeHeaders().let { ChainTip(it.height, it.hex) }
+
+    override fun getHistory(scripthash: String): List<HistoryEntry> = session.getHistory(scripthash)
+
+    override fun getBalance(scripthash: String): ScripthashBalance = session.getBalance(scripthash)
+
+    override fun listUnspent(scripthash: String): List<ChainUtxo> = session.listUnspent(scripthash)
+
+    override fun getTransaction(txHash: String): String = session.getTransaction(txHash)
+
+    override fun getTipHeight(): Int = session.getTipHeight()
+
+    override fun blockHeader(height: Int): String = session.blockHeader(height)
+
+    override fun close() = session.close()
+}
+
+/**
+ * A [SubscriptionStateStore] for a state with no [SnapshotStore] to persist
+ * through: it remembers the status hashes and the snapshot for as long as the
+ * state lives, and forgets them with it.
+ *
+ * The manager's contract only asks that a store never throws (see
+ * [SubscriptionStateStore]), and this one cannot — so the live path keeps
+ * working for a caller that has no cache, exactly as the pull path does.
+ */
+private class TransientSubscriptionStateStore : SubscriptionStateStore {
+    private var statuses: Map<String, String?> = emptyMap()
+
+    override fun loadStatusHashes(): Map<String, String?> = statuses
+
+    override fun saveStatusHashes(statuses: Map<String, String?>) {
+        this.statuses = statuses
+    }
+
+    override fun saveSnapshot(snapshot: AccountSnapshot) {
+        // Deliberately dropped: with no [SnapshotStore] there is nowhere to put
+        // it, and the caller's own scan is what it opens on next time.
+    }
+}

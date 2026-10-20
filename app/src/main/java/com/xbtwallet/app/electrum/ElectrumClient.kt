@@ -132,6 +132,63 @@ class ElectrumClient(
     suspend fun <T> withChainSession(block: (ChainQuery) -> T): T =
         withContext(Dispatchers.IO) { runChainSession(block) }
 
+    /**
+     * Opens one connection and hands it back as a long-lived
+     * [SubscriptionSession] — the subscription counterpart of
+     * [withChainSession].
+     *
+     * The socket is opened exactly as [runChainSession] opens it: through the
+     * injected [ElectrumTransport] (so a `.onion` host goes through the bundled
+     * Tor and everything else directly), with TLS layered on when the endpoint
+     * asks for it. Unlike a chain session, it is *not* closed here: the caller
+     * owns it, keeps it open, receives pushed notifications on it and calls
+     * [SubscriptionSession.close] when done. The session runs its own reader
+     * thread from the moment this returns.
+     *
+     * The returned session has **no read timeout** — an idle subscription is
+     * silent for hours by design, and Fulcrum over Tor must not be timed out
+     * mid-wait. See [SubscriptionSession]'s doc comment for the reasoning; the
+     * connect timeout, and Tor's longer minimum for an onion rendezvous, still
+     * apply to the dial that happens here.
+     *
+     * @param onNotification called on the reader thread for every pushed
+     *   notification; see [SubscriptionSession.onNotification].
+     * @param onClosed called once on the reader thread if the connection dies.
+     */
+    suspend fun openSubscriptionSession(
+        onNotification: (method: String, params: Any?) -> Unit = { _, _ -> },
+        onClosed: (error: Throwable) -> Unit = {},
+    ): SubscriptionSession = withContext(Dispatchers.IO) {
+        require(server.host.isNotBlank()) { "host is empty" }
+        require(server.port in 1..65535) { "invalid port ${server.port}" }
+
+        // A background connection: like a chain session, nothing about the
+        // route or the bootstrap goes into the user-visible log.
+        val plain = transport.connect(server.host, server.port, timeoutMillis, log = {})
+
+        return@withContext try {
+            val channel: Socket = if (server.protocol == ElectrumProtocol.SSL) startTls(plain) else plain
+            // The one deliberate difference from every other session in this
+            // class: no read timeout. `startTls` (and the transports) set the
+            // handshake timeout on the socket, and a long-lived socket must not
+            // inherit it — see SubscriptionSession's doc comment.
+            channel.soTimeout = SubscriptionSession.NO_READ_TIMEOUT_MILLIS
+            SubscriptionSession(
+                channel = channel,
+                reader = BufferedReader(InputStreamReader(channel.getInputStream(), Charsets.UTF_8)),
+                writer = BufferedWriter(OutputStreamWriter(channel.getOutputStream(), Charsets.UTF_8)),
+                log = {},
+                notificationHandler = onNotification,
+                closedHandler = onClosed,
+            )
+        } catch (error: Throwable) {
+            // Nothing took ownership of the socket, so this is the last chance
+            // to close it.
+            runCatching { plain.close() }
+            throw error
+        }
+    }
+
     private suspend fun <T> runChainSession(block: (ChainQuery) -> T): T {
         var socket: Socket? = null
         try {
@@ -320,6 +377,19 @@ class ElectrumClient(
     private fun shorten(value: String): String =
         if (value.length <= 20) value else value.take(20) + "\u2026"
 
+    /**
+     * The one-line reason a failed connection test ends with.
+     *
+     * The order is deliberate. The exception *type* answers first for the cases
+     * it explains fully — Tor never came up, the name did not resolve, a dial
+     * the JVM timed out itself, a TLS handshake the peer broke — and a socket
+     * errno (see [SocketErrno]) answers next: `EACCES`/`EPERM` is the OS
+     * rejecting the socket, which is a phone-side cause and must never be
+     * reported as the server refusing; `EHOSTUNREACH`/`ENETUNREACH` are
+     * unreachable, not refused; and `ETIMEDOUT` on a dial is a different story
+     * from the read timeout the JVM raises. Only when neither says anything is
+     * a [ConnectException] the plain refusal it has always been.
+     */
     private fun describe(error: Throwable): String {
         val chain = buildString {
             var current: Throwable? = error
@@ -335,9 +405,12 @@ class ElectrumClient(
             is TorBootstrapException -> "Tor is unavailable — ${error.message}"
             is UnknownHostException -> "DNS lookup failed for '${server.host}'"
             is SocketTimeoutException -> "timed out after ${timeoutMillis}ms"
-            is ConnectException -> "connection refused"
             is SSLException -> "TLS handshake failed (untrusted or self-signed certificates are rejected in this iteration)"
-            else -> "unexpected failure"
+            else -> socketErrnoOf(error)?.let { socketErrnoReason(it) }
+                ?: when (error) {
+                    is ConnectException -> "connection refused"
+                    else -> "unexpected failure"
+                }
         }
         return "$hint — $chain"
     }
