@@ -42,6 +42,12 @@ import kotlinx.coroutines.launch
  *   intended teardown.
  * @param now the read clock in epoch seconds, handed to each state; injectable
  *   for tests.
+ * @param openSubscription how each state opens its live subscription connection;
+ *   defaults to a real one. Injectable so the store's own behaviour — the scope
+ *   a subscription runs in, and its cancellation on [remove] — can be exercised
+ *   without a socket.
+ * @param newSubscriptionEngine how each state builds its live-updates engine;
+ *   defaults to the real [com.xbtwallet.app.chain.SubscriptionManager].
  * @param scan the whole-account scan handed to each state it creates; defaults
  *   to the real Electrum scan. Injectable so the store's own behaviour — one
  *   scan per signer, cancellation on [remove] — can be exercised without a
@@ -53,6 +59,8 @@ class SignerChainStateStore(
     private val snapshotStore: SnapshotStore?,
     private val scope: CoroutineScope,
     private val now: () -> Long = { System.currentTimeMillis() / 1000 },
+    private val openSubscription: SubscriptionOpener = ::openLiveSubscription,
+    private val newSubscriptionEngine: SubscriptionEngineFactory = ::managerEngine,
     private val scan: ChainScan = ::scanOverElectrum,
 ) {
 
@@ -77,6 +85,13 @@ class SignerChainStateStore(
                 serverSettings = serverSettings,
                 snapshotStore = snapshotStore,
                 now = now,
+                // The live subscription runs in the same app-scoped scope the
+                // scans do, and is cancelled by [SignerChainState.stopSubscriptions]
+                // when the signer's screen leaves — not by the scope's own
+                // lifetime, which is the process's.
+                subscriptionScope = scope,
+                openSubscription = openSubscription,
+                newSubscriptionEngine = newSubscriptionEngine,
                 scan = scan,
             )
         }
@@ -98,16 +113,19 @@ class SignerChainStateStore(
     }
 
     /**
-     * Forgets [signerId]: cancels any scan in flight and drops its state, so a
-     * later signer that happens to reuse the id can never open on this one's
-     * balance, UTXOs or addresses.
+     * Forgets [signerId]: cancels any scan in flight, closes its live
+     * subscription, and drops its state, so a later signer that happens to reuse
+     * the id can never open on this one's balance, UTXOs or addresses — or on a
+     * socket still carrying the deleted signer's notifications.
      *
      * Called from the signer delete path in `XbtWalletApp`, next to
      * `SignerStore.delete` and `SnapshotStore.clear` (clearing the persisted
-     * snapshot stays at that call site).
+     * snapshot stays at that call site). The screen's own `onDispose` closes the
+     * subscription when the user navigates away; this is the belt-and-braces for
+     * the one path that removes a signer while its state exists.
      */
     fun remove(signerId: String) {
         jobs.remove(signerId)?.cancel()
-        states.remove(signerId)
+        states.remove(signerId)?.stopSubscriptions()
     }
 }

@@ -22,6 +22,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -79,6 +80,27 @@ fun SignerDetailScreen(
     modifier: Modifier = Modifier,
 ) {
     val scope = rememberCoroutineScope()
+
+    // --- the signer's live subscription --------------------------------------
+    //
+    // This screen is the subscription's lifetime, by design: it opens when the
+    // signer's detail appears and closes the moment that detail goes away —
+    // navigating to UTXOs, Addresses or Receive, back Home, or to another
+    // signer. Reopening starts a fresh connection, and the gap it left is caught
+    // by the manager's status-hash diff (the same path a live notification takes),
+    // so nothing is missed by not running in the background.
+    //
+    // The disposer runs after the composition that seeded the cached snapshot, so
+    // there is nothing to wait for: the balance is already on screen, the rescan
+    // is already running beside it, and neither is waiting on this. Opening the
+    // subscription is best-effort — `startSubscriptions` returns immediately and
+    // silently does nothing when there is no server, no key, or no connection to
+    // be had, leaving the pull path exactly as it was.
+    DisposableEffect(state) {
+        state.startSubscriptions()
+        onDispose { state.stopSubscriptions() }
+    }
+
     // True while the receive address is being resolved. It disables the Receive
     // button and shows a spinner inside it, so the navigation happens only with
     // the address already in hand — the receive screen then never has to show a
