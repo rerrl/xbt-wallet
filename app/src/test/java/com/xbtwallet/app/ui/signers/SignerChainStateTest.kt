@@ -128,6 +128,105 @@ class SignerChainStateTest {
         assertTrue(message, message.contains("refused"))
     }
 
+    // --- errno-aware wording -------------------------------------------------
+    //
+    // The balance path shares the Server screen's errno vocabulary. A raw-socket
+    // errno says which side is at fault: EACCES/EPERM is the OS rejecting the
+    // socket on the phone, so the sentence must send the user to the phone's
+    // permissions — not to their server — and an unreachable host or network is
+    // not the same failure as a dial that simply ran out of time.
+
+    /** A state whose scan fails with [error] on the first attempt, with no retries. */
+    private fun failingScanState(error: Exception): SignerChainState =
+        SignerChainState(
+            signer(),
+            FakeServerSettings(SERVER),
+            retryDelaysSeconds = emptyList(),
+        ) { _, _, _, _ -> throw error }
+
+    @Test
+    fun `an EACCES balance failure names the on-device causes, not the server`() {
+        val state = failingScanState(
+            ConnectException(
+                "failed to connect to /192.168.1.10 (port 50002) from /192.168.1.5 after 10000ms: " +
+                    "isConnected failed: EACCES (Permission denied)",
+            ),
+        )
+
+        runBlocking { state.load() }
+
+        assertEquals(ChainPhase.ERROR, state.phase)
+        val message = state.errorMessage.orEmpty()
+        assertTrue(message, message.contains("192.168.1.10:50002"))
+        assertTrue(message, message.contains("Network permission"))
+        assertTrue(message, message.contains("VPN lockdown"))
+        assertTrue(message, message.contains("firewall"))
+        assertTrue(message, message.contains("Data Saver"))
+        assertFalse("the server never refused anything here", message.contains("refused"))
+        assertFalse(message, message.contains("the connection failed"))
+    }
+
+    @Test
+    fun `an unreachable host is not reported as a refusal`() {
+        val state = failingScanState(ConnectException("connect failed: EHOSTUNREACH (No route to host)"))
+
+        runBlocking { state.load() }
+
+        val message = state.errorMessage.orEmpty()
+        assertTrue(message, message.contains("host unreachable"))
+        assertFalse(message, message.contains("network unreachable"))
+        assertFalse(message, message.contains("refused"))
+    }
+
+    @Test
+    fun `an unreachable network is distinguished from an unreachable host`() {
+        val state = failingScanState(ConnectException("connect failed: ENETUNREACH (Network is unreachable)"))
+
+        runBlocking { state.load() }
+
+        val message = state.errorMessage.orEmpty()
+        assertTrue(message, message.contains("network unreachable"))
+        assertFalse(message, message.contains("host unreachable"))
+        assertFalse(message, message.contains("refused"))
+    }
+
+    @Test
+    fun `a timed-out dial is distinguished from the server not answering`() {
+        val dial = failingScanState(ConnectException("failed to connect to /192.168.1.10 (port 50002): ETIMEDOUT"))
+        val slowServer = failingScanState(SocketTimeoutException("read timed out"))
+
+        runBlocking { dial.load() }
+        runBlocking { slowServer.load() }
+
+        assertTrue(
+            dial.errorMessage.orEmpty(),
+            dial.errorMessage.orEmpty().contains("the connection attempt timed out"),
+        )
+        assertTrue(
+            slowServer.errorMessage.orEmpty(),
+            slowServer.errorMessage.orEmpty().contains("the server did not answer in time"),
+        )
+    }
+
+    @Test
+    fun `an errno-free IOException keeps its generic wording`() {
+        val state = failingScanState(IOException("socket closed"))
+
+        runBlocking { state.load() }
+
+        val message = state.errorMessage.orEmpty()
+        assertTrue(message, message.contains("the connection failed (socket closed)"))
+    }
+
+    @Test
+    fun `an errno-free refusal keeps the refused wording`() {
+        val state = failingScanState(ConnectException("Connection refused"))
+
+        runBlocking { state.load() }
+
+        assertTrue(state.errorMessage.orEmpty(), state.errorMessage.orEmpty().contains("the connection was refused"))
+    }
+
     @Test
     fun `the loading phase is visible while the cold scan runs`() {
         var phaseDuringScan: ChainPhase? = null

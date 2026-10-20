@@ -377,6 +377,19 @@ class ElectrumClient(
     private fun shorten(value: String): String =
         if (value.length <= 20) value else value.take(20) + "\u2026"
 
+    /**
+     * The one-line reason a failed connection test ends with.
+     *
+     * The order is deliberate. The exception *type* answers first for the cases
+     * it explains fully — Tor never came up, the name did not resolve, a dial
+     * the JVM timed out itself, a TLS handshake the peer broke — and a socket
+     * errno (see [SocketErrno]) answers next: `EACCES`/`EPERM` is the OS
+     * rejecting the socket, which is a phone-side cause and must never be
+     * reported as the server refusing; `EHOSTUNREACH`/`ENETUNREACH` are
+     * unreachable, not refused; and `ETIMEDOUT` on a dial is a different story
+     * from the read timeout the JVM raises. Only when neither says anything is
+     * a [ConnectException] the plain refusal it has always been.
+     */
     private fun describe(error: Throwable): String {
         val chain = buildString {
             var current: Throwable? = error
@@ -392,9 +405,12 @@ class ElectrumClient(
             is TorBootstrapException -> "Tor is unavailable — ${error.message}"
             is UnknownHostException -> "DNS lookup failed for '${server.host}'"
             is SocketTimeoutException -> "timed out after ${timeoutMillis}ms"
-            is ConnectException -> "connection refused"
             is SSLException -> "TLS handshake failed (untrusted or self-signed certificates are rejected in this iteration)"
-            else -> "unexpected failure"
+            else -> socketErrnoOf(error)?.let { socketErrnoReason(it) }
+                ?: when (error) {
+                    is ConnectException -> "connection refused"
+                    else -> "unexpected failure"
+                }
         }
         return "$hint — $chain"
     }

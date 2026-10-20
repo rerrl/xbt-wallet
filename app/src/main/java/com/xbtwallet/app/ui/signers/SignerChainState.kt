@@ -27,6 +27,8 @@ import com.xbtwallet.app.electrum.ElectrumClient
 import com.xbtwallet.app.electrum.ElectrumException
 import com.xbtwallet.app.electrum.ElectrumServer
 import com.xbtwallet.app.electrum.SubscriptionSession
+import com.xbtwallet.app.electrum.socketErrnoOf
+import com.xbtwallet.app.electrum.socketErrnoReason
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -687,17 +689,28 @@ class SignerChainState(
      *
      * These are the same failures the Server screen's connection test reports;
      * the wording is repeated here rather than shared because this screen needs
-     * it as a *message*, not as log lines.
+     * it as a *message*, not as log lines. The one thing genuinely shared is the
+     * socket-errno vocabulary ([SocketErrno]): `EACCES`/`EPERM` is the OS
+     * rejecting the socket — a phone-side cause — and saying "the connection
+     * failed" (or worse, "refused") over it sends the user to debug a server
+     * that never heard the request. A type the JVM explains fully keeps its own
+     * wording first, exactly as on the Server screen, so the one deliberate
+     * distinction is the timeout: a dial that reports `ETIMEDOUT` is a failed
+     * connection attempt, while a [SocketTimeoutException] is the server not
+     * answering.
      */
     private fun describe(server: ElectrumServer, error: Exception): String {
         val where = "${server.host}:${server.port}"
         val reason = when (error) {
             is UnknownHostException -> "that host name could not be resolved"
-            is SocketTimeoutException -> "the server did not answer in time"
-            is ConnectException -> "the connection was refused"
             is ElectrumException -> "the server rejected the request (${error.message})"
-            is IOException -> "the connection failed (${error.message ?: "no details"})"
-            else -> error.message ?: error::class.java.simpleName
+            is SocketTimeoutException -> "the server did not answer in time"
+            else -> socketErrnoOf(error)?.let { socketErrnoReason(it) }
+                ?: when (error) {
+                    is ConnectException -> "the connection was refused"
+                    is IOException -> "the connection failed (${error.message ?: "no details"})"
+                    else -> error.message ?: error::class.java.simpleName
+                }
         }
         return "Could not read the balance from $where — $reason."
     }
