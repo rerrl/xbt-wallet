@@ -48,6 +48,23 @@ class MockElectrumServer(
         /** `{"id":…,"error":{"code":…,"message":…}}` */
         data class Error(val code: Int, val message: String) : Reply
 
+        /**
+         * Send this line verbatim instead of a JSON-RPC reply — used to feed the
+         * client a line that is not valid JSON, which must surface as a failure
+         * rather than being skipped.
+         */
+        data class Raw(val line: String) : Reply
+
+        /**
+         * Answer this request later, from the test thread, with [replyTo] (or
+         * [failTo]).
+         *
+         * The mock's loop keeps reading, which is what makes the awkward cases
+         * testable: two requests can be held and then answered out of order,
+         * and a notification can be pushed while a request is still in flight.
+         */
+        data object Defer : Reply
+
         /** Close the connection without answering. */
         data object HangUp : Reply
     }
@@ -73,6 +90,13 @@ class MockElectrumServer(
 
     @Volatile
     private var clientSocket: Socket? = null
+
+    /** The current connection's writer, for the test thread to push lines on. */
+    @Volatile
+    private var clientWriter: OutputStreamWriter? = null
+
+    /** Guards [clientWriter] so the mock thread and the test thread never interleave a line. */
+    private val writeLock = Any()
 
     private val worker = Thread({ serve() }, "mock-electrum").apply {
         isDaemon = true
@@ -104,34 +128,92 @@ class MockElectrumServer(
         socket.use { connection ->
             val reader = BufferedReader(InputStreamReader(connection.getInputStream(), Charsets.UTF_8))
             val writer = OutputStreamWriter(connection.getOutputStream(), Charsets.UTF_8)
-            while (true) {
-                val line = reader.readLine() ?: return
-                val request = MiniJson.parse(line) as? Map<*, *> ?: return
-                @Suppress("UNCHECKED_CAST")
-                val fields = request as Map<String, Any?>
-                requests += fields
+            clientWriter = writer
+            try {
+                while (true) {
+                    val line = reader.readLine() ?: return
+                    val request = MiniJson.parse(line) as? Map<*, *> ?: return
+                    @Suppress("UNCHECKED_CAST")
+                    val fields = request as Map<String, Any?>
+                    requests += fields
 
-                val id = fields["id"]
-                val method = fields["method"] as? String ?: ""
-                val params = (fields["params"] as? List<*>)?.toList<Any?>() ?: emptyList()
-                val payload = when (val reply = respond(method, params, id)) {
-                    is Reply.Result -> {
-                        reply.precedingNotifications.forEach { line ->
-                            writer.write(line)
-                            writer.write("\n")
+                    val id = fields["id"]
+                    val method = fields["method"] as? String ?: ""
+                    val params = (fields["params"] as? List<*>)?.toList<Any?>() ?: emptyList()
+                    when (val answer = respond(method, params, id)) {
+                        is Reply.Result -> {
+                            answer.precedingNotifications.forEach { notification -> writeLine(notification) }
+                            replyTo(id, answer.value)
                         }
-                        linkedMapOf<String, Any?>("id" to id, "result" to reply.value)
+                        is Reply.Error -> failTo(id, answer.code, answer.message)
+                        is Reply.Raw -> writeLine(answer.line)
+                        // Held for the test to answer: the loop keeps reading, so
+                        // another request can be answered first and a notification
+                        // can be pushed while this one is still in flight.
+                        Reply.Defer -> Unit
+                        Reply.HangUp -> return
                     }
-                    is Reply.Error -> linkedMapOf<String, Any?>(
-                        "id" to id,
-                        "error" to linkedMapOf<String, Any?>("code" to reply.code, "message" to reply.message),
-                    )
-                    Reply.HangUp -> return
                 }
-                writer.write(MiniJson.encode(payload))
-                writer.write("\n")
-                writer.flush()
+            } finally {
+                clientWriter = null
             }
+        }
+    }
+
+    /** `{"id":…,"result":…}` — answers a request, deferred or just arrived. */
+    fun replyTo(id: Any?, value: Any?) {
+        writeLine(MiniJson.encode(linkedMapOf<String, Any?>("id" to id, "result" to value)))
+    }
+
+    /** `{"id":…,"error":{…}}` — the RPC error a deferred request is answered with. */
+    fun failTo(id: Any?, code: Int, message: String) {
+        writeLine(
+            MiniJson.encode(
+                linkedMapOf<String, Any?>(
+                    "id" to id,
+                    "error" to linkedMapOf<String, Any?>("code" to code, "message" to message),
+                ),
+            ),
+        )
+    }
+
+    /**
+     * Pushes one line with no `id` — a server notification — to the connected
+     * client, from the test thread.
+     */
+    fun pushNotification(method: String, params: Any?) {
+        writeLine(MiniJson.encode(linkedMapOf<String, Any?>("method" to method, "params" to params)))
+    }
+
+    /** Writes [line] verbatim, for the cases no well-formed reply can produce. */
+    fun pushLine(line: String) {
+        writeLine(line)
+    }
+
+    /** Closes the client's connection under it: the peer hanging up. */
+    fun hangUp() {
+        runCatching { clientSocket?.close() }
+    }
+
+    /**
+     * Waits until at least [count] requests have arrived, or [timeoutMillis]
+     * elapses. Returns whether the count was reached.
+     */
+    fun awaitRequests(count: Int, timeoutMillis: Long = 5_000): Boolean {
+        val deadline = System.nanoTime() + timeoutMillis * 1_000_000
+        while (requests.size < count) {
+            if (System.nanoTime() > deadline) return false
+            Thread.sleep(5)
+        }
+        return true
+    }
+
+    private fun writeLine(line: String) {
+        val writer = clientWriter ?: return
+        synchronized(writeLock) {
+            writer.write(line)
+            writer.write("\n")
+            writer.flush()
         }
     }
 
@@ -165,6 +247,11 @@ class MockElectrumServer(
          *   `blockchain.block.header` answers. A height not listed is answered as
          *   an RPC error, the way a server answers a height it cannot serve.
          * @param tipHeight the height `blockchain.headers.subscribe` reports.
+         * @param statusHashes per-scripthash `blockchain.scripthash.subscribe`
+         *   status: the hash the server currently holds for that address, or an
+         *   explicit `null` for a Fulcrum-style "address never seen" answer. A
+         *   scripthash absent from the map is answered null too — which is what
+         *   a real server answers for an address it has no history for.
          */
         fun scripted(
             history: Map<String, List<Any?>> = emptyMap(),
@@ -173,11 +260,15 @@ class MockElectrumServer(
             transactions: Map<String, String> = emptyMap(),
             blockHeaders: Map<Int, String> = emptyMap(),
             tipHeight: Int = 800_000,
+            statusHashes: Map<String, String?> = emptyMap(),
         ): MockElectrumServer = MockElectrumServer { method, params, _ ->
             val scripthash = params.firstOrNull() as? String ?: ""
             when (method) {
                 "blockchain.scripthash.get_history" ->
                     Reply.Result(history[scripthash] ?: emptyList<Any?>())
+
+                "blockchain.scripthash.subscribe" ->
+                    Reply.Result(statusHashes[scripthash])
 
                 "blockchain.scripthash.get_balance" -> {
                     val (confirmed, unconfirmed) = balances[scripthash] ?: (0L to 0L)

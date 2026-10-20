@@ -132,6 +132,63 @@ class ElectrumClient(
     suspend fun <T> withChainSession(block: (ChainQuery) -> T): T =
         withContext(Dispatchers.IO) { runChainSession(block) }
 
+    /**
+     * Opens one connection and hands it back as a long-lived
+     * [SubscriptionSession] — the subscription counterpart of
+     * [withChainSession].
+     *
+     * The socket is opened exactly as [runChainSession] opens it: through the
+     * injected [ElectrumTransport] (so a `.onion` host goes through the bundled
+     * Tor and everything else directly), with TLS layered on when the endpoint
+     * asks for it. Unlike a chain session, it is *not* closed here: the caller
+     * owns it, keeps it open, receives pushed notifications on it and calls
+     * [SubscriptionSession.close] when done. The session runs its own reader
+     * thread from the moment this returns.
+     *
+     * The returned session has **no read timeout** — an idle subscription is
+     * silent for hours by design, and Fulcrum over Tor must not be timed out
+     * mid-wait. See [SubscriptionSession]'s doc comment for the reasoning; the
+     * connect timeout, and Tor's longer minimum for an onion rendezvous, still
+     * apply to the dial that happens here.
+     *
+     * @param onNotification called on the reader thread for every pushed
+     *   notification; see [SubscriptionSession.onNotification].
+     * @param onClosed called once on the reader thread if the connection dies.
+     */
+    suspend fun openSubscriptionSession(
+        onNotification: (method: String, params: Any?) -> Unit = { _, _ -> },
+        onClosed: (error: Throwable) -> Unit = {},
+    ): SubscriptionSession = withContext(Dispatchers.IO) {
+        require(server.host.isNotBlank()) { "host is empty" }
+        require(server.port in 1..65535) { "invalid port ${server.port}" }
+
+        // A background connection: like a chain session, nothing about the
+        // route or the bootstrap goes into the user-visible log.
+        val plain = transport.connect(server.host, server.port, timeoutMillis, log = {})
+
+        return@withContext try {
+            val channel: Socket = if (server.protocol == ElectrumProtocol.SSL) startTls(plain) else plain
+            // The one deliberate difference from every other session in this
+            // class: no read timeout. `startTls` (and the transports) set the
+            // handshake timeout on the socket, and a long-lived socket must not
+            // inherit it — see SubscriptionSession's doc comment.
+            channel.soTimeout = SubscriptionSession.NO_READ_TIMEOUT_MILLIS
+            SubscriptionSession(
+                channel = channel,
+                reader = BufferedReader(InputStreamReader(channel.getInputStream(), Charsets.UTF_8)),
+                writer = BufferedWriter(OutputStreamWriter(channel.getOutputStream(), Charsets.UTF_8)),
+                log = {},
+                notificationHandler = onNotification,
+                closedHandler = onClosed,
+            )
+        } catch (error: Throwable) {
+            // Nothing took ownership of the socket, so this is the last chance
+            // to close it.
+            runCatching { plain.close() }
+            throw error
+        }
+    }
+
     private suspend fun <T> runChainSession(block: (ChainQuery) -> T): T {
         var socket: Socket? = null
         try {
