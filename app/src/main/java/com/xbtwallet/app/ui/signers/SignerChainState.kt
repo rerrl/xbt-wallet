@@ -16,6 +16,7 @@ import com.xbtwallet.app.electrum.ElectrumClient
 import com.xbtwallet.app.electrum.ElectrumException
 import com.xbtwallet.app.electrum.ElectrumServer
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
@@ -56,6 +57,16 @@ import java.net.UnknownHostException
  * **Testability.** The scan is injected, so this class can be exercised on the
  * JVM — including the failure paths — with no server, no socket and no Android.
  *
+ * **Transient failures retry invisibly.** A scan that dies with a *transport*
+ * error ([java.io.IOException] and its subclasses — a read timeout, a refused
+ * connection, a socket dropped when the screen slept) is retried before it is
+ * reported, at the intervals in [retryDelaysSeconds]. Only when those are
+ * exhausted does the cold path show [ChainPhase.ERROR] or the warm path raise
+ * [syncFailed]: the common real-world case — the device slept mid-sync and the
+ * socket went with it — heals itself instead of greeting the user with a
+ * failure. A protocol *answer* ([ElectrumException]) is not transient and is not
+ * retried, and a [CancellationException] still rethrows immediately.
+ *
  * @param signer the signer being shown. Read once: the navigation layer is what
  *   notices a signer being deleted, and sends the user Home instead.
  * @param serverSettings read access to the saved Electrum endpoint.
@@ -64,6 +75,11 @@ import java.net.UnknownHostException
  *   [snapshot] and receives every completed scan.
  * @param now the read clock in epoch seconds, injectable so the staleness rule
  *   can be tested without waiting (mirrors [SnapshotStore]'s save clock).
+ * @param retryDelaysSeconds how long to wait before each *retry* of a scan that
+ *   failed with a transient transport error. One entry per extra attempt, so the
+ *   default `listOf(3, 10)` retries a dead scan at +3s and again at +10s, and
+ *   only a third failure is reported. Empty means "never retry", which is what
+ *   most tests want (and what makes them instant).
  * @param scan one whole-account scan; defaults to a real one over the socket.
  *   Last so a test can pass it as a trailing lambda.
  */
@@ -73,6 +89,7 @@ class SignerChainState(
     private val serverSettings: ServerSettings,
     private val snapshotStore: SnapshotStore? = null,
     private val now: () -> Long = { System.currentTimeMillis() / 1000 },
+    private val retryDelaysSeconds: List<Long> = DEFAULT_RETRY_DELAYS_SECONDS,
     private val scan: ChainScan = ::scanOverElectrum,
 ) {
 
@@ -194,6 +211,15 @@ class SignerChainState(
          * automatically. The manual Refresh/Retry ([reload]) ignores it.
          */
         const val STALE_AFTER_SECONDS: Long = 120L
+
+        /**
+         * The default retry schedule for a scan that fails with a transient
+         * transport error: wait 3s, try again, wait 10s, try again, and only then
+         * report the failure. Two extra attempts is enough to ride out a screen
+         * that slept (the socket dies, then reconnects) without leaving a dead
+         * server to hammer for long — see [SignerChainState.retryDelaysSeconds].
+         */
+        val DEFAULT_RETRY_DELAYS_SECONDS: List<Long> = listOf(3L, 10L)
     }
 
     /**
@@ -249,7 +275,7 @@ class SignerChainState(
         errorMessage = null
         scannedAddressCount = 0
         try {
-            val result = scan(server, scanner, null) { checked -> scannedAddressCount = checked }
+            val result = scanWithRetries(server, scanner, null) { checked -> scannedAddressCount = checked }
             snapshot = result
             lastCompletedSyncAt = now()
             phase = ChainPhase.READY
@@ -283,7 +309,7 @@ class SignerChainState(
         errorMessage = null
         scannedAddressCount = 0
         try {
-            val result = scan(server, scanner, cached) { checked -> scannedAddressCount = checked }
+            val result = scanWithRetries(server, scanner, cached) { checked -> scannedAddressCount = checked }
             snapshot = result
             lastCompletedSyncAt = now()
             phase = ChainPhase.READY
@@ -308,6 +334,49 @@ class SignerChainState(
 
     /** The saved endpoint, or null when the user has not entered one. */
     private fun configuredServer(): ElectrumServer? = serverSettings.load().takeIf { it.host.isNotBlank() }
+
+    /**
+     * Runs one whole-account scan, retrying it after a *transient transport*
+     * failure.
+     *
+     * The retry budget is [retryDelaysSeconds] — one entry per extra attempt, so
+     * the default two entries mean three attempts in total. A failure that is not
+     * a transport failure is not retried at all:
+     *
+     * - [CancellationException] rethrows on the spot (teardown, or the signer
+     *   being deleted), and because the backoff below is a [delay] it stays
+     *   cancellable *while waiting* — a scan sleeping out its retry is torn down
+     *   the same as one blocked on the socket;
+     * - [ElectrumException] (and anything else that is not an [IOException])
+     *   propagates unchanged: the server answered, and the answer was an error,
+     *   so asking again would only get the same answer.
+     *
+     * An [IOException] — a read timeout, a refused connection, a dropped socket,
+     * an unresolvable host — is the case this exists for: the device slept or the
+     * link blipped, and one more dial usually succeeds. [scannedAddressCount] is
+     * deliberately **not** reset between attempts on the warm path (the real
+     * scanner reports its own progress from the start anyway), so the count on
+     * screen never lurches back to zero while a cached snapshot is showing.
+     */
+    private suspend fun scanWithRetries(
+        server: ElectrumServer,
+        scanner: AccountScanner,
+        cached: AccountSnapshot?,
+        onProgress: (Int) -> Unit,
+    ): AccountSnapshot {
+        var retries = 0
+        while (true) {
+            try {
+                return scan(server, scanner, cached, onProgress)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (transport: IOException) {
+                val delaySeconds = retryDelaysSeconds.getOrNull(retries) ?: throw transport
+                retries++
+                delay(delaySeconds * 1000L)
+            }
+        }
+    }
 
     /**
      * Turns a transport failure into a sentence worth reading.
