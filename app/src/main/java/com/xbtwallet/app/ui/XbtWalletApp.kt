@@ -156,20 +156,22 @@ fun XbtWalletApp() {
 
     // --- One screen-on flag for the whole app --------------------------------
     //
-    // The keep-awake preference as Compose state, so flipping the switch on Home
+    // The screen-on preference as Compose state, so flipping the switch on Home
     // recomposes the effect below at once; every change is written straight back
     // to the store.
-    var keepScreenAwake by remember { mutableStateOf(appSettings.keepScreenAwakeWhileSyncing) }
+    var keepScreenOn by remember { mutableStateOf(appSettings.keepScreenOnWhileOpen) }
 
-    // The device must not sleep in the middle of a scan: sleeping drops the
-    // socket and the scan dies (Andrew's report). This is the one place the flag
-    // is set — app-root, not per screen — and it is on exactly while the
-    // preference is ON *and* a scan is in flight, off the moment the scan ends.
-    // `LocalView.keepScreenOn` needs no permission and no wakelock; the app
-    // deliberately has neither.
+    // While the preference is on, the app holds the display on for as long as it
+    // is open in the foreground — so a sync cannot die with the screen, and the
+    // user reading a balance is not interrupted by the idle timeout either.
+    // `LocalView.keepScreenOn` is exactly the right scope for that: it holds only
+    // while this app's window is visible, so a backgrounded app cannot keep the
+    // screen awake — which is the wanted behaviour, not a limitation. No
+    // wakelock (that would hold the device awake with the app hidden) and no
+    // permission: the app deliberately has neither. One place, at the app root.
     val view = LocalView.current
-    DisposableEffect(chainState?.scanInFlight, keepScreenAwake) {
-        view.keepScreenOn = keepScreenAwake && chainState?.scanInFlight == true
+    DisposableEffect(keepScreenOn) {
+        view.keepScreenOn = keepScreenOn
         onDispose { view.keepScreenOn = false }
     }
 
@@ -240,10 +242,10 @@ fun XbtWalletApp() {
 
             HomeScreen(
                 state = homeState,
-                keepScreenAwake = keepScreenAwake,
-                onKeepScreenAwakeChange = { checked ->
-                    keepScreenAwake = checked
-                    appSettings.keepScreenAwakeWhileSyncing = checked
+                keepScreenOn = keepScreenOn,
+                onKeepScreenOnChange = { checked ->
+                    keepScreenOn = checked
+                    appSettings.keepScreenOnWhileOpen = checked
                 },
                 onOpenServer = { nav.push(Route(Screen.SERVER)) },
                 onAddSigner = { nav.push(Route(Screen.ADD_SIGNER)) },

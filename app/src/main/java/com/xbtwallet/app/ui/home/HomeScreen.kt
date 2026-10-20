@@ -534,22 +534,23 @@ fun rememberHomeScreenState(
  * The screen owns no state: it renders [state] and forwards taps.
  *
  * **Preferences.** Below the signer buttons sits a small *Preferences* section
- * with the app-level flags — today just *Keep screen awake while syncing*, which
- * holds the display on for as long as a scan is in flight so the socket is not
- * torn down when the screen sleeps (see the keep-awake effect in `XbtWalletApp`).
+ * with the app-level flags — today just *Keep screen on while app is open*, which
+ * holds the display on the whole time the app is in the foreground, so the
+ * screen never sleeps out from under a scan or out from under the user reading a
+ * balance (see the screen-on effect in `XbtWalletApp`).
  * It is about the app, not about one signer, which is why it lives here rather
  * than on a signer's screen; the value is owned by the navigation layer and
  * persisted the moment the switch is flipped.
  *
- * @param keepScreenAwake the current value of the keep-awake preference.
- * @param onKeepScreenAwakeChange called with the new value when the switch is
+ * @param keepScreenOn the current value of the keep-screen-on preference.
+ * @param onKeepScreenOnChange called with the new value when the switch is
  *   flipped; the caller persists it.
  */
 @Composable
 fun HomeScreen(
     state: HomeScreenState,
-    keepScreenAwake: Boolean,
-    onKeepScreenAwakeChange: (Boolean) -> Unit,
+    keepScreenOn: Boolean,
+    onKeepScreenOnChange: (Boolean) -> Unit,
     onOpenServer: () -> Unit,
     onAddSigner: () -> Unit,
     onOpenSigners: () -> Unit,
@@ -616,9 +617,10 @@ fun HomeScreen(
             Spacer(modifier = Modifier.height(32.dp))
 
             // 4. Preferences — app-level behaviour, not per-signer setup. One
-            //    switch today: holding the screen awake for the length of a scan,
-            //    so a sync cannot die with the display. Flipping it writes
-            //    straight through to the store (the caller owns that).
+            //    switch today: holding the screen on the whole time the app is
+            //    open in the foreground, so it cannot sleep mid-scan or mid-read.
+            //    Flipping it writes straight through to the store (the caller owns
+            //    that).
             Text(
                 text = "Preferences",
                 style = MaterialTheme.typography.labelMedium,
@@ -632,13 +634,13 @@ fun HomeScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "Keep screen awake while syncing",
+                    text = "Keep screen on while app is open",
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Spacer(modifier = Modifier.weight(1f))
                 Switch(
-                    checked = keepScreenAwake,
-                    onCheckedChange = onKeepScreenAwakeChange,
+                    checked = keepScreenOn,
+                    onCheckedChange = onKeepScreenOnChange,
                 )
             }
 
@@ -742,8 +744,8 @@ private fun HomeScreenPreview() {
     XbtWalletTheme {
         HomeScreen(
             state = previewState,
-            keepScreenAwake = true,
-            onKeepScreenAwakeChange = {},
+            keepScreenOn = true,
+            onKeepScreenOnChange = {},
             onOpenServer = {},
             onAddSigner = {},
             onOpenSigners = {},
@@ -761,8 +763,8 @@ private fun HomeScreenEmptyPreview() {
     XbtWalletTheme {
         HomeScreen(
             state = previewState,
-            keepScreenAwake = true,
-            onKeepScreenAwakeChange = {},
+            keepScreenOn = true,
+            onKeepScreenOnChange = {},
             onOpenServer = {},
             onAddSigner = {},
             onOpenSigners = {},
