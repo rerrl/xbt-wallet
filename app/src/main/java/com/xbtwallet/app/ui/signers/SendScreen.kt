@@ -1,5 +1,9 @@
 package com.xbtwallet.app.ui.signers
 
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -19,6 +23,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -26,7 +31,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.compose.ui.unit.dp
 import com.xbtwallet.app.chain.ScannedUtxo
 
@@ -148,10 +159,61 @@ private fun SendForm(selected: List<ScannedUtxo>, modifier: Modifier = Modifier)
     // are not state here at all — they ride on the route.
     var recipient by remember { mutableStateOf("") }
     var feeInput by remember { mutableStateOf("1") }
+    var amountInput by remember { mutableStateOf("") }
     var label by remember { mutableStateOf("") }
     var scannerOpen by remember { mutableStateOf(false) }
 
+    val context = LocalContext.current
+
+    // CAMERA is asked for by this app, not by the scanner library: the panel is
+    // our own composable and it can only work with the permission in hand. A
+    // granted request opens the panel; a refusal is simply remembered as
+    // "closed", so the "Scan QR" button stays the manual path.
+    val scanPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) scannerOpen = true
+    }
+
+    // The scanner opens by default on entry — scanning is the expected way to
+    // get a recipient, not an extra step. Keyed on `Unit` so it fires exactly
+    // once per entry into this form: a grant opens the panel, a denial leaves
+    // the form alone, and nothing here can re-open a panel the user cancelled
+    // (the dismiss path only writes `scannerOpen = false`, and this effect is
+    // already past).
+    LaunchedEffect(Unit) {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            scannerOpen = true
+        } else {
+            scanPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    // "Scan QR" does the same thing: with the permission already held, open the
+    // panel at once (no pointless dialog); otherwise ask for it — the grant
+    // arrives in the launcher callback above and opens the panel there.
+    val openScanner: () -> Unit = {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            scannerOpen = true
+        } else {
+            scanPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
     val totalSatoshis = selected.sumOf { it.utxo.satoshis }
+
+    // The fee rate drives the max spendable, so both are derived from the input
+    // rather than stored: editing the fee re-derives the max under it. A fee
+    // rate that does not parse yields a null max, and every max affordance
+    // (the button, the helper line, the over-max error) disappears with it —
+    // there is no honest number to offer while the rate is unknown.
+    val feeRate = parseFeeRate(feeInput)
+    val maxSendable = feeRate?.let { rate -> maxSendableSatoshis(totalSatoshis, selected.size, rate) }
+    val estimatedFee = feeRate?.let { rate -> estimateSendVsize(selected.size).toLong() * rate }
 
     Column(modifier = modifier) {
         Column(
@@ -188,7 +250,6 @@ private fun SendForm(selected: List<ScannedUtxo>, modifier: Modifier = Modifier)
                 value = recipient,
                 onValueChange = { recipient = it },
                 label = { Text("Recipient address") },
-                singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
             val addressError = validateRecipientAddress(recipient)
@@ -199,8 +260,40 @@ private fun SendForm(selected: List<ScannedUtxo>, modifier: Modifier = Modifier)
                     color = MaterialTheme.colorScheme.error,
                 )
             }
+            // A valid address gets a full readout of its own: what a user checks
+            // before sending is the head and the tail of the address against
+            // their own screen, so those come back in the accent colour and the
+            // middle stays plain — the whole string is shown, wrapped, so
+            // nothing is hidden behind a clip.
+            if (recipient.isNotEmpty() && addressError == null) {
+                val (first, middle, last) = splitAddressEdges(recipient)
+                Text(
+                    text = buildAnnotatedString {
+                        withStyle(
+                            SpanStyle(
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary,
+                            ),
+                        ) {
+                            append(first)
+                        }
+                        append(middle)
+                        withStyle(
+                            SpanStyle(
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary,
+                            ),
+                        ) {
+                            append(last)
+                        }
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
 
-            TextButton(onClick = { scannerOpen = !scannerOpen }) { Text("Scan QR") }
+            TextButton(onClick = openScanner) { Text("Scan QR") }
 
             if (scannerOpen) {
                 XpubQrScannerPanel(
@@ -226,6 +319,50 @@ private fun SendForm(selected: List<ScannedUtxo>, modifier: Modifier = Modifier)
             if (feeInput.isNotEmpty() && parseFeeRate(feeInput) == null) {
                 Text(
                     text = "Enter a whole number of at least 1.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // --- amount ------------------------------------------------------
+            // Empty by default: the amount is a decision about this particular
+            // send, so it starts blank rather than proposing a number. "Max" is
+            // fee-aware — it fills in what is left after the estimated fee at
+            // the current rate — and appears only while that rate parses.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = amountInput,
+                    onValueChange = { amountInput = it },
+                    label = { Text("Amount (sats)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f),
+                )
+                if (maxSendable != null) {
+                    TextButton(onClick = { amountInput = maxSendable.toString() }) { Text("Max") }
+                }
+            }
+            if (maxSendable != null && estimatedFee != null) {
+                Text(
+                    text = "Max spendable: ${formatSats(maxSendable)} sats " +
+                        "(estimated fee ${formatSats(estimatedFee)} sats)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            val amountSatoshis = parseAmountSats(amountInput)
+            when {
+                amountInput.isNotEmpty() && amountSatoshis == null -> Text(
+                    text = "Enter a whole number of sats greater than 0.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+
+                amountSatoshis != null && maxSendable != null && amountSatoshis > maxSendable -> Text(
+                    text = "Exceeds the max spendable (${formatSats(maxSendable)} sats " +
+                        "after the estimated fee).",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                 )

@@ -133,4 +133,92 @@ class SendValidationTest {
     fun `extractAddress passes a bare address through unchanged`() {
         assertEquals(validV0, extractAddress(validV0))
     }
+
+    // --- parseAmountSats ----------------------------------------------------
+
+    @Test
+    fun `a whole number of at least one satoshi parses`() {
+        assertEquals(1L, parseAmountSats("1"))
+        assertEquals(500L, parseAmountSats(" 500 "))
+        assertEquals(2_100_000L, parseAmountSats("2100000"))
+    }
+
+    @Test
+    fun `zero, negatives, fractions, blanks and text do not parse`() {
+        assertNull(parseAmountSats("0"))
+        assertNull(parseAmountSats("-5"))
+        assertNull(parseAmountSats("1.5"))
+        assertNull(parseAmountSats(""))
+        assertNull(parseAmountSats("   "))
+        assertNull(parseAmountSats("abc"))
+    }
+
+    @Test
+    fun `an amount that overflows a Long is null, never a wrapped value`() {
+        assertNull(parseAmountSats("99999999999999999999"))
+    }
+
+    // --- estimateSendVsize --------------------------------------------------
+
+    @Test
+    fun `the send vsize estimate is 10 plus 68 per input plus 62`() {
+        assertEquals(140, estimateSendVsize(1))
+        assertEquals(208, estimateSendVsize(2))
+        assertEquals(72, estimateSendVsize(0))
+    }
+
+    // --- maxSendableSatoshis ------------------------------------------------
+
+    @Test
+    fun `the max spendable subtracts the estimated fee at the given rate`() {
+        // 2 inputs → 208 vB; at 1 sat/vB that is 208 sats.
+        assertEquals(99_792L, maxSendableSatoshis(100_000L, 2, 1L))
+        // …and at 5 sat/vB, 208 * 5 = 1_040 sats.
+        assertEquals(98_960L, maxSendableSatoshis(100_000L, 2, 5L))
+    }
+
+    @Test
+    fun `the max spendable multiplies the exact vsize by the rate`() {
+        // 1 input → 140 vB; 140 * 3 = 420.
+        assertEquals(100_000L - 140L * 3L, maxSendableSatoshis(100_000L, 1, 3L))
+        assertEquals(100_000L - 72L * 7L, maxSendableSatoshis(100_000L, 0, 7L))
+    }
+
+    @Test
+    fun `the max spendable floors at zero when the fee would exceed the total`() {
+        assertEquals(0L, maxSendableSatoshis(100L, 2, 5L))
+        assertEquals(0L, maxSendableSatoshis(0L, 1, 1L))
+        assertEquals(0L, maxSendableSatoshis(208L, 2, 1L))
+    }
+
+    // --- splitAddressEdges --------------------------------------------------
+
+    @Test
+    fun `a 42-char address splits 8-26-8 with no overlap and reassembles losslessly`() {
+        val address = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+        assertEquals(42, address.length)
+        val (first, middle, last) = splitAddressEdges(address)
+        assertEquals(8, first.length)
+        assertEquals(26, middle.length)
+        assertEquals(8, last.length)
+        assertEquals(address, first + middle + last)
+    }
+
+    @Test
+    fun `an address of 16 chars or fewer is all-first, with an empty middle and last`() {
+        val sixteen = "abcdefghijklmnop"
+        assertEquals(Triple(sixteen, "", ""), splitAddressEdges(sixteen))
+        val ten = "abcdefghij"
+        assertEquals(Triple(ten, "", ""), splitAddressEdges(ten))
+    }
+
+    @Test
+    fun `a 17-char address splits 8-1-8`() {
+        val seventeen = "abcdefghijklmnopq"
+        val (first, middle, last) = splitAddressEdges(seventeen)
+        assertEquals("abcdefgh", first)
+        assertEquals("i", middle)
+        assertEquals("jklmnopq", last)
+        assertEquals(seventeen, first + middle + last)
+    }
 }

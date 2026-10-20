@@ -94,3 +94,69 @@ fun parseFeeRate(input: String): Long? {
     val value = trimmed.toLongOrNull() ?: return null
     return if (value >= 1) value else null
 }
+
+/**
+ * The estimated size, in virtual bytes, of a send that spends [inputCount]
+ * P2WPKH inputs and carries two outputs: the recipient and the change.
+ *
+ * Deliberately conservative, and hard-coded rather than derived: the wallet
+ * only ever spends P2WPKH (BIP-84) inputs, so the weights are known without
+ * knowing anything about the actual UTXOs. 10 vB of transaction overhead, 68 vB
+ * per input, and 62 vB for the two outputs. Guessing high costs the user a few
+ * sats of headroom; guessing low would hand them a fee estimate their wallet
+ * cannot pay, which is the worse error.
+ */
+fun estimateSendVsize(inputCount: Int): Int = 10 + 68 * inputCount + 62
+
+/**
+ * The most that can be sent out of [totalSatoshis] selected coins without the
+ * estimated fee eating into it, or 0 when the fee would take everything.
+ *
+ * This is recomputed whenever the fee rate changes — the max spendable is a
+ * property of the fee, not a constant — and it is floored at 0 rather than
+ * allowed to go negative: "you can send -40 sats" is not a sentence.
+ */
+fun maxSendableSatoshis(
+    totalSatoshis: Long,
+    inputCount: Int,
+    feeRateSatPerVb: Long,
+): Long {
+    val estimatedFee = estimateSendVsize(inputCount).toLong() * feeRateSatPerVb
+    return (totalSatoshis - estimatedFee).coerceAtLeast(0L)
+}
+
+/**
+ * Parses an amount in whole satoshis, or null when [input] is not one.
+ *
+ * The same shape as [parseFeeRate], for the same reasons: whole numbers only
+ * (the field is labelled in sats, so a fractional value is a different unit
+ * than the label claims), at least 1 sat, leading and trailing whitespace
+ * tolerated, and a blank string null rather than zero. [toLongOrNull] is what
+ * keeps an amount too big for a `Long` null instead of silently wrapping to a
+ * negative number.
+ */
+fun parseAmountSats(input: String): Long? {
+    val trimmed = input.trim()
+    if (trimmed.isEmpty()) return null
+    val value = trimmed.toLongOrNull() ?: return null
+    return if (value >= 1) value else null
+}
+
+/**
+ * Splits [address] into the three pieces the Send screen renders: the first 8
+ * characters, everything in between, and the last 8.
+ *
+ * The edges are what a user actually checks against their own device, and
+ * rendering them in an accent colour makes that comparison a glance rather
+ * than a character count. An address of 16 characters or fewer cannot be split
+ * without the edges overlapping, so it comes back whole in `first` with an
+ * empty middle and last — one rendering of every character, never two.
+ */
+fun splitAddressEdges(address: String): Triple<String, String, String> {
+    if (address.length <= 16) return Triple(address, "", "")
+    return Triple(
+        address.substring(0, 8),
+        address.substring(8, address.length - 8),
+        address.substring(address.length - 8),
+    )
+}
