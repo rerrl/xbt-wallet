@@ -17,6 +17,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.xbtwallet.app.data.AppSettingsStore
+import com.xbtwallet.app.data.SavedServersStore
 import com.xbtwallet.app.data.ServerSettingsStore
 import com.xbtwallet.app.data.SharedPreferencesKeyValueStore
 import com.xbtwallet.app.data.Signer
@@ -122,6 +123,12 @@ fun XbtWalletApp() {
     // The app's own preferences (one flag today). Same prefs file and the same
     // KeyValueStore shell as the signer list, under its own key.
     val appSettings = remember(context) { AppSettingsStore(SharedPreferencesKeyValueStore(context)) }
+    // Named server presets — the Server screen's picker. Same prefs file and the
+    // same KeyValueStore shell as the stores above, under its own key; a preset
+    // only refills the server form, it never dials.
+    val savedServersStore = remember(context) {
+        SavedServersStore(SharedPreferencesKeyValueStore(context))
+    }
 
     val homeState = rememberHomeScreenState(signerStore, serverStore)
 
@@ -254,7 +261,7 @@ fun XbtWalletApp() {
         }
 
         Screen.SERVER -> {
-            val state = rememberServerScreenState(serverStore)
+            val state = rememberServerScreenState(serverStore, savedServersStore)
             ServerScreen(state = state, onBack = { nav.pop() })
         }
 
