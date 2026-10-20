@@ -56,8 +56,51 @@ import com.xbtwallet.app.ui.theme.XbtWalletTheme
  * wallet invites exactly the behaviour the product exists to prevent. Spending
  * stays a QR round-trip to the signer.
  *
- * The screen owns no state; it renders the description and forwards the taps.
+ * The screen owns no state; it renders the copy and forwards the taps. The copy
+ * lives in the constants below, free of Compose imports, so [AddSignerCopyTest]
+ * can pin it as Kotlin rather than a rendering detail a JVM test cannot reach.
+ * The screen reads SeedSigner-first: the intro pairs the phone with a SeedSigner,
+ * and the filled **Add signing device** button leads with the SeedSigner export
+ * path, while watch-only is the outlined follow-up.
  */
+
+/** The header's back affordance, unchanged. */
+internal const val ADD_SIGNER_BACK_LABEL = "\u2190 Back"
+
+/** The screen title, unchanged. */
+internal const val ADD_SIGNER_TITLE = "Add signer"
+
+/**
+ * The one intro above the two buttons — it replaces the old single-button-era
+ * paragraph *and* the floating watch-only text that was attached to neither
+ * button. Watch-only is no longer the framing; pairing with a SeedSigner is.
+ */
+internal const val ADD_SIGNER_INTRO =
+    "Pair this phone with your SeedSigner. The phone holds public keys only \u2014 " +
+        "it watches balances and prepares transactions, but it can never spend. " +
+        "Keys never leave your signer."
+
+/** The primary action: the BC-UR signing-device import. */
+internal const val ADD_SIGNING_DEVICE_BUTTON = "Add signing device"
+
+/** The caption under the primary action, led by the SeedSigner export path. */
+internal const val ADD_SIGNING_DEVICE_CAPTION =
+    "The SeedSigner path: Export Xpub \u2192 single-sig \u2192 native segwit \u2192 " +
+        "Animated QR. Also works with Keystone and Jade exports."
+
+/** The secondary action: the text-QR watch-only import. */
+internal const val ADD_WATCH_ONLY_BUTTON = "Add watch-only xpub"
+
+/** The caption under the secondary action, carrying the Coldcard case. */
+internal const val ADD_WATCH_ONLY_CAPTION =
+    "Scan a plain xpub QR from any coordinator \u2014 a bare xpub, a bitcoin: URI, " +
+        "or a [fingerprint/path]xpub expression. Coldcard's text export lives here."
+
+/** The footer panel, closing on why watching is enough. */
+internal const val ADD_SIGNER_FOOTER =
+    "Watching is enough to receive and check balances. Spending stays a QR " +
+        "round-trip to your signer \u2014 which is how your keys stay off this phone."
+
 @Composable
 fun AddSignerScreen(
     onAddWatchOnly: () -> Unit,
@@ -74,29 +117,18 @@ fun AddSignerScreen(
                 .verticalScroll(rememberScrollState()),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onBack) { Text("\u2190 Back") }
+                TextButton(onClick = onBack) { Text(ADD_SIGNER_BACK_LABEL) }
                 Spacer(modifier = Modifier.width(4.dp))
-                Text(text = "Add signer", style = MaterialTheme.typography.titleLarge)
+                Text(text = ADD_SIGNER_TITLE, style = MaterialTheme.typography.titleLarge)
             }
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // The screen's one message, above the single action it describes.
+            // The screen's one message, SeedSigner-first, above the two actions.
             Text(
-                text = "For SeedSigner users and watch-only wallets. SeedSigner " +
-                    "users can still use this to create transactions.",
+                text = ADD_SIGNER_INTRO,
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface,
-            )
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            Text(
-                text = "Watch-only \u2014 a watch-only xpub is for use with your " +
-                    "SeedSigner, or any wallet you want to keep an eye on, without " +
-                    "the seed ever touching this phone.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
             Spacer(modifier = Modifier.height(24.dp))
@@ -106,14 +138,13 @@ fun AddSignerScreen(
                 onClick = onAddSigningDevice,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Add signing device")
+                Text(ADD_SIGNING_DEVICE_BUTTON)
             }
 
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = "SeedSigner, Keystone, Jade \u2014 scan the signer's animated " +
-                    "export QR.",
+                text = ADD_SIGNING_DEVICE_CAPTION,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -125,16 +156,13 @@ fun AddSignerScreen(
                 onClick = onAddWatchOnly,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Add watch-only xpub")
+                Text(ADD_WATCH_ONLY_BUTTON)
             }
 
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = "Scan the xpub QR from your signer or coordinator \u2014 a bare " +
-                    "xpub, a bitcoin: URI, or a [fingerprint/path]xpub key expression. " +
-                    "This phone holds public keys only, so it can watch the money but " +
-                    "can never spend it.",
+                text = ADD_WATCH_ONLY_CAPTION,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -147,9 +175,7 @@ fun AddSignerScreen(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(
-                    text = "Watching is enough to receive and to check your balance. " +
-                        "Spending stays a QR round-trip to the signer, which is what " +
-                        "keeps your keys off this phone.",
+                    text = ADD_SIGNER_FOOTER,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(12.dp),
