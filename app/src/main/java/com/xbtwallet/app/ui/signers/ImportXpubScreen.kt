@@ -39,6 +39,7 @@ import com.xbtwallet.app.crypto.XpubImport
 import com.xbtwallet.app.crypto.XpubScanRoute
 import com.xbtwallet.app.crypto.validateXpubInput
 import com.xbtwallet.app.data.Signer
+import com.xbtwallet.app.data.SignerOrigin
 import com.xbtwallet.app.data.SignerStore
 
 /**
@@ -196,13 +197,17 @@ class ImportXpubScreenState(
 
         val xpub = scannedXpub ?: return
         // The metadata is stored as scanned (fingerprint lowercased, path
-        // normalized by XpubScanRoute); `key` proves the xpub parsed.
+        // normalized by XpubScanRoute); `key` proves the xpub parsed. The origin
+        // is spelled out as the text-QR default: this key came in as a plain
+        // xpub QR, not off a signing device, and that is what keeps it wearing
+        // the grey "watch-only" tag rather than the orange "seedsigner" one.
         onSaved(
             signerStore.add(
                 name = name,
                 xpub = xpub,
                 masterFingerprint = masterFingerprint,
                 derivationPath = derivationPath,
+                importedVia = SignerOrigin.TEXT_QR,
             ),
         )
     }

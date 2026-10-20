@@ -4,6 +4,7 @@ import com.xbtwallet.app.crypto.UrAccountAssembler
 import com.xbtwallet.app.crypto.UrTestVectors
 import com.xbtwallet.app.data.KeyValueStore
 import com.xbtwallet.app.data.Signer
+import com.xbtwallet.app.data.SignerOrigin
 import com.xbtwallet.app.data.SignerStore
 import com.xbtwallet.app.data.SignerType
 import org.junit.Assert.assertEquals
@@ -260,6 +261,20 @@ class AddSigningDeviceScreenStateTest {
         assertEquals("37b5eed4", type.masterFingerprint)
         assertEquals("84'/0'/0'", type.derivationPath)
         assertEquals("Cold storage", reloaded.name)
+    }
+
+    @Test
+    fun `a signer imported from a signing device records that origin`() {
+        val state = stateAfterAnimatedScan()
+        state.onNameChange("Cold storage")
+
+        state.import()
+
+        // The origin is the only thing that tells this signer apart from one
+        // typed in as text, and it is what earns it the orange tag — so it has to
+        // survive the save, not just sit on the state object.
+        assertEquals(SignerOrigin.SIGNING_DEVICE_UR, saved?.importedVia)
+        assertEquals(SignerOrigin.SIGNING_DEVICE_UR, SignerStore(backing).list().single().importedVia)
     }
 
     @Test

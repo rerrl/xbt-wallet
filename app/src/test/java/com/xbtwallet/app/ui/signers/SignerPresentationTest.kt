@@ -1,5 +1,8 @@
 package com.xbtwallet.app.ui.signers
 
+import com.xbtwallet.app.data.Signer
+import com.xbtwallet.app.data.SignerOrigin
+import com.xbtwallet.app.data.SignerType
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -52,5 +55,55 @@ class SignerPresentationTest {
     @Test
     fun `an empty key stays empty`() {
         assertEquals("", shortenedXpub(""))
+    }
+
+    // --- which tag a signer wears -------------------------------------------
+    //
+    // The tag is the one place the import path is visible to the user, so the
+    // rule lives here as plain Kotlin and is pinned without a UI: a key that came
+    // off a signing device wears "seedsigner" in orange, and everything else
+    // keeps the original grey "watch-only" pill.
+
+    private fun signer(
+        importedVia: SignerOrigin = SignerOrigin.TEXT_QR,
+    ) = Signer(
+        id = "id-1",
+        name = "Cold storage",
+        type = SignerType.WatchOnlyXpub(bip84Zpub),
+        createdAtEpochSeconds = 0L,
+        importedVia = importedVia,
+    )
+
+    @Test
+    fun `a text-qr signer wears the grey watch-only tag`() {
+        val tag = signerTagFor(signer(SignerOrigin.TEXT_QR))
+
+        assertEquals("watch-only", tag.label)
+        assertEquals(SignerTagAccent.NEUTRAL, tag.accent)
+    }
+
+    @Test
+    fun `a signing-device signer wears the orange seedsigner tag`() {
+        val tag = signerTagFor(signer(SignerOrigin.SIGNING_DEVICE_UR))
+
+        assertEquals("seedsigner", tag.label)
+        assertEquals(SignerTagAccent.ORANGE, tag.accent)
+    }
+
+    @Test
+    fun `a signer with no recorded origin wears the grey watch-only tag`() {
+        // The default on [Signer] is the text-QR path, so a record that predates
+        // the field (or a call site that does not set it) is tagged as before.
+        val tag = signerTagFor(
+            Signer(
+                id = "id-1",
+                name = "Cold storage",
+                type = SignerType.WatchOnlyXpub(bip84Zpub),
+                createdAtEpochSeconds = 0L,
+            ),
+        )
+
+        assertEquals("watch-only", tag.label)
+        assertEquals(SignerTagAccent.NEUTRAL, tag.accent)
     }
 }

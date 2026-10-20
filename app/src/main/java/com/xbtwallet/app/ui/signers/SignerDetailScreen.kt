@@ -136,7 +136,10 @@ fun SignerDetailScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                 }
-                TypeBadge(label = signer.typeLabel)
+                // The type tag is chosen by the signer's origin — the same rule
+                // the list row uses — and sits to the right of the sync spinner.
+                val tag = signerTagFor(signer)
+                TypeBadge(label = tag.label, accent = tag.accent)
             }
 
             Spacer(modifier = Modifier.height(12.dp))

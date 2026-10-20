@@ -41,6 +41,7 @@ import com.xbtwallet.app.crypto.UrScanOutcome
 import com.xbtwallet.app.crypto.XpubImport
 import com.xbtwallet.app.crypto.validateXpubInput
 import com.xbtwallet.app.data.Signer
+import com.xbtwallet.app.data.SignerOrigin
 import com.xbtwallet.app.data.SignerStore
 import com.xbtwallet.app.ui.theme.XbtSuccessDark
 import com.xbtwallet.app.ui.theme.XbtWalletTheme
@@ -210,13 +211,17 @@ class AddSigningDeviceScreenState(
         val xpub = scannedXpub ?: return
         // The metadata is stored as decoded; `key` proves the xpub parsed. The
         // record is the same one the watch-only path writes — same store, same
-        // signer type — so a signer added either way is indistinguishable later.
+        // signer type — so a signer added either way is indistinguishable in the
+        // data. What *does* differ is the origin: this key came off a signing
+        // device over BC-UR, and recording that is what earns it the orange
+        // "seedsigner" tag rather than the grey "watch-only" one.
         onSaved(
             signerStore.add(
                 name = name,
                 xpub = xpub,
                 masterFingerprint = masterFingerprint,
                 derivationPath = derivationPath,
+                importedVia = SignerOrigin.SIGNING_DEVICE_UR,
             ),
         )
     }

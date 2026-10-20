@@ -38,6 +38,44 @@ sealed interface SignerType {
 }
 
 /**
+ * How a signer's account reached this phone.
+ *
+ * This is a *provenance* field, not a security property: both paths end by
+ * storing the very same [SignerType.WatchOnlyXpub], and neither of them gives
+ * the app anything it could sign with. What differs is only where the user got
+ * the key — typed/pasted or scanned as text ([TEXT_QR]) versus read off an
+ * air-gapped signing device over animated BC-UR ([SIGNING_DEVICE_UR]) — and the
+ * one place that matters today is the tag the UI shows.
+ *
+ * [storageValue] is the wire form written into the JSON blob. It is spelled out
+ * rather than reusing [name] so a rename of the Kotlin constant can never
+ * silently invalidate data already on someone's phone.
+ */
+enum class SignerOrigin(val storageValue: String) {
+    /** The key was scanned or pasted as a plain text xpub — the original path. */
+    TEXT_QR("text-qr"),
+
+    /** The key came off a signing device's crypto-account export, over animated BC-UR. */
+    SIGNING_DEVICE_UR("signing-device-ur"),
+    ;
+
+    companion object {
+        /**
+         * Reads the stored form, defaulting to [TEXT_QR].
+         *
+         * Two cases land on that default and both want it: a blob written before
+         * this field existed (no key at all) and a value this build does not
+         * recognise. Guessing [SIGNING_DEVICE_UR] would be the dangerous way to
+         * be wrong — it would claim a key came off a hardware screen when
+         * nothing says it did — whereas [TEXT_QR] is the conservative, "we only
+         * know it is a key" answer.
+         */
+        fun fromStorage(value: String?): SignerOrigin =
+            SignerOrigin.entries.firstOrNull { it.storageValue == value } ?: TEXT_QR
+    }
+}
+
+/**
  * One signer the app pairs with: a user-given [name] plus what kind of signer it
  * is.
  *
@@ -51,12 +89,24 @@ data class Signer(
     val name: String,
     val type: SignerType,
     val createdAtEpochSeconds: Long,
+    /**
+     * Which import path put this signer on the phone — see [SignerOrigin].
+     *
+     * Defaults to [SignerOrigin.TEXT_QR] so every record written before this
+     * field existed (and every call site that does not care) stays valid and
+     * keeps reading — and rendering — exactly as it did.
+     */
+    val importedVia: SignerOrigin = SignerOrigin.TEXT_QR,
 ) {
     /**
-     * The short type badge shown next to a signer's name in lists.
+     * The label for this signer's *type* — [WATCH_ONLY_LABEL] — which is also
+     * the label of the grey tag a text-QR import wears.
      *
      * Derived from [type] rather than stored, so the label can never disagree
-     * with the data.
+     * with the data. It says nothing about [importedVia]: the tag a signer
+     * actually wears is chosen by
+     * [com.xbtwallet.app.ui.signers.signerTagFor], which pairs this label with
+     * the origin's own label and accent.
      */
     val typeLabel: String
         get() = when (type) {
@@ -113,12 +163,21 @@ class SignerStore(
 
     fun get(id: String): Signer? = read().firstOrNull { it.id == id }
 
-    /** Creates and persists a signer, returning it so the caller has the new id. */
+    /**
+     * Creates and persists a signer, returning it so the caller has the new id.
+     *
+     * [importedVia] records *which path* the user took to get the key here — see
+     * [SignerOrigin]. It defaults to [SignerOrigin.TEXT_QR], the original
+     * scan/paste path, so existing callers keep compiling and keep meaning what
+     * they meant. It changes no key material: the same xpub, fingerprint and
+     * derivation path are stored either way. Only the tag the UI shows reads it.
+     */
     fun add(
         name: String,
         xpub: String,
         masterFingerprint: String? = null,
         derivationPath: String? = null,
+        importedVia: SignerOrigin = SignerOrigin.TEXT_QR,
     ): Signer {
         val signer = Signer(
             id = newId(),
@@ -129,6 +188,7 @@ class SignerStore(
                 derivationPath = derivationPath,
             ),
             createdAtEpochSeconds = now(),
+            importedVia = importedVia,
         )
         saveAll(read() + signer)
         return signer
@@ -189,6 +249,14 @@ class SignerStore(
             // does not know them still parses the record.
             type.masterFingerprint?.let { put("masterFingerprint", it) }
             type.derivationPath?.let { put("derivationPath", it) }
+            // Same rule for the origin: a text-QR import is the default the
+            // reader already assumes, so writing it would grow every existing
+            // blob by a key that carries no information. Only a signer that did
+            // *not* come the usual way spells it out — which is also what keeps
+            // blobs written by this build readable by the build before it.
+            if (signer.importedVia != SignerOrigin.TEXT_QR) {
+                put(IMPORTED_VIA_KEY, signer.importedVia.storageValue)
+            }
             put("createdAt", signer.createdAtEpochSeconds)
         }
     }
@@ -246,7 +314,11 @@ class SignerStore(
             Signer.WATCH_ONLY_LABEL -> {
                 val xpub = map["xpub"] as? String ?: return null
                 // Metadata keys are absent on every pre-metadata record; a
-                // missing key reads as null rather than failing the entry.
+                // missing key reads as null rather than failing the entry. The
+                // same goes for the origin: a blob from before the field existed
+                // has no [IMPORTED_VIA_KEY], and [SignerOrigin.fromStorage]
+                // reads that — and anything unrecognised — as the text-QR
+                // default, so an old signer loads exactly as it always did.
                 Signer(
                     id,
                     name,
@@ -256,6 +328,7 @@ class SignerStore(
                         derivationPath = map["derivationPath"] as? String,
                     ),
                     createdAt,
+                    importedVia = SignerOrigin.fromStorage(map[IMPORTED_VIA_KEY] as? String),
                 )
             }
             else -> null
@@ -270,6 +343,16 @@ class SignerStore(
          * here.
          */
         const val STORAGE_KEY = "signers"
+
+        /**
+         * JSON key holding a signer's [SignerOrigin], written only when it is
+         * not the [SignerOrigin.TEXT_QR] default.
+         *
+         * Absent on every record written before the origin existed, which is
+         * exactly why the reader treats a missing key as the default rather than
+         * as a malformed entry.
+         */
+        const val IMPORTED_VIA_KEY = "importedVia"
 
         /**
          * The key the pre-rename [STORAGE_KEY] used, holding `{"wallets":[…]}`.

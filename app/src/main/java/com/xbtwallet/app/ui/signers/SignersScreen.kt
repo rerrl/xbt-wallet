@@ -34,6 +34,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerType
+import com.xbtwallet.app.ui.theme.XbtPrimary
 
 /**
  * The list of saved signers — the app's inventory.
@@ -198,7 +199,10 @@ private fun SignerRow(
             )
         }
         Spacer(modifier = Modifier.width(8.dp))
-        TypeBadge(label = signer.typeLabel)
+        // The tag is chosen by the signer's origin, not by hand here — the same
+        // rule the signer's own screen uses, so the two cannot disagree.
+        val tag = signerTagFor(signer)
+        TypeBadge(label = tag.label, accent = tag.accent)
         Spacer(modifier = Modifier.width(4.dp))
         Box {
             // A text glyph rather than an icon dependency: one character keeps
@@ -219,18 +223,38 @@ private fun SignerRow(
     }
 }
 
-/** The little "watch-only" pill next to a signer's name. */
+/**
+ * The little pill next to a signer's name — "watch-only" in grey, or
+ * "seedsigner" in the theme's orange for a key that came off a signing device.
+ *
+ * The accent comes in as [SignerTagAccent] rather than a colour so the choice of
+ * which signer wears which tag stays in [signerTagFor], where a unit test can
+ * reach it, and this composable only maps the chosen accent onto the palette.
+ */
 @Composable
-internal fun TypeBadge(label: String, modifier: Modifier = Modifier) {
+internal fun TypeBadge(
+    label: String,
+    accent: SignerTagAccent = SignerTagAccent.NEUTRAL,
+    modifier: Modifier = Modifier,
+) {
     Surface(
         shape = MaterialTheme.shapes.small,
-        color = MaterialTheme.colorScheme.surfaceVariant,
+        color = when (accent) {
+            SignerTagAccent.NEUTRAL -> MaterialTheme.colorScheme.surfaceVariant
+            // A translucent wash of the accent rather than a solid fill: the
+            // pill stays quiet next to the signer's name while still reading as
+            // orange, and the label colour carries the contrast.
+            SignerTagAccent.ORANGE -> XbtPrimary.copy(alpha = 0.16f)
+        },
         modifier = modifier,
     ) {
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = when (accent) {
+                SignerTagAccent.NEUTRAL -> MaterialTheme.colorScheme.onSurfaceVariant
+                SignerTagAccent.ORANGE -> XbtPrimary
+            },
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
         )
     }

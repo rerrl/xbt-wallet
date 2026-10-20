@@ -357,6 +357,62 @@ class SignerStoreTest {
         assertNull(type.derivationPath)
     }
 
+    // --- the import origin --------------------------------------------------
+    //
+    // The origin is what tells a signing-device import apart from a text xpub in
+    // the UI. It is additive: a blob written before it existed must keep loading,
+    // and a text-QR signer — the default — must not grow the key on the way out.
+
+    @Test
+    fun `a signing-device origin persists across a reload`() {
+        val backing = InMemoryStore()
+        newStore(backing).add(
+            name = "SeedSigner",
+            xpub = "zpub6xyz",
+            importedVia = SignerOrigin.SIGNING_DEVICE_UR,
+        )
+
+        val reloaded = SignerStore(backing).list().single()
+        assertEquals(SignerOrigin.SIGNING_DEVICE_UR, reloaded.importedVia)
+    }
+
+    @Test
+    fun `a text-qr signer writes no origin key and stays the default`() {
+        val backing = InMemoryStore()
+        newStore(backing).add("Cold", "zpub6xyz", importedVia = SignerOrigin.TEXT_QR)
+
+        // The default is not written, so a text-QR blob keeps the exact shape an
+        // earlier build produced — nothing to migrate, nothing to misread.
+        val json = backing.map[SignerStore.STORAGE_KEY].orEmpty()
+        assertFalse("importedVia must be absent", json.contains(SignerStore.IMPORTED_VIA_KEY))
+
+        assertEquals(SignerOrigin.TEXT_QR, SignerStore(backing).list().single().importedVia)
+    }
+
+    /** The blob an earlier build wrote: no origin key at all. */
+    @Test
+    fun `a pre-origin blob loads as the text-qr default`() {
+        val backing = InMemoryStore()
+        backing.putString(
+            SignerStore.STORAGE_KEY,
+            """{"signers":[{"id":"a","name":"Cold","type":"watch-only","xpub":"zpub6old","createdAt":7}]}""",
+        )
+
+        assertEquals(SignerOrigin.TEXT_QR, SignerStore(backing).list().single().importedVia)
+    }
+
+    /** An origin this build does not know must not be guessed at as the device path. */
+    @Test
+    fun `an unrecognised origin value reads as the text-qr default`() {
+        val backing = InMemoryStore()
+        backing.putString(
+            SignerStore.STORAGE_KEY,
+            """{"signers":[{"id":"a","name":"Cold","type":"watch-only","xpub":"zpub6x","importedVia":"something-new","createdAt":7}]}""",
+        )
+
+        assertEquals(SignerOrigin.TEXT_QR, SignerStore(backing).list().single().importedVia)
+    }
+
     // --- migration from the old `wallets` shape ----------------------------
     //
     // Before the rename, saved xpubs lived under the `wallets` key as

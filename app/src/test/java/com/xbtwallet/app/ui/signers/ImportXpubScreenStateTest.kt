@@ -2,6 +2,7 @@ package com.xbtwallet.app.ui.signers
 
 import com.xbtwallet.app.data.KeyValueStore
 import com.xbtwallet.app.data.Signer
+import com.xbtwallet.app.data.SignerOrigin
 import com.xbtwallet.app.data.SignerStore
 import com.xbtwallet.app.data.SignerType
 import org.junit.Assert.assertEquals
@@ -188,6 +189,19 @@ class ImportXpubScreenStateTest {
         state.import()
 
         assertEquals(SignerType.WatchOnlyXpub(zpub), saved?.type)
+    }
+
+    @Test
+    fun `import keeps the text-qr origin`() {
+        val state = state()
+        state.onNameChange("Cold storage")
+        state.onScanResult(zpub)
+
+        state.import()
+
+        // A key that arrived as a plain xpub QR is not a signing-device import,
+        // and saying so is what keeps its tag the grey "watch-only" pill.
+        assertEquals(SignerOrigin.TEXT_QR, saved?.importedVia)
     }
 
     @Test
