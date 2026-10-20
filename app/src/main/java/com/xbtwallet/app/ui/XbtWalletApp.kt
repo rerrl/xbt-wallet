@@ -6,12 +6,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
+import com.xbtwallet.app.data.AppSettingsStore
 import com.xbtwallet.app.data.ServerSettingsStore
 import com.xbtwallet.app.data.SharedPreferencesKeyValueStore
 import com.xbtwallet.app.data.Signer
@@ -24,6 +29,7 @@ import com.xbtwallet.app.ui.server.rememberServerScreenState
 import com.xbtwallet.app.ui.addresses.AddressesScreen
 import com.xbtwallet.app.ui.receive.ReceiveScreen
 import com.xbtwallet.app.ui.signers.AddSignerScreen
+import com.xbtwallet.app.ui.signers.ChainPhase
 import com.xbtwallet.app.ui.signers.ImportXpubScreen
 import com.xbtwallet.app.ui.signers.SignerChainStateStore
 import com.xbtwallet.app.ui.signers.SignerDetailScreen
@@ -34,6 +40,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 /**
  * Screens the app can show.
@@ -104,6 +111,9 @@ fun XbtWalletApp() {
     // `snapshot_<id>` keys. Held here so the chain state below can both seed from
     // it and save back to it, and so the delete path can clear a signer's cache.
     val snapshotStore = remember(context) { SnapshotStore(SharedPreferencesKeyValueStore(context)) }
+    // The app's own preferences (one flag today). Same prefs file and the same
+    // KeyValueStore shell as the signer list, under its own key.
+    val appSettings = remember(context) { AppSettingsStore(SharedPreferencesKeyValueStore(context)) }
 
     val homeState = rememberHomeScreenState(signerStore, serverStore)
 
@@ -136,6 +146,58 @@ fun XbtWalletApp() {
     // deleted underneath us fall back Home instead of rendering stale data.
     val chainState = remember(openSigner?.id) { openSigner?.let(chainStateStore::stateFor) }
 
+    // --- One screen-on flag for the whole app --------------------------------
+    //
+    // The keep-awake preference as Compose state, so flipping the switch on Home
+    // recomposes the effect below at once; every change is written straight back
+    // to the store.
+    var keepScreenAwake by remember { mutableStateOf(appSettings.keepScreenAwakeWhileSyncing) }
+
+    // The device must not sleep in the middle of a scan: sleeping drops the
+    // socket and the scan dies (Andrew's report). This is the one place the flag
+    // is set — app-root, not per screen — and it is on exactly while the
+    // preference is ON *and* a scan is in flight, off the moment the scan ends.
+    // `LocalView.keepScreenOn` needs no permission and no wakelock; the app
+    // deliberately has neither.
+    val view = LocalView.current
+    DisposableEffect(chainState?.scanInFlight, keepScreenAwake) {
+        view.keepScreenOn = keepScreenAwake && chainState?.scanInFlight == true
+        onDispose { view.keepScreenOn = false }
+    }
+
+    // --- Auto-resume a failed sync on return to the foreground ---------------
+    //
+    // If a scan died while the app was backgrounded (or the screen was off,
+    // leaving the signer on ERROR), coming back is the user's natural retry, so
+    // reload once per ON_RESUME. `reload`, not `load`: the two-minute freshness
+    // rule would otherwise suppress the rescan. Two guards keep a permanently
+    // dead server from turning every wake into another round of dials: skip while
+    // a scan is already in flight, and allow at most one auto-resume per
+    // AUTO_RESUME_DEBOUNCE_MILLIS.
+    val appLifecycleOwner = LocalActivity.current as? LifecycleOwner
+    var lastAutoResumeAtMillis by rememberSaveable { mutableStateOf(0L) }
+    DisposableEffect(appLifecycleOwner, chainState) {
+        val owner = appLifecycleOwner
+        if (owner == null || chainState == null) {
+            onDispose { }
+        } else {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_RESUME &&
+                    !chainState.scanInFlight &&
+                    chainState.phase == ChainPhase.ERROR
+                ) {
+                    val nowMillis = System.currentTimeMillis()
+                    if (nowMillis - lastAutoResumeAtMillis >= AUTO_RESUME_DEBOUNCE_MILLIS) {
+                        lastAutoResumeAtMillis = nowMillis
+                        appScope.launch { chainState.reload() }
+                    }
+                }
+            }
+            owner.lifecycle.addObserver(observer)
+            onDispose { owner.lifecycle.removeObserver(observer) }
+        }
+    }
+
     // Ask for a sync whenever a signer's screen opens. `sync()` starts a scan only
     // if none is in flight for that signer, and `load()` inside it skips the
     // rescan while the last completed sync is fresh — so recomposition and screen
@@ -155,7 +217,7 @@ fun XbtWalletApp() {
             // saved endpoint means editing the server and coming back re-checks
             // with the new settings straight away. No service, no wake lock and
             // no new permission is involved.
-            val lifecycleOwner = LocalActivity.current as? LifecycleOwner
+            val lifecycleOwner = appLifecycleOwner
             val serverKey = homeState.serverKey
             LaunchedEffect(lifecycleOwner, serverKey) {
                 if (lifecycleOwner == null) {
@@ -170,6 +232,11 @@ fun XbtWalletApp() {
 
             HomeScreen(
                 state = homeState,
+                keepScreenAwake = keepScreenAwake,
+                onKeepScreenAwakeChange = { checked ->
+                    keepScreenAwake = checked
+                    appSettings.keepScreenAwakeWhileSyncing = checked
+                },
                 onOpenServer = { nav.push(Route(Screen.SERVER)) },
                 onAddSigner = { nav.push(Route(Screen.ADD_SIGNER)) },
                 onOpenSigners = { nav.push(Route(Screen.SIGNERS)) },
@@ -297,3 +364,14 @@ fun XbtWalletApp() {
         }
     }
 }
+
+/**
+ * How long to wait between auto-resumes of a failed sync.
+ *
+ * ON_RESUME reloads a signer left on ERROR, but a permanently dead server would
+ * otherwise be re-dialled on every wake — so at most one auto-resume is allowed
+ * per this window. 30s is short enough that a user who comes back and finds the
+ * screen still failing can put the phone down and pick it up again, and long
+ * enough that flicking the screen on and off is not a dial loop.
+ */
+private const val AUTO_RESUME_DEBOUNCE_MILLIS = 30_000L
