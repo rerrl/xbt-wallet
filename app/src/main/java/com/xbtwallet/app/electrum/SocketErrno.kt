@@ -88,13 +88,14 @@ internal fun socketErrnoReason(errno: SocketErrno): String = when (errno) {
 }
 
 /**
- * The tokens [socketErrnoOf] looks for, checked in this order.
+ * The tokens [socketErrnoOf] looks for, in the order they are checked.
  *
- * The order is about substring overlap, not preference: `ENETUNREACH` does not
- * contain `EHOSTUNREACH` and vice versa, but keeping the permission tokens
- * first states plainly that a message naming both a permission and a network
- * failure (VPN lockdown reports `EACCES`, a firewall `EPERM`) is a permission
- * failure.
+ * The tokens do not overlap — `ENETUNREACH` is not a substring of
+ * `EHOSTUNREACH`, and `ECONNREFUSED` is not a substring of either — so the one
+ * order that carries meaning is putting the permission pair first: a message
+ * naming both a permission and a network failure (VPN lockdown reports `EACCES`,
+ * a firewall app `EPERM`) is a permission failure, and that is the one whose fix
+ * is on the phone.
  */
 private fun errnoIn(uppercasedMessage: String): SocketErrno? = when {
     uppercasedMessage.contains("EACCES") || uppercasedMessage.contains("EPERM") -> SocketErrno.PERMISSION
