@@ -25,6 +25,13 @@ import com.xbtwallet.app.data.SignerOrigin
  *   for the same reason the signer id does: a rotation must put the user back on
  *   the address they were looking at, not on whatever the screen would choose by
  *   default.
+ *   For [Screen.SEND] this free-form slot instead carries the **selected
+ *   outpoints** as a comma-joined `txid:vout` list (e.g.
+ *   `"ab…:0,cd…:1"`) — the same segment, a different payload. `ChainUtxo.outpoint`
+ *   already produces `txid:vout`, and txids are hex, so a comma is a safe
+ *   separator and the segment needs no escaping. Keeping the selection on the
+ *   route (rather than in shared state) is what makes a rotation on the Send
+ *   screen land back on the same set of coins.
  * @property origin the import path the user *declared* by tapping a row of the
  *   Add-wallet chooser, carried onto the form that row opened. Only the two
  *   animated-BC-UR rows need it — both of them open the same scanner, and only

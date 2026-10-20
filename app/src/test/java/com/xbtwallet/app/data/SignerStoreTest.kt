@@ -327,6 +327,80 @@ class SignerStoreTest {
         assertNull(type.derivationPath)
     }
 
+    // --- signing readiness --------------------------------------------------
+    //
+    // signingReady is computed from the record (fingerprint AND path present),
+    // never stored: it is what the Send action gates on, and it must read the
+    // type rather than the import origin (origin ≠ capability).
+
+    @Test
+    fun `a signer with a fingerprint and a path is signing-ready`() {
+        val signer = Signer(
+            id = "a",
+            name = "Cold",
+            type = SignerType.WatchOnlyXpub(
+                "zpub6xyz",
+                masterFingerprint = "ab12cd34",
+                derivationPath = "84'/0'/0'",
+            ),
+            createdAtEpochSeconds = 0L,
+        )
+        assertTrue(signer.signingReady)
+    }
+
+    @Test
+    fun `a fingerprint without a path is not signing-ready`() {
+        val signer = Signer(
+            id = "a",
+            name = "Cold",
+            type = SignerType.WatchOnlyXpub("zpub6xyz", masterFingerprint = "ab12cd34"),
+            createdAtEpochSeconds = 0L,
+        )
+        assertFalse(signer.signingReady)
+    }
+
+    @Test
+    fun `a path without a fingerprint is not signing-ready`() {
+        val signer = Signer(
+            id = "a",
+            name = "Cold",
+            type = SignerType.WatchOnlyXpub("zpub6xyz", derivationPath = "84'/0'/0'"),
+            createdAtEpochSeconds = 0L,
+        )
+        assertFalse(signer.signingReady)
+    }
+
+    @Test
+    fun `a bare-key signer is not signing-ready`() {
+        val signer = Signer(
+            id = "a",
+            name = "Cold",
+            type = SignerType.WatchOnlyXpub("zpub6xyz"),
+            createdAtEpochSeconds = 0L,
+        )
+        assertFalse(signer.signingReady)
+    }
+
+    @Test
+    fun `signing-ready reads the type, not the import origin`() {
+        // A text-QR import that carried a key-expression is just as ready as one
+        // off a hardware screen: origin is provenance, not capability.
+        val textImport = Signer(
+            id = "a",
+            name = "Cold",
+            type = SignerType.WatchOnlyXpub(
+                "zpub6xyz",
+                masterFingerprint = "ab12cd34",
+                derivationPath = "84'/0'/0'",
+            ),
+            createdAtEpochSeconds = 0L,
+            importedVia = SignerOrigin.TEXT_QR,
+        )
+        val deviceImport = textImport.copy(importedVia = SignerOrigin.SEEDSIGNER_UR)
+        assertTrue(textImport.signingReady)
+        assertTrue(deviceImport.signingReady)
+    }
+
     /** The exact blob an earlier build wrote: no metadata keys at all. */
     @Test
     fun `a pre-metadata blob still loads, with nulls for the new fields`() {
