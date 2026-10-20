@@ -45,6 +45,41 @@ class NavStackTest {
         assertFalse(stack.pop())
     }
 
+    /**
+     * The chooser's second branch: **Add signing device**. It is a sibling of the
+     * text-QR form, not a step in front of it — back from it returns to the
+     * chooser, and the two branches never stack on top of each other.
+     */
+    @Test
+    fun `back unwinds the signing-device walk one level at a time`() {
+        val stack = NavStack()
+
+        stack.push(Route(Screen.ADD_SIGNER))
+        stack.push(Route(Screen.ADD_SIGNING_DEVICE))
+
+        // HOME → ADD_SIGNER → the animated-export form
+        assertEquals(Route(Screen.ADD_SIGNING_DEVICE), stack.current)
+        assertTrue(stack.pop())
+        assertEquals(Route(Screen.ADD_SIGNER), stack.current)
+        assertTrue(stack.pop())
+        assertEquals(Route(Screen.HOME), stack.current)
+    }
+
+    @Test
+    fun `the two add branches are separate destinations`() {
+        val stack = NavStack()
+        stack.push(Route(Screen.ADD_SIGNER))
+        stack.push(Route(Screen.ADD_SIGNING_DEVICE))
+
+        // Back to the chooser, then down the other branch: the watch-only form is
+        // its own entry, carrying no argument from the branch just left.
+        assertTrue(stack.pop())
+        stack.push(Route(Screen.IMPORT_XPUB))
+
+        assertEquals(Route(Screen.IMPORT_XPUB), stack.current)
+        assertEquals("neither add form carries a signer", null, stack.current.signerId)
+    }
+
     @Test
     fun `a per-signer screen carries its own signer in the stack entry`() {
         val stack = NavStack()

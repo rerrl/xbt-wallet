@@ -29,12 +29,14 @@ import com.xbtwallet.app.ui.server.rememberServerScreenState
 import com.xbtwallet.app.ui.addresses.AddressesScreen
 import com.xbtwallet.app.ui.receive.ReceiveScreen
 import com.xbtwallet.app.ui.signers.AddSignerScreen
+import com.xbtwallet.app.ui.signers.AddSigningDeviceScreen
 import com.xbtwallet.app.ui.signers.ChainPhase
 import com.xbtwallet.app.ui.signers.ImportXpubScreen
 import com.xbtwallet.app.ui.signers.SignerChainStateStore
 import com.xbtwallet.app.ui.signers.SignerDetailScreen
 import com.xbtwallet.app.ui.signers.SignersScreen
 import com.xbtwallet.app.ui.signers.UtxosScreen
+import com.xbtwallet.app.ui.signers.rememberAddSigningDeviceScreenState
 import com.xbtwallet.app.ui.signers.rememberImportXpubScreenState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -53,7 +55,7 @@ import kotlinx.coroutines.launch
  * name, not a route); it rides in the [Route] that carries this screen onto the
  * back stack, so each level remembers its own argument. See [NavStack].
  */
-enum class Screen { HOME, SERVER, SIGNERS, ADD_SIGNER, IMPORT_XPUB, SIGNER_DETAIL, SIGNER_UTXOS, SIGNER_ADDRESSES, RECEIVE }
+enum class Screen { HOME, SERVER, SIGNERS, ADD_SIGNER, IMPORT_XPUB, ADD_SIGNING_DEVICE, SIGNER_DETAIL, SIGNER_UTXOS, SIGNER_ADDRESSES, RECEIVE }
 
 /**
  * The app's navigation and its shared stores.
@@ -95,9 +97,11 @@ enum class Screen { HOME, SERVER, SIGNERS, ADD_SIGNER, IMPORT_XPUB, SIGNER_DETAI
  * ([NavStack.Saver]); each entry then carries its own signer id, so a rotation
  * cannot land the user on a different signer's screen.
  *
- * **The add-signer walk.** [Screen.ADD_SIGNER] is the chooser and its live branch
- * pushes [Screen.IMPORT_XPUB] for the form, so back from the form returns to the
- * chooser that sent you there. Saving resets the stack to HOME → [Screen.SIGNERS]
+ * **The add-signer walk.** [Screen.ADD_SIGNER] is the chooser and its live
+ * branches push [Screen.IMPORT_XPUB] (text QR) or [Screen.ADD_SIGNING_DEVICE]
+ * (animated BC-UR) for the form, so back from either form returns to the chooser
+ * that sent you there. Both save into the same store through the same call.
+ * Saving resets the stack to HOME → [Screen.SIGNERS]
  * rather than pushing on top of the form: the new signer is immediately visible
  * where the add most often starts, and a back press from the list goes Home, not
  * back into a form that has already been submitted.
@@ -276,6 +280,7 @@ fun XbtWalletApp() {
 
         Screen.ADD_SIGNER -> AddSignerScreen(
             onAddWatchOnly = { nav.push(Route(Screen.IMPORT_XPUB)) },
+            onAddSigningDevice = { nav.push(Route(Screen.ADD_SIGNING_DEVICE)) },
             onBack = { nav.pop() },
         )
 
@@ -291,6 +296,19 @@ fun XbtWalletApp() {
                 nav.push(Route(Screen.SIGNERS))
             }
             ImportXpubScreen(state = state, onBack = { nav.pop() })
+        }
+
+        // The signing-device sibling of the form above: same name field, same
+        // save, same signer record — a scanner that assembles animated BC-UR
+        // `crypto-account` frames instead of reading one text QR. It lands the
+        // user in the same place, for the same reason.
+        Screen.ADD_SIGNING_DEVICE -> {
+            val state = rememberAddSigningDeviceScreenState(signerStore) { _: Signer ->
+                homeState.refresh()
+                nav.reset()
+                nav.push(Route(Screen.SIGNERS))
+            }
+            AddSigningDeviceScreen(state = state, onBack = { nav.pop() })
         }
 
         Screen.SIGNER_DETAIL -> {

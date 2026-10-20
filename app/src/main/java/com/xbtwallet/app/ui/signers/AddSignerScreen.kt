@@ -12,6 +12,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -26,10 +27,28 @@ import com.xbtwallet.app.ui.theme.XbtWalletTheme
 /**
  * **Add signer** — the one way a signer enters the app.
  *
- * This is a single-path screen, not a fork: there is exactly one way to add a
- * signer, watch-only via an account xpub scanned as a QR code. That hands off
- * to [ImportXpubScreen], which takes a name and the xpub and stores a
- * watch-only signer. Only a public key ever crosses this boundary.
+ * Two buttons, one signer. The difference between them is only the QR they can
+ * read, never the record they write: both end up calling `SignerStore.add` with a
+ * watch-only xpub plus whatever fingerprint and derivation path the QR carried.
+ * There is no second signer type, and no second kind of key.
+ *
+ *  - **Add signing device** → [AddSigningDeviceScreen]. BC-UR `crypto-account`,
+ *    usually animated: SeedSigner's *Export Xpub → native segwit → Animated*,
+ *    Keystone, Jade. The same account key, wrapped in the fountain-coded format
+ *    those signers speak.
+ *  - **Add watch-only xpub** → [ImportXpubScreen]. Text QR: a bare `xpub`/`ypub`/
+ *    `zpub`, a `bitcoin:` URI, or a BIP-32 key expression
+ *    (`[ab12cd34/84'/0'/0']zpub…`). This is the path for a coordinator's export,
+ *    for a Coldcard's text/JSON export, and for anything that puts the key itself
+ *    in the code — Coldcard is deliberately *not* promised on the signing-device
+ *    button, because its classic exports are not BC-UR.
+ *
+ * Two buttons rather than one clever scanner because the two formats want
+ * different things from the user: the animated path needs the camera held on a
+ * moving code until the export is whole, and saying so up front is friendlier
+ * than a generic scanner that guesses. Splitting them also keeps the text path
+ * exactly as it was — a regression there would be invisible until someone's
+ * export stopped importing.
  *
  * The hot-wallet path was removed rather than deferred. Generating a seed on
  * this phone is no longer a "not yet" — keeping the seed off the phone is a
@@ -37,12 +56,12 @@ import com.xbtwallet.app.ui.theme.XbtWalletTheme
  * wallet invites exactly the behaviour the product exists to prevent. Spending
  * stays a QR round-trip to the signer.
  *
- * The screen owns no state; it renders the description and forwards the one
- * tap.
+ * The screen owns no state; it renders the description and forwards the taps.
  */
 @Composable
 fun AddSignerScreen(
     onAddWatchOnly: () -> Unit,
+    onAddSigningDevice: () -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -82,7 +101,27 @@ fun AddSignerScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
+            // --- The signing-device path: BC-UR, usually animated. -----------
             Button(
+                onClick = onAddSigningDevice,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Add signing device")
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "SeedSigner, Keystone, Jade \u2014 scan the signer's animated " +
+                    "export QR.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // --- The watch-only path: the key itself, in a text QR. ----------
+            OutlinedButton(
                 onClick = onAddWatchOnly,
                 modifier = Modifier.fillMaxWidth(),
             ) {
@@ -92,8 +131,9 @@ fun AddSignerScreen(
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = "Scan the xpub QR from your signer or coordinator. This " +
-                    "phone holds public keys only, so it can watch the money but " +
+                text = "Scan the xpub QR from your signer or coordinator \u2014 a bare " +
+                    "xpub, a bitcoin: URI, or a [fingerprint/path]xpub key expression. " +
+                    "This phone holds public keys only, so it can watch the money but " +
                     "can never spend it.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -125,6 +165,6 @@ fun AddSignerScreen(
 @Composable
 private fun AddSignerScreenPreview() {
     XbtWalletTheme {
-        AddSignerScreen(onAddWatchOnly = {}, onBack = {})
+        AddSignerScreen(onAddWatchOnly = {}, onAddSigningDevice = {}, onBack = {})
     }
 }
