@@ -42,7 +42,9 @@ import com.xbtwallet.app.crypto.XpubImport
 import com.xbtwallet.app.crypto.validateXpubInput
 import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerStore
+import com.xbtwallet.app.ui.theme.XbtSuccessDark
 import com.xbtwallet.app.ui.theme.XbtWalletTheme
+import com.xbtwallet.app.ui.theme.XbtWarningDark
 
 /**
  * State behind the **add signing device** screen: the signer's name, the account
@@ -444,15 +446,23 @@ fun AddSigningDeviceScreen(
 }
 
 /**
- * What the export decoded to, echoed back before it is saved: the account key in
- * monospace, the version the app will treat it as, and the fingerprint and
- * derivation path that came out of the UR.
+ * What the export decoded to, shown as a *success* summary before it is saved:
+ * a green title saying the account came off the signing device, then the facts
+ * the export carried as labelled monospace rows — the master fingerprint, the
+ * derivation path and the account key.
+ *
+ * This panel is the reward for a scan that worked, so nothing here wears the
+ * error palette: the accent is the app's own success green and the rows sit on a
+ * neutral surface. It used to echo the key first in the primary orange, which is
+ * close enough to amber that a user read a successful scan as a complaint.
  *
  * The key is middle-elided — a 111-character zpub would dominate the screen, and
  * the point here is confirmation that *an* account was read, not a second place
- * to copy it from. Anything the export left out (or that could not be trusted)
- * is listed underneath as a warning rather than silently dropped: it is not an
- * error, but it is worth knowing before the signing flow asks for a richer QR.
+ * to copy it from. Anything the export left out (a missing fingerprint or
+ * derivation path) is listed underneath in the warning colour: it did not stop
+ * the import, but it is worth knowing before the signing flow asks for a richer
+ * QR. That warning styling is the only non-success colour on this panel, and it
+ * appears only when there is something to warn about.
  */
 @Composable
 private fun DecodedAccountConfirmation(
@@ -469,44 +479,46 @@ private fun DecodedAccountConfirmation(
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Text(
-                text = shortenedMiddle(xpub, head = 12, tail = 12),
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
+                text = SCANNED_SUMMARY_TITLE,
+                style = MaterialTheme.typography.titleSmall,
+                color = XbtSuccessDark,
             )
 
             version?.let {
-                Spacer(modifier = Modifier.height(6.dp))
+                Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = "Recognised $it \u2014 treated as native segwit (bc1q\u2026 addresses).",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
 
-            masterFingerprint?.let {
-                Spacer(modifier = Modifier.height(6.dp))
+            scannedAccountRows(
+                xpub = xpub,
+                masterFingerprint = masterFingerprint,
+                derivationPath = derivationPath,
+            ).forEach { row ->
+                Spacer(modifier = Modifier.height(10.dp))
                 Text(
-                    text = "Master fingerprint: $it",
+                    text = row.label,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = row.value,
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurface,
                 )
             }
 
-            derivationPath?.let {
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "Derivation: m/$it",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                )
-            }
-
-            warnings.forEach { warning ->
-                Spacer(modifier = Modifier.height(6.dp))
+            warnings.forEachIndexed { index, warning ->
+                Spacer(modifier = Modifier.height(if (index == 0) 10.dp else 4.dp))
                 Text(
                     text = warning,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = XbtWarningDark,
                 )
             }
         }

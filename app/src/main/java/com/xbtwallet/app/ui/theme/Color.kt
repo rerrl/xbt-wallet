@@ -14,3 +14,4 @@ val XbtOnBackgroundDark = Color(0xFFE6E8EB)
 val XbtOutlineDark = Color(0xFF3A4048)
 val XbtErrorDark = Color(0xFFFF6B6B)
 val XbtSuccessDark = Color(0xFF4CAF50) // "connected" dot on the home screen
+val XbtWarningDark = Color(0xFFE0A800) // non-fatal warnings, never the success path
