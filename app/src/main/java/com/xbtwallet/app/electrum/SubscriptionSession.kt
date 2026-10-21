@@ -199,6 +199,8 @@ class SubscriptionSession internal constructor(
 
     override fun blockHeader(height: Int): String = queries.blockHeader(height)
 
+    override fun broadcast(txHex: String): String = queries.broadcast(txHex)
+
     // ---- lifecycle --------------------------------------------------------
 
     /**

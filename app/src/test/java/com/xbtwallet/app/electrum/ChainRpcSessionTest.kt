@@ -323,6 +323,38 @@ class ChainRpcSessionTest {
         }
     }
 
+    // ---- broadcast --------------------------------------------------------
+
+    @Test
+    fun `broadcast sends the raw transaction and returns the txid`() {
+        val accepted = "ab".repeat(32)
+        val session = ChainRpcSession { method, params ->
+            assertEquals("blockchain.transaction.broadcast", method)
+            assertEquals(listOf<Any?>("0200000001beef"), params)
+            accepted
+        }
+        assertEquals(accepted, session.broadcast("0200000001beef"))
+    }
+
+    @Test
+    fun `broadcast surfaces the server's refusal text instead of a txid`() {
+        // Some builds answer a refusal in the result slot rather than as a
+        // JSON-RPC error; that reason must reach the caller, never be mistaken
+        // for a txid.
+        val session = ChainRpcSession { _, _ -> "bad-txns-inputs-missingorspent" }
+        val failure = assertThrows(ElectrumException::class.java) { session.broadcast("00") }
+        assertTrue(
+            failure.message.orEmpty(),
+            failure.message.orEmpty().contains("bad-txns-inputs-missingorspent"),
+        )
+    }
+
+    @Test
+    fun `broadcast refuses a result that is not a string`() {
+        val session = ChainRpcSession { _, _ -> null }
+        assertThrows(ElectrumException::class.java) { session.broadcast("00") }
+    }
+
     private companion object {
         const val TXID = "1111111111111111111111111111111111111111111111111111111111111111"
 

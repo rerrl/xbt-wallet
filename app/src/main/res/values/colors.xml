@@ -2,5 +2,7 @@
 <resources>
     <!-- Matches XbtBackgroundDark in ui/theme/Color.kt. -->
     <color name="xbt_background">#FF0B0E11</color>
-    <color name="ic_launcher_background">#FF101418</color>
+    <!-- Adaptive-icon background layer: solid white, the XBT coin's own backdrop
+         (the source image is a JPEG with no alpha). -->
+    <color name="ic_launcher_background">#FFFFFFFF</color>
 </resources>

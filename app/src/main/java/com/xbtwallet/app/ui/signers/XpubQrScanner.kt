@@ -235,3 +235,112 @@ fun UrQrScannerPanel(
         }
     }
 }
+
+/**
+ * The **signed-transaction** scanner: the animated panel again, this time for
+ * the PSBT coming back from a signer.
+ *
+ * It is the same embed as [UrQrScannerPanel] — `DecoratedBarcodeView`, decoding
+ * continuously, every frame handed to the caller — with two differences that
+ * matter for this step of the send flow:
+ *
+ * - [message] is a caller-owned line under the bar, and it is where a *refusal*
+ *   is shown: an xpub export scanned here, a torn frame, a PSBT whose signature
+ *   is not unified. The panel does not classify anything itself (routing and
+ *   decoding are [com.xbtwallet.app.crypto.UrPsbtAssembler]'s job); it only
+ *   renders what the caller tells it and keeps decoding, so "scan again" is
+ *   simply the caller clearing the message.
+ * - the caption names the signed PSBT specifically, because by this point in the
+ *   flow the user has an unsigned PSBT on one screen and a signer in front of
+ *   them, and "point it at the export" would be the wrong instruction.
+ *
+ * The payload is passed on verbatim, exactly as the other two panels pass it.
+ */
+@Composable
+fun AnimatedUrScannerPanel(
+    progress: Int,
+    message: String?,
+    onFrame: (String) -> Unit,
+    onCancel: () -> Unit,
+    onTimeout: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+
+    val currentOnFrame by rememberUpdatedState(onFrame)
+    val currentOnTimeout by rememberUpdatedState(onTimeout)
+
+    val barcodeView = remember {
+        DecoratedBarcodeView(context).apply {
+            decoderFactory = DefaultDecoderFactory(listOf(BarcodeFormat.QR_CODE))
+            setStatusText("")
+        }
+    }
+
+    DisposableEffect(barcodeView) {
+        barcodeView.decodeContinuous(object : BarcodeCallback {
+            override fun barcodeResult(result: BarcodeResult) {
+                result.text?.let { text -> currentOnFrame(text) }
+            }
+        })
+        barcodeView.resume()
+        onDispose { barcodeView.pause() }
+    }
+
+    // Re-keyed on progress and on the message: a newly assembled part restarts
+    // the stall clock, and a refusal the user has not reacted to does not expire
+    // the panel out from under them.
+    LaunchedEffect(progress, message) {
+        delay(ANIMATED_SCAN_TIMEOUT_MILLIS)
+        currentOnTimeout()
+    }
+
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+                text = "Point the camera at your signer's signed transaction QR",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            AndroidView(
+                factory = { barcodeView },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(280.dp),
+            )
+
+            LinearProgressIndicator(
+                progress = { progress.coerceIn(0, 100) / 100f },
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            Text(
+                text = "Assembling the signed transaction \u2014 $progress%",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+
+            if (message != null) {
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
+
+            TextButton(
+                onClick = onCancel,
+                modifier = Modifier.align(Alignment.End),
+            ) {
+                Text("Cancel")
+            }
+        }
+    }
+}

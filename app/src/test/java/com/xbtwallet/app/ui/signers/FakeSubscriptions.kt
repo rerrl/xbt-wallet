@@ -138,6 +138,9 @@ internal class FakeSubscriptionSession : ChainSubscriptionSession {
     override fun getTipHeight(): Int = 0
 
     override fun blockHeader(height: Int): String = ""
+
+    override fun broadcast(txHex: String): String =
+        throw UnsupportedOperationException("this fake does not broadcast")
 }
 
 /**
