@@ -1,28 +1,20 @@
 # xbt-wallet
 
-**Your keys never touch your phone.** xbt-wallet is an air-gapped coordinator for **XBT** (the Bitcoin BLAKE2b fork) that pairs with your SeedSigner over animated QR codes. The app watches your balances, builds your transactions, and hands them to the signer to sign — the seed stays on the signer, where it belongs. Built for GrapheneOS. MIT licensed. Zero Google dependencies.
+**A simple, sovereign XBT wallet — made for GrapheneOS.**
+
+xbt-wallet is a lightweight Android wallet for XBT (Bitcoin). A hot wallet for everyday spends, first-class SeedSigner support for serious savings. Your keys, your node, no Google anywhere.
 
 ## Why xbt-wallet
 
-- **Send, fully air-gapped.** Pick the exact coins to spend, finalize the transaction on the phone, and sign it on your SeedSigner through animated QR codes — then broadcast from the app. Nothing ever asks you for a seed, because the app has nowhere to put one.
-- **Replay protected.** Every transaction is signed with SIGHASH_ALL + SIGHASH_UNIFIED, and the app refuses to broadcast anything signed without it. Your coins cannot be replayed onto another chain.
-- **Your own server, your own privacy.** The app talks only to *your* Electrum server. `.onion` endpoints are reached through the bundled Tor — no Orbot, no third-party servers, no price feeds phoning home.
-- **Made for SeedSigner.** The whole flow is designed around the device you already carry: import by scanning its animated xpub export, sign by scanning its animated transaction QR. Keystone and Jade speak the same language and work the same way.
-- **No Google, ever.** No Play Services, no Firebase, no ML Kit — built for GrapheneOS and headed for F-Droid.
+- **Made for GrapheneOS.** No Play Services, no Firebase, no trackers — built for people who de-Googled on purpose, and headed for F-Droid.
+- **Sovereign by default.** The app connects only to *your* Electrum node — over plain IP or through the bundled Tor for `.onion` (no Orbot). There is no default server, so no third party ever learns your addresses or balances.
+- **SeedSigner, first-class.** Import by scanning the SeedSigner's animated xpub export; send fully air-gapped: pick your coins, finalize on the phone, sign on the SeedSigner over animated QR, scan the signed transaction back, broadcast. Every signature is SIGHASH_ALL + UNIFIED — replay protected — and change comes back to a verified address.
+- **Hot wallet for everyday.** Generate a 12 or 24-word seed right on the phone, with an optional passphrase that is never saved. The seed lives encrypted in the device keystore; spend without reaching for the signer.
+- **Lightweight.** One small app, one dependency philosophy: nothing it doesn't need.
 
-## How a send works
+## Status
 
-1. **Choose your coins.** On the UTXO screen, tap the outputs you want to spend and hit *Send selected*.
-2. **Build the transaction.** Recipient (type it or scan a QR), amount (with a fee-aware *Max*), fee rate, and an optional label — then *Finalize transaction for signing*.
-3. **Sign on the SeedSigner.** The phone shows the unsigned transaction as a big animated QR. On the SeedSigner: *Scan → Sign*, review the details — change comes back to a verified address — and let it show the signed transaction QR.
-4. **Scan it back.** Hit *Scan QR* in the app and read the signed transaction off the SeedSigner's screen.
-5. **Broadcast.** One button sends it to your Electrum server. It shows up in your history as unconfirmed until the next block.
-
-Watching is just as simple: add a wallet by scanning the SeedSigner's animated xpub export (*Export Xpub → single-sig → native segwit → Animated*), and the app keeps its balance, UTXOs, addresses and transaction history in sync from your server.
-
-## Status and roadmap
-
-v0.1.0 in progress. Air-gapped watch + send with a SeedSigner (or any BC-UR signing device) works end to end against your own Electrum server. The two fiat figures on the wallet screen are clearly-marked placeholders — the app requests no price feed. On the roadmap: a hot wallet for small everyday spends, and more.
+v0.1.0 in progress: watch + air-gapped send with a SeedSigner (or any BC-UR signing device) works end to end. The hot wallet is specified and is next. The fiat figures on the wallet screen are clearly-marked placeholders — the app requests no price feed.
 
 ## Appendix
 

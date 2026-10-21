@@ -10,10 +10,15 @@ change is wrong or this document gets updated first.
 
 **xbt-wallet is a SeedSigner-first, watch-only, mobile-first XBT / SeedSigner
 coordinator** (the Bitcoin BLAKE2b fork), built for GrapheneOS before anything
-else. It manages xpubs, not wallets: it holds no keys and signs nothing.
+else. It manages xpubs, not wallets: for watch-only and SeedSigner wallets it
+holds no keys and signs nothing — the only secret the app will ever hold is a hot
+wallet's seed, encrypted in the device keystore (see *Hot wallets*).
 
-- **Watch-only coordinator.** The phone holds public keys only. Private keys are
-  generated on, and never leave, a dedicated air-gapped signer (SeedSigner).
+- **Watch-only coordinator.** For watch-only and SeedSigner wallets the phone
+  holds public keys only: signer seeds are generated on, and never leave, a
+  dedicated air-gapped signer (SeedSigner). A hot wallet's seed is the exception
+  — generated on the phone and stored encrypted in the device keystore (see
+  *Hot wallets*).
 - **SeedSigner-first.** SeedSigner is not one supported signer among many — it is
   the signer the UX is designed around, and the primary assumption of every data
   flow (QR formats, derivation paths, address verification on-device).
@@ -32,13 +37,17 @@ else. It manages xpubs, not wallets: it holds no keys and signs nothing.
 
 ## 2. Product principles
 
-1. **Keys never touch the phone.** No seed input, no private key import, no
-   signing. If a feature would require a secret on the device, the feature is
-   wrong — redesign it as a signer round-trip instead.
+1. **Signer seeds never touch the phone.** No seed input, no private key import,
+   no signing for watch-only and SeedSigner wallets. If a feature would require a
+   signer's secret on the device, the feature is wrong — redesign it as a signer
+   round-trip instead. The one exception is the hot wallet (see *Hot wallets*):
+   its seed is generated on the phone and stored encrypted in the device
+   keystore, never in plaintext.
 2. **The QR dance is THE primary flow, not a settings option.** Sending is
    scan → sign on the air-gapped signer → scan back. It is the happy path, the
-   default path, and the path every other screen is built to serve. There is no
-   "hot wallet mode" to fall back to.
+   default path, and the path every other screen is built to serve. A hot wallet
+   signs internally (see *Hot wallets*), but the QR dance is not a fallback it
+   replaces — it is still the primary flow for signer wallets.
 3. **Sparrow-grade basics.** The everyday wallet operations — balances, history,
    addresses, receive, UTXO management, coin control, fee selection — should be
    as solid, clear and unsurprising as Sparrow's. Boring correctness beats novel
@@ -126,6 +135,20 @@ The full air-gapped QR dance:
 
 ---
 
+## Hot wallets (software seed) — the v0.2.0 spec
+
+The app gains a second wallet type alongside watch-only xpub wallets: a **hot wallet**, whose seed is generated on and stored on the phone. Watch-only and SeedSigner wallets are unchanged — no seed ever exists for those.
+
+- **Generation:** BIP-39 mnemonic, the user's choice of **12 or 24 words**, entropy from the device's SecureRandom. Device-generated only: no dice rolls, no importing an existing phrase (both deferred).
+- **Passphrase:** optional BIP-39 passphrase chosen at creation. It is **never saved to the device** — it is re-entered each time a signature is needed, and a forgotten passphrase means a different (empty-looking) wallet, exactly as on any BIP-39 wallet.
+- **Storage:** the seed (without passphrase) is stored **encrypted with a key held in the Android Keystore** (hardware-backed on GrapheneOS), AES-GCM. The plaintext seed is never written to disk, SharedPreferences, logs, or any backup. The account xpub is derived at creation (seed + passphrase) and stored as the wallet's key material, exactly as today.
+- **Account:** BIP-84, m/84'/0'/0', same derivation the watch wallets use — one address pipeline for every wallet type.
+- **Backup:** the words are shown once, behind an explicit reveal with a screen-capture block (FLAG_SECURE) and a confirm-you-wrote-it-down step.
+- **Send:** reuses the existing PSBT builder and finalize path unchanged — the wallet signs internally (the app's own Secp256k1, sighash 0x21 enforced identically) instead of going through the QR round-trip.
+- **Out of scope (explicitly):** dice-roll entropy, seed-phrase import, saving the passphrase, lightning, mixing/coinjoin, multisig.
+
+---
+
 ## 5. XBT chain notes
 
 What matters for this wallet, and where it differs from BTC:
@@ -192,10 +215,11 @@ What exists right now, in this repository:
   Wallets are a plain list: there is no "active wallet". **Add wallet** opens the
   three-row chooser — **SeedSigner** and **Other signing device** (both animated
   BC-UR exports, each declaring which device the user tapped) and **Watch-only
-  xpub** (a plain text QR). There is deliberately no *Create hot wallet* button:
-  seed generation on the phone is a capability this app does not have and will
-  not grow. The Wallets list shows every saved wallet oldest first, with its
-  origin tag (grey *watch-only*, orange *seedsigner*, blue *signing device*) and a
+  xpub** (a plain text QR). There is deliberately no *Create hot wallet* button in
+  this build: seed generation on the phone is the v0.2.0 hot wallet (see *Hot
+  wallets*), not a v0.1.0 capability. The Wallets list shows every saved wallet
+  oldest first, with its origin tag (grey *watch-only*, orange *seedsigner*, blue
+  *signing device*) and a
   head…tail key snippet, and offers a confirm-gated remove per row. The
   old active-signer card, **Select active xpub** picker and standalone
   **Addresses** button are gone; the Addresses viewer is reopened under a wallet.
@@ -227,16 +251,17 @@ What exists right now, in this repository:
 - **Crypto** (`com.xbtwallet.app.crypto/`, Android-free): Base58Check, SHA-256 /
   RIPEMD-160 / HMAC-SHA512, bech32 + bech32m, secp256k1 public-point arithmetic,
   BIP-32 parsing and public-only child derivation, P2WPKH address building.
-  Public keys only — there is no private-key, seed or signing code path.
+  Public keys only today — in v0.1.0 there is no private-key, seed or signing
+  code path. The hot wallet's is specified for v0.2.0 (see *Hot wallets*).
 - **Storage** (`com.xbtwallet.app.data/`): a JSON wallet list in
   SharedPreferences behind a `KeyValueStore` interface, so the store is
   JVM-testable. A wallet is an id, a name, a type — `WatchOnlyXpub(xpub)`
   today — and the import origin its chooser row declared (`text-qr`,
   `signing-device-ur` for the SeedSigner path, `other-signing-device-ur` for any
-  other device); there is no active-wallet id and no seed storage. Older `wallets`
-  blobs are migrated to watch-only wallets on first read. Plus the Electrum server
-  settings from the previous iteration, behind a `ServerSettings` interface for
-  the same reason.
+  other device); there is no active-wallet id and no seed storage in this build.
+  Older `wallets` blobs are migrated to watch-only wallets on first read. Plus the
+  Electrum server settings from the previous iteration, behind a `ServerSettings`
+  interface for the same reason.
 - **Networking**: a clean-room Electrum JSON-RPC client (direct TLS/TCP, no Tor
   yet) used by the private-server screen, via its quiet `server.ping` probe by
   the home screen's status heartbeat, and via its scripthash RPCs by the wallet
