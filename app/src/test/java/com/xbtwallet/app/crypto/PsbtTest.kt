@@ -35,6 +35,13 @@ class PsbtTest {
     /** BIP-174 valid vector: two inputs, a witness_utxo and taproot derivations. */
     private val bip174TwoInputs = base64("cHNidP8BAJ0BAAAAAnEOp2q0XFy2Q45gflnMA3YmmBgFrp4N/ZCJASq7C+U1AQAAAAD/////GQmU1qizyMgsy8+y+6QQaqBmObhyqNRHRlwNQliNbWcAAAAAAP////8CAOH1BQAAAAAZdqkUtrwsDuVlWoQ9ea/t0MzD991kNAmIrGBa9AUAAAAAFgAUEYjvjkzgRJ6qyPsUHL9aEXbmoIgAAAAATwEEiLIeA55TDKyAAAAAPbyKXJdp8DGxfnf+oVGGAyIaGP0Y8rmlTGyMGsdcvDUC8jBYSxVdHH8c1FEgplPEjWULQxtnxbLBPyfXFCA3wWkQJ1acUDEAAIAAAACAAAAAgAABAR8A4fUFAAAAABYAFDO5gvkbKPFgySC0q5XljOUN2jpKIgIDMJaA8zx9446mpHzU7NZvH1pJdHxv+4gI7QkDkkPjrVxHMEQCIC1wTO2DDFapCTRL10K2hS3M0QPpY7rpLTjnUlTSu0JFAiAthsQ3GV30bAztoITyopHD2i1kBw92v5uQsZXn7yj3cgEiBgMwloDzPH3jjqakfNTs1m8fWkl0fG/7iAjtCQOSQ+OtXBgnVpxQMQAAgAAAAIAAAACAAAAAAAEAAAAAAQEfAOH1BQAAAAAWABQ4j7lEMH63fvRRl9CwskXgefAR3iICAsd3Fh9z0LfHK57nveZQKT0T8JW8dlatH1Jdpf0uELEQRzBEAiBMsftfhpyULg4mEAV2ElQ5F5rojcqKncO6CPeVOYj6pgIgUh9JynkcJ9cOJzybFGFphZCTYeJb4nTqIA1+CIJ+UU0BIgYCx3cWH3PQt8crnue95lApPRPwlbx2Vq0fUl2l/S4QsRAYJ1acUDEAAIAAAACAAAAAgAAAAAAAAAAAAAAiAgLSDKUC7iiWhtIYFb1DqAY3sGmOH7zb5MrtRF9sGgqQ7xgnVpxQMQAAgAAAAIAAAACAAAAAAAQAAAAA")
 
+    /**
+     * BIP-174 **invalid** vector: "PSBT with invalid input witness utxo typed key".
+     * The input's `0x01` key carries key data (`0100`), which the spec forbids —
+     * `PSBT_IN_WITNESS_UTXO`'s keydata is "None".
+     */
+    private val bip174InvalidWitnessUtxoKey = base64("cHNidP8BAFUCAAAAASeaIyOl37UfxF8iD6WLD8E+HjNCeSqF1+Ns1jM7XLw5AAAAAAD/////AaBa6gsAAAAAGXapFP/pwAYQl8w7Y28ssEYPpPxCfStFiKwAAAAAAAIBACCVXuoLAAAAABepFGNFIA9o0YnhrcDfHE0W6o8UwNvrhyICA7E0HMunaDtq9PEjjNbpfnFn1Wn6xH8eSNR1QYRDVb1GRjBDAiAEJLWO/6qmlOFVnqXJO7/UqJBkIkBVzfBwtncUaUQtBwIfXI6w/qZRbWC4rLM61k7eYOh4W/s6qUuZvfhhUduamgEBBCIAIHcf0YrUWWZt1J89Vk49vEL0yEd042CtoWgWqO1IjVaBAQVHUiEDsTQcy6doO2r08SOM1ul+cWfVafrEfx5I1HVBhENVvUYhA95V0eHayAXj+KWMH7+blMAvPbqv4Sf+/KSZXyb4IIO9Uq4iBgOxNBzLp2g7avTxI4zW6X5xZ9Vp+sR/HkjUdUGEQ1W9RhC0prpnAAAAgAAAAIAEAACAIgYD3lXR4drIBeP4pYwfv5uUwC89uq/hJ/78pJlfJvggg70QtKa6ZwAAAIAAAACABQAAgAAA")
+
     // ---------------------------------------------------------------------
     // The generated fixture (a separate reference implementation, not this code):
     // a 2-output transaction spending one P2WPKH coin, its unsigned PSBT, the
@@ -45,13 +52,13 @@ class PsbtTest {
 
     private val fixtureUnsignedTx = "020000000111111111111111111111111111111111111111111111111111111111111111110000000000ffffffff0250c30000000000001600142222222222222222222222222222222222222222409c000000000000160014333333333333333333333333333333333333333300000000"
 
-    private val fixturePsbtUnsigned = "70736274ff010071020000000111111111111111111111111111111111111111111111111111111111111111110000000000ffffffff0250c30000000000001600142222222222222222222222222222222222222222409c0000000000001600143333333333333333333333333333333333333333000000000001011bfea08601000014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01030421000000220603abababababababababababababababababababababababababababababababab18123456785400008000000080000000800000000000000000000000"
+    private val fixturePsbtUnsigned = "70736274ff010071020000000111111111111111111111111111111111111111111111111111111111111111110000000000ffffffff0250c30000000000001600142222222222222222222222222222222222222222409c0000000000001600143333333333333333333333333333333333333333000000000001011fa086010000000000160014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01030421000000220603abababababababababababababababababababababababababababababababab18123456785400008000000080000000800000000000000000000000"
 
-    private val fixturePsbtSigned = "70736274ff010071020000000111111111111111111111111111111111111111111111111111111111111111110000000000ffffffff0250c30000000000001600142222222222222222222222222222222222222222409c0000000000001600143333333333333333333333333333333333333333000000000001011bfea08601000014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01030421000000220603abababababababababababababababababababababababababababababababab18123456785400008000000080000000800000000000000000220203abababababababababababababababababababababababababababababababab473044022001010101010101010101010101010101010101010101010101010101010101010220020202020202020202020202020202020202020202020202020202020202020221000000"
+    private val fixturePsbtSigned = "70736274ff010071020000000111111111111111111111111111111111111111111111111111111111111111110000000000ffffffff0250c30000000000001600142222222222222222222222222222222222222222409c0000000000001600143333333333333333333333333333333333333333000000000001011fa086010000000000160014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01030421000000220603abababababababababababababababababababababababababababababababab18123456785400008000000080000000800000000000000000220203abababababababababababababababababababababababababababababababab473044022001010101010101010101010101010101010101010101010101010101010101010220020202020202020202020202020202020202020202020202020202020202020221000000"
 
-    private val fixturePsbtSighashAll = "70736274ff010071020000000111111111111111111111111111111111111111111111111111111111111111110000000000ffffffff0250c30000000000001600142222222222222222222222222222222222222222409c0000000000001600143333333333333333333333333333333333333333000000000001011bfea08601000014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01030421000000220603abababababababababababababababababababababababababababababababab18123456785400008000000080000000800000000000000000220203abababababababababababababababababababababababababababababababab473044022001010101010101010101010101010101010101010101010101010101010101010220020202020202020202020202020202020202020202020202020202020202020201000000"
+    private val fixturePsbtSighashAll = "70736274ff010071020000000111111111111111111111111111111111111111111111111111111111111111110000000000ffffffff0250c30000000000001600142222222222222222222222222222222222222222409c0000000000001600143333333333333333333333333333333333333333000000000001011fa086010000000000160014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01030421000000220603abababababababababababababababababababababababababababababababab18123456785400008000000080000000800000000000000000220203abababababababababababababababababababababababababababababababab473044022001010101010101010101010101010101010101010101010101010101010101010220020202020202020202020202020202020202020202020202020202020202020201000000"
 
-    private val fixturePsbtTwoSigs = "70736274ff010071020000000111111111111111111111111111111111111111111111111111111111111111110000000000ffffffff0250c30000000000001600142222222222222222222222222222222222222222409c0000000000001600143333333333333333333333333333333333333333000000000001011bfea08601000014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01030421000000220603abababababababababababababababababababababababababababababababab18123456785400008000000080000000800000000000000000220203abababababababababababababababababababababababababababababababab473044022001010101010101010101010101010101010101010101010101010101010101010220020202020202020202020202020202020202020202020202020202020202020221220202cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd473044022001010101010101010101010101010101010101010101010101010101010101010220020202020202020202020202020202020202020202020202020202020202020221000000"
+    private val fixturePsbtTwoSigs = "70736274ff010071020000000111111111111111111111111111111111111111111111111111111111111111110000000000ffffffff0250c30000000000001600142222222222222222222222222222222222222222409c0000000000001600143333333333333333333333333333333333333333000000000001011fa086010000000000160014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01030421000000220603abababababababababababababababababababababababababababababababab18123456785400008000000080000000800000000000000000220203abababababababababababababababababababababababababababababababab473044022001010101010101010101010101010101010101010101010101010101010101010220020202020202020202020202020202020202020202020202020202020202020221220202cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd473044022001010101010101010101010101010101010101010101010101010101010101010220020202020202020202020202020202020202020202020202020202020202020221000000"
 
     private val fixtureFinalTx = "0200000000010111111111111111111111111111111111111111111111111111111111111111110000000000ffffffff0250c30000000000001600142222222222222222222222222222222222222222409c0000000000001600143333333333333333333333333333333333333333024730440220010101010101010101010101010101010101010101010101010101010101010102200202020202020202020202020202020202020202020202020202020202020202212103abababababababababababababababababababababababababababababababab00000000"
 
@@ -100,8 +107,7 @@ class PsbtTest {
 
     @Test
     fun `the built PSBT carries the BIP32 derivation of the signing key`() {
-        val derivation = parsePsbt(fromHex(fixturePsbtUnsigned)).inputs.single().derivation
-        requireNotNull(derivation)
+        val derivation = parsePsbt(fromHex(fixturePsbtUnsigned)).inputs.single().derivations.single()
         assertEquals("12345678", toHex(derivation.masterFingerprint))
         assertEquals(fixtureDerivationPath, derivation.path)
     }
@@ -142,6 +148,135 @@ class PsbtTest {
     fun `a payload without the psbt magic is refused`() {
         val failure = assertThrowsPsbt { parsePsbt(fromHex("001122334455")) }
         assertTrue(failure.message.orEmpty().contains("psbt magic"))
+    }
+
+    // ---------------------------------------------------------------------
+    // The typed fields, against the specification rather than against ourselves
+    //
+    // Every field below is written and read back by this wallet, which is why a
+    // round-trip test alone proves nothing about its *encoding*: a field written
+    // and read the same wrong way round-trips perfectly. These tests pin the
+    // bytes, and read the spec's own vectors, instead.
+    // ---------------------------------------------------------------------
+
+    /**
+     * The spec's own `witness_utxo`, read as a typed value: an 8-byte
+     * little-endian amount, a compact-size scriptPubKey length, then the script.
+     *
+     * This is the regression that matters. Reading the same bytes as a compact
+     * size takes the amount's first byte, `0x95`, as the number 149 and folds the
+     * length byte into the script — so the wallet would hand a signer a 149-sat
+     * coin and, for any coin of 253 sats or more, produce a PSBT no conformant
+     * signer can read at all.
+     */
+    @Test
+    fun `a BIP-174 witness utxo is an 8-byte amount then a length-prefixed script`() {
+        val witness = requireNotNull(parsePsbt(bip174WitnessUtxo).inputs.single().witnessUtxo)
+
+        assertEquals(199_909_013L, witness.satoshis)
+
+        // The value's bytes exactly as the spec writes them: the amount, then the
+        // script's length (`0x17`), then the script.
+        assertEquals(
+            "955eea0b0000000017a9146345200f68d189e1adc0df1c4d16ea8f14c0dbeb87",
+            toHex(witnessUtxoValue(bip174WitnessUtxo)),
+        )
+
+        // The scriptPubKey is the 23 bytes *after* that length prefix — a P2SH
+        // `a914…87`, not a 24-byte blob starting with 0x17.
+        assertEquals(23, witness.scriptPubKey.size)
+        assertEquals("a9146345200f68d189e1adc0df1c4d16ea8f14c0dbeb87", toHex(witness.scriptPubKey))
+    }
+
+    @Test
+    fun `a built witness utxo is an 8-byte amount then a length-prefixed script`() {
+        // 100,000 sats is `a086010000000000` little-endian, then `0x16` (22) and the
+        // script — never the five-byte compact size `fea0860100`, which is what
+        // this wallet used to write and what no other implementation reads.
+        assertEquals(
+            "a086010000000000" + "16" + fixtureInputScript,
+            toHex(witnessUtxoValue(fromHex(fixturePsbtUnsigned))),
+        )
+    }
+
+    @Test
+    fun `the signed fixture carries the same corrected witness utxo`() {
+        val witness = requireNotNull(parsePsbt(fromHex(fixturePsbtSigned)).inputs.single().witnessUtxo)
+        assertEquals(100_000L, witness.satoshis)
+        assertEquals(fixtureInputScript, toHex(witness.scriptPubKey))
+    }
+
+    @Test
+    fun `the corrected unsigned fixture round-trips`() {
+        assertRoundTrips(fromHex(fixturePsbtUnsigned))
+    }
+
+    @Test
+    fun `a witness utxo whose amount is compact-size encoded is refused, not mis-read`() {
+        // How this wallet wrote the field before the fix: `fe a0 86 01 00`, the
+        // compact size of 100,000, with no script length prefix at all. A reader
+        // that accepts it is a reader that will mis-read a spec-conformant one.
+        val legacy = fromHex(
+            fixturePsbtUnsigned.replace(
+                "011fa086010000000000160014aaaa",
+                "011bfea08601000014aaaa",
+            ),
+        )
+        val failure = assertThrowsPsbt { parsePsbt(legacy) }
+        assertTrue(
+            "expected a witness_utxo refusal, got: ${failure.message}",
+            failure.message.orEmpty().contains("witness_utxo"),
+        )
+    }
+
+    @Test
+    fun `a witness utxo key that carries key data is refused`() {
+        // BIP-174's own "invalid input witness utxo typed key" vector: the map key
+        // is `01 00` — keytype 0x01 with key data, and the spec allows none.
+        val failure = assertThrowsPsbt { parsePsbt(bip174InvalidWitnessUtxoKey) }
+        assertTrue(
+            "expected a witness_utxo key refusal, got: ${failure.message}",
+            failure.message.orEmpty().contains("witness_utxo"),
+        )
+    }
+
+    @Test
+    fun `a sighash type that is not four bytes is refused`() {
+        // `0x03`'s valuedata is a 32-bit little-endian uint; eight bytes is not one.
+        val ragged = fromHex(
+            fixturePsbtUnsigned.replace("01030421000000", "0103082100000000000000"),
+        )
+        val failure = assertThrowsPsbt { parsePsbt(ragged) }
+        assertTrue(
+            "expected a sighash refusal, got: ${failure.message}",
+            failure.message.orEmpty().contains("sighash"),
+        )
+    }
+
+    @Test
+    fun `the spec vector's derivations keep their fingerprints and uint32 paths`() {
+        val derivations = parsePsbt(bip174WitnessUtxo).inputs.single().derivations
+        assertEquals(2, derivations.size)
+        assertEquals(listOf("b4a6ba67", "b4a6ba67"), derivations.map { toHex(it.masterFingerprint) })
+        assertEquals(listOf(0x80000000L, 0x80000000L, 0x80000004L), derivations[0].path)
+        assertEquals(listOf(0x80000000L, 0x80000000L, 0x80000005L), derivations[1].path)
+    }
+
+    @Test
+    fun `a derivation whose path is not whole uint32 steps is refused`() {
+        // `0x06`'s valuedata is a fingerprint then whole 32-bit little-endian steps;
+        // two stray bytes must not be silently dropped.
+        val ragged = fromHex(
+            fixturePsbtUnsigned.replace(
+                "18123456785400008000000080000000800000000000000000",
+                "1a123456785400008000000080000000800000000000000000abcd",
+            ),
+        )
+        val failure = assertThrowsPsbt { parsePsbt(ragged) }
+        assertTrue(
+            "expected a derivation refusal, got: ${failure.message}",
+            failure.message.orEmpty().contains("derivation"),
+        )
     }
 
     // ---------------------------------------------------------------------
@@ -199,6 +334,14 @@ class PsbtTest {
 
     private fun assertRoundTrips(raw: ByteArray) {
         assertEquals(toHex(raw), toHex(parsePsbt(raw).toBytes()))
+    }
+
+    /** The raw bytes of the single input's `0x01` value, as they were read. */
+    private fun witnessUtxoValue(raw: ByteArray): ByteArray {
+        val psbt = parsePsbt(raw)
+        return psbt.inputs.single().keyValues
+            .first { it.key.size == 1 && it.key[0] == 0x01.toByte() }
+            .value
     }
 
     private fun assertThrowsPsbt(block: () -> Unit): PsbtException {

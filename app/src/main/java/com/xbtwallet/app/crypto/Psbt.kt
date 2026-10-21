@@ -12,12 +12,17 @@ import java.io.ByteArrayOutputStream
  * needs, from the specification:
  *
  * - **global** `0x00` — the unsigned transaction, as raw bytes;
- * - **per input** `0x01` witness_utxo (compact-size amount then the
- *   scriptPubKey), `0x03` sighash type (uint32 LE), `0x06` BIP32 derivation
- *   (key = `0x06 || <33-byte pubkey>`, value = 4-byte fingerprint then the
- *   absolute path as uint32 LE per step), `0x02` partial signature (key =
- *   `0x02 || <pubkey>`, value = the signature);
+ * - **per input** `0x01` witness_utxo (the amount as **8 little-endian bytes**,
+ *   then the scriptPubKey's compact-size length and the script), `0x03` sighash
+ *   type (uint32 LE), `0x06` BIP32 derivation (key = `0x06 || <33-byte pubkey>`,
+ *   value = 4-byte fingerprint then the absolute path as uint32 LE per step),
+ *   `0x02` partial signature (key = `0x02 || <pubkey>`, value = the signature);
  * - **per output** — nothing yet (the map is just its terminator).
+ *
+ * Those encodings are the part of this file that a test can only pin by *bytes*:
+ * a field written and read the same wrong way round-trips perfectly, so the
+ * tests carry BIP-174's own vectors and assert the extracted values, not just
+ * `parse(build(x)) == x`.
  *
  * **The one field this wallet stamps on every input it builds is the sighash
  * byte `0x21`** — `SIGHASH_ALL | SIGHASH_UNIFIED` — and [finalizePsbt] refuses
@@ -88,7 +93,8 @@ class ParsedPsbtInput(
     val keyValues: List<PsbtKeyValue>,
     val witnessUtxo: WitnessUtxo?,
     val sighashType: Long?,
-    val derivation: Bip32Derivation?,
+    /** Every `0x06` in the map, in the order read — an input may name several keys. */
+    val derivations: List<Bip32Derivation>,
     val partialSigs: List<PartialSig>,
 )
 
@@ -153,9 +159,13 @@ fun buildUnsignedPsbt(unsignedTxBytes: ByteArray, inputs: List<PsbtInput>): Byte
             "a compressed public key is 33 bytes, got ${input.pubKey.size}"
         }
 
-        // 0x01 witness_utxo: compact-size amount, then the scriptPubKey.
+        // 0x01 witness_utxo: the amount as 8 little-endian bytes, then the
+        // scriptPubKey's compact-size length and the script. BIP-174 defines the
+        // amount as a 64-bit integer — a compact size here (which is what this
+        // wallet used to write) is not what any other implementation reads.
         val witnessUtxo = ByteArrayOutputStream().apply {
-            writeCompactSize(input.witnessUtxoSatoshis)
+            write(uint64Le(input.witnessUtxoSatoshis))
+            writeCompactSize(input.witnessUtxoScriptPubKey.size.toLong())
             write(input.witnessUtxoScriptPubKey)
         }.toByteArray()
         writeKeyValue(out, byteArrayOf(0x01), witnessUtxo)
@@ -213,49 +223,105 @@ fun parsePsbt(bytes: ByteArray): Psbt {
     )
 }
 
-/** Turns one input map into the typed view the finalizer reads. */
+/**
+ * Turns one input map into the typed view the finalizer reads.
+ *
+ * Each type is decoded to the shape BIP-174 defines for it, and a field whose
+ * bytes do not match that shape is refused rather than reinterpreted — a value
+ * this wallet cannot read exactly is a value it must not sign against:
+ *
+ * - `0x01` witness_utxo — `<64-bit LE amount> <compact size script len> <script>`,
+ *   no key data;
+ * - `0x03` sighash type — a 32-bit LE uint, no key data. (Not a compact size: the
+ *   amount and the sighash are exactly the pair this wallet could confuse.)
+ * - `0x06` BIP32 derivation — key `0x06 || <pubkey>`, value `<4-byte
+ *   fingerprint> <32-bit LE path element>*`;
+ * - `0x02` partial signature — key `0x02 || <pubkey>`, value the signature
+ *   bytes, which stay opaque because nothing here interprets a signature.
+ */
 private fun readInput(keyValues: List<PsbtKeyValue>): ParsedPsbtInput {
     var witnessUtxo: WitnessUtxo? = null
     var sighashType: Long? = null
-    var derivation: Bip32Derivation? = null
+    val derivations = mutableListOf<Bip32Derivation>()
     val partialSigs = mutableListOf<PartialSig>()
 
     keyValues.forEach { kv ->
         if (kv.key.isEmpty()) return@forEach
         when (kv.key[0]) {
             0x01.toByte() -> {
-                val r = PsbtReader(kv.value, 0)
-                val amount = r.readCompactSize()
-                witnessUtxo = WitnessUtxo(amount, r.readRemaining())
+                requireNoKeyData(kv, "the witness_utxo key (PSBT_IN_WITNESS_UTXO)")
+
+                val reader = PsbtReader(kv.value, 0)
+                // The amount is eight bytes, little-endian — always eight, whatever
+                // its value. Reading it as a compact size is the bug this pins.
+                val amount = reader.readUint64Le()
+                val scriptLength = reader.readCompactSize()
+                if (scriptLength > reader.remaining) {
+                    throw PsbtException(
+                        "the witness_utxo says its scriptPubKey is $scriptLength bytes but the " +
+                            "field holds ${reader.remaining}",
+                    )
+                }
+                val script = reader.readBytes(scriptLength.toInt())
+                if (reader.remaining != 0) {
+                    throw PsbtException(
+                        "the witness_utxo has ${reader.remaining} bytes after its scriptPubKey",
+                    )
+                }
+                witnessUtxo = WitnessUtxo(amount, script)
             }
 
-            0x03.toByte() -> sighashType = readUint32Le(kv.value)
+            0x03.toByte() -> {
+                requireNoKeyData(kv, "the sighash type key (PSBT_IN_SIGHASH_TYPE)")
+                if (kv.value.size != 4) {
+                    throw PsbtException(
+                        "the input's sighash type is ${kv.value.size} bytes; BIP-174's is a 32-bit uint",
+                    )
+                }
+                sighashType = readUint32Le(kv.value)
+            }
 
             0x06.toByte() -> {
                 // key = 0x06 || pubkey
-                if (kv.value.size >= 4) {
-                    val fingerprint = kv.value.copyOfRange(0, 4)
-                    val rest = kv.value.copyOfRange(4, kv.value.size)
-                    val path = ArrayList<Long>(rest.size / 4)
-                    var i = 0
-                    while (i + 4 <= rest.size) {
-                        path.add(readUint32Le(rest.copyOfRange(i, i + 4)))
-                        i += 4
-                    }
-                    derivation = Bip32Derivation(fingerprint, path)
+                if (kv.key.size <= 1) {
+                    throw PsbtException("a BIP32 derivation key must carry the public key")
                 }
+                val value = kv.value
+                if (value.size < 4 || (value.size - 4) % 4 != 0) {
+                    throw PsbtException(
+                        "a BIP32 derivation is a 4-byte fingerprint plus whole 32-bit path " +
+                            "steps; this one is ${value.size} bytes",
+                    )
+                }
+                val path = ArrayList<Long>((value.size - 4) / 4)
+                var i = 4
+                while (i + 4 <= value.size) {
+                    path.add(readUint32Le(value.copyOfRange(i, i + 4)))
+                    i += 4
+                }
+                derivations.add(Bip32Derivation(value.copyOfRange(0, 4), path))
             }
 
             0x02.toByte() -> {
                 // key = 0x02 || pubkey, value = signature
-                if (kv.key.size > 1) {
-                    partialSigs.add(PartialSig(kv.key.copyOfRange(1, kv.key.size), kv.value))
+                if (kv.key.size <= 1) {
+                    throw PsbtException("a partial signature key must carry the public key")
                 }
+                partialSigs.add(PartialSig(kv.key.copyOfRange(1, kv.key.size), kv.value))
             }
         }
     }
 
-    return ParsedPsbtInput(keyValues, witnessUtxo, sighashType, derivation, partialSigs)
+    return ParsedPsbtInput(keyValues, witnessUtxo, sighashType, derivations, partialSigs)
+}
+
+/** BIP-174 gives these key types no key data at all, so the key is the type byte. */
+private fun requireNoKeyData(kv: PsbtKeyValue, field: String) {
+    if (kv.key.size != 1) {
+        throw PsbtException(
+            "$field takes no key data, but this map's key carries ${kv.key.size - 1} bytes of it",
+        )
+    }
 }
 
 /**
@@ -474,8 +540,8 @@ internal class PsbtReader(private val bytes: ByteArray, private var offset: Int)
         return out
     }
 
-    /** Everything left, from the current offset. */
-    fun readRemaining(): ByteArray = readBytes(bytes.size - offset)
+    /** How many bytes are left, from the current offset. */
+    val remaining: Int get() = bytes.size - offset
 
     fun readCompactSize(): Long = readCompactSize(this)
 
