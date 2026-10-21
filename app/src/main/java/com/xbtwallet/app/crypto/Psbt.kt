@@ -17,7 +17,9 @@ import java.io.ByteArrayOutputStream
  *   type (uint32 LE), `0x06` BIP32 derivation (key = `0x06 || <33-byte pubkey>`,
  *   value = 4-byte fingerprint then the absolute path as uint32 LE per step),
  *   `0x02` partial signature (key = `0x02 || <pubkey>`, value = the signature);
- * - **per output** — nothing yet (the map is just its terminator).
+ * - **per output** `0x02` BIP32 derivation (key = `0x02 || <33-byte pubkey>`,
+ *   value = the same fingerprint and uint32 LE path steps as the input's `0x06`)
+ *   — stamped on the change output so a signer can verify change as its own.
  *
  * Those encodings are the part of this file that a test can only pin by *bytes*:
  * a field written and read the same wrong way round-trips perfectly, so the
@@ -54,10 +56,20 @@ class WitnessUtxo(
     val scriptPubKey: ByteArray,
 )
 
-/** A `PSBT_IN_BIP32_DERIVATION`: the master fingerprint and the absolute path. */
+/**
+ * A BIP32 derivation — `PSBT_IN_BIP32_DERIVATION` (`0x06` on an input) or
+ * `PSBT_OUT_BIP32_DERIVATION` (`0x02` on an output): the master fingerprint and
+ * the absolute path.
+ *
+ * [pubKey] is the key the derivation is *about*. In the wire form it is not part
+ * of the value — it sits in the key, `0x06 || <pubkey>` on an input or
+ * `0x02 || <pubkey>` on an output — so it is nullable for a derivation decoded
+ * from a map whose key lacked it. The builder requires it when marking change.
+ */
 class Bip32Derivation(
     val masterFingerprint: ByteArray,
     val path: List<Long>,
+    val pubKey: ByteArray? = null,
 )
 
 /** A `PSBT_IN_PARTIAL_SIG`: the signing key and its signature (with the sighash byte). */
@@ -88,6 +100,13 @@ class PsbtInput(
     val pubKey: ByteArray,
 )
 
+/** One parsed output map: its raw key-values and the derivations it states. */
+class ParsedPsbtOutput(
+    val keyValues: List<PsbtKeyValue>,
+    /** Every `0x02` in the map, in the order read — a change output carries one. */
+    val derivations: List<Bip32Derivation>,
+)
+
 /** One parsed input map, with the field types the finalizer works in. */
 class ParsedPsbtInput(
     val keyValues: List<PsbtKeyValue>,
@@ -112,6 +131,13 @@ class Psbt(
     val outputKeyValues: List<List<PsbtKeyValue>>,
 ) {
 
+    /**
+     * The output maps as typed values. The raw maps stay the source of truth for
+     * re-serialisation; this is the reading a signer-equivalent check needs —
+     * in particular the `0x02` derivation on a change output.
+     */
+    val outputs: List<ParsedPsbtOutput> get() = outputKeyValues.map { readOutput(it) }
+
     /** The parsed unsigned transaction, for the input/output counts and finalizing. */
     val transaction: DecodedTransaction get() = decodeTransaction(unsignedTxBytes)
 
@@ -131,18 +157,45 @@ class Psbt(
  *
  * The transaction bytes are embedded verbatim under the global `0x00` key; each
  * input carries its witness_utxo, its sighash type (`0x21`, always) and its
- * BIP32 derivation. The output maps are empty — the wallet requests no output
- * metadata — but one terminator per transaction output is written, because
- * BIP-174 requires the count to match.
+ * BIP32 derivation.
  *
- * A PSBT that says nothing about an output is fine: this wallet's outputs are
- * paid to a scriptPubKey it already knows, and asking the signer to echo it back
- * would add bytes to the QR without adding safety. What matters is that the
- * **inputs** are complete, and they are: every one carries the full witness_utxo
- * the signer must verify against, the derivation path of the key that may sign,
- * and the sighash request.
+ * **The change output is marked.** When [change] is non-null, the output at
+ * [changeOutputIndex] gets one `PSBT_OUT_BIP32_DERIVATION` key-value: key
+ * `0x02 || <33-byte pubkey>`, value `<4-byte fingerprint> <uint32 LE per path
+ * step>` — the same value encoding as an input's `0x06`. That is how a hardware
+ * signer tells its own change from a payment: it derives the key at the stated
+ * path from its seed and checks it against the output's scriptPubKey. Without
+ * it a signer can only warn that the whole UTXO is leaving.
+ *
+ * A PSBT that says nothing about an output is still valid: when [change] is null
+ * every output map is just its terminator. One terminator per transaction output
+ * is always written, because BIP-174 requires the count to match.
  */
-fun buildUnsignedPsbt(unsignedTxBytes: ByteArray, inputs: List<PsbtInput>): ByteArray {
+fun buildUnsignedPsbt(
+    unsignedTxBytes: ByteArray,
+    inputs: List<PsbtInput>,
+    change: Bip32Derivation? = null,
+    changeOutputIndex: Int? = null,
+): ByteArray {
+    if ((change == null) != (changeOutputIndex == null)) {
+        throw PsbtException(
+            "a change derivation and the change output's index must be given together — " +
+                "change=${if (change == null) "null" else "set"}, index=$changeOutputIndex",
+        )
+    }
+    if (change != null) {
+        if (change.masterFingerprint.size != 4) {
+            throw PsbtException(
+                "a master fingerprint is four bytes, got ${change.masterFingerprint.size}",
+            )
+        }
+        val pubKey = change.pubKey
+            ?: throw PsbtException("a change derivation needs the change key's public key")
+        if (pubKey.size != 33) {
+            throw PsbtException("a compressed public key is 33 bytes, got ${pubKey.size}")
+        }
+    }
+
     val out = ByteArrayOutputStream()
     out.write(PSBT_MAGIC)
 
@@ -183,9 +236,29 @@ fun buildUnsignedPsbt(unsignedTxBytes: ByteArray, inputs: List<PsbtInput>): Byte
         out.write(0x00)
     }
 
-    // --- one (empty) output map per transaction output ---
+    // --- one output map per transaction output ---
     val outputCount = decodeTransaction(unsignedTxBytes).outputs.size
-    repeat(outputCount) { out.write(0x00) }
+    if (change != null) {
+        if (changeOutputIndex!! !in 0 until outputCount) {
+            throw PsbtException(
+                "the change output index is $changeOutputIndex but the transaction has " +
+                    "$outputCount output(s)",
+            )
+        }
+        val value = ByteArrayOutputStream().apply {
+            write(change.masterFingerprint)
+            change.path.forEach { step -> write(uint32Le(step)) }
+        }.toByteArray()
+        // 0x02 PSBT_OUT_BIP32_DERIVATION: key = 0x02 || pubkey, same value encoding
+        // as the input's 0x06 derivation.
+        val changeKeyValue = byteArrayOf(0x02) + change.pubKey!!
+        repeat(outputCount) { index ->
+            if (index == changeOutputIndex) writeKeyValue(out, changeKeyValue, value)
+            out.write(0x00)
+        }
+    } else {
+        repeat(outputCount) { out.write(0x00) }
+    }
 
     return out.toByteArray()
 }
@@ -281,26 +354,7 @@ private fun readInput(keyValues: List<PsbtKeyValue>): ParsedPsbtInput {
                 sighashType = readUint32Le(kv.value)
             }
 
-            0x06.toByte() -> {
-                // key = 0x06 || pubkey
-                if (kv.key.size <= 1) {
-                    throw PsbtException("a BIP32 derivation key must carry the public key")
-                }
-                val value = kv.value
-                if (value.size < 4 || (value.size - 4) % 4 != 0) {
-                    throw PsbtException(
-                        "a BIP32 derivation is a 4-byte fingerprint plus whole 32-bit path " +
-                            "steps; this one is ${value.size} bytes",
-                    )
-                }
-                val path = ArrayList<Long>((value.size - 4) / 4)
-                var i = 4
-                while (i + 4 <= value.size) {
-                    path.add(readUint32Le(value.copyOfRange(i, i + 4)))
-                    i += 4
-                }
-                derivations.add(Bip32Derivation(value.copyOfRange(0, 4), path))
-            }
+            0x06.toByte() -> derivations.add(readBip32Derivation(kv, "a BIP32 derivation"))
 
             0x02.toByte() -> {
                 // key = 0x02 || pubkey, value = signature
@@ -313,6 +367,56 @@ private fun readInput(keyValues: List<PsbtKeyValue>): ParsedPsbtInput {
     }
 
     return ParsedPsbtInput(keyValues, witnessUtxo, sighashType, derivations, partialSigs)
+}
+
+/**
+ * Turns one output map into its typed view.
+ *
+ * A change output's `0x02` is `PSBT_OUT_BIP32_DERIVATION` — key `0x02 || pubkey`,
+ * value the same `<4-byte fingerprint> <uint32 LE path step>*` an input's `0x06`
+ * carries. Nothing else in an output map is interpreted here, but the map stays
+ * as read so re-serialisation is byte-exact.
+ */
+private fun readOutput(keyValues: List<PsbtKeyValue>): ParsedPsbtOutput {
+    val derivations = mutableListOf<Bip32Derivation>()
+    keyValues.forEach { kv ->
+        if (kv.key.isEmpty()) return@forEach
+        if (kv.key[0] == 0x02.toByte()) {
+            derivations.add(readBip32Derivation(kv, "a change output's BIP32 derivation"))
+        }
+    }
+    return ParsedPsbtOutput(keyValues, derivations)
+}
+
+/**
+ * Decodes one `0x06`/`0x02` derivation: key = type byte then the 33-byte pubkey,
+ * value = a 4-byte fingerprint then the absolute path as uint32 LE per step.
+ */
+private fun readBip32Derivation(kv: PsbtKeyValue, field: String): Bip32Derivation {
+    if (kv.key.size != 34) {
+        throw PsbtException(
+            "$field key must be the type byte then a 33-byte public key; " +
+                "this one carries ${kv.key.size - 1} bytes of key data",
+        )
+    }
+    val value = kv.value
+    if (value.size < 4 || (value.size - 4) % 4 != 0) {
+        throw PsbtException(
+            "a BIP32 derivation is a 4-byte fingerprint plus whole 32-bit path " +
+                "steps; this one is ${value.size} bytes",
+        )
+    }
+    val path = ArrayList<Long>((value.size - 4) / 4)
+    var i = 4
+    while (i + 4 <= value.size) {
+        path.add(readUint32Le(value.copyOfRange(i, i + 4)))
+        i += 4
+    }
+    return Bip32Derivation(
+        masterFingerprint = value.copyOfRange(0, 4),
+        path = path,
+        pubKey = kv.key.copyOfRange(1, kv.key.size),
+    )
 }
 
 /** BIP-174 gives these key types no key data at all, so the key is the type byte. */

@@ -280,6 +280,176 @@ class PsbtTest {
     }
 
     // ---------------------------------------------------------------------
+    // Marking the change output (PSBT_OUT_BIP32_DERIVATION, 0x02)
+    // ---------------------------------------------------------------------
+
+    /** The change key's 33-byte compressed public key, as the fixture states it. */
+    private val fixtureChangePubKey = "03" + "cd".repeat(32)
+
+    /** `m/84'/0'/0'/1/0` — the account path, the change chain, change index 0. */
+    private val fixtureChangePath = listOf(0x80000054L, 0x80000000L, 0x80000000L, 1L, 0L)
+
+    /**
+     * [fixturePsbtUnsigned] with the change output's map filled in.
+     *
+     * Written out by hand from BIP-174's encoding — key `0x02 || pubkey`, value
+     * `<4-byte fingerprint><uint32 LE per path step>` — rather than produced by
+     * the builder under test, so the byte comparison below proves the builder
+     * writes what the spec says and not merely what this file's reader expects.
+     * The change output is index 1, so the map lands between the two output
+     * terminators.
+     */
+    private val fixturePsbtUnsignedWithChange =
+        "70736274ff010071020000000111111111111111111111111111111111111111111111111111111111111111110000000000ffffffff0250c30000000000001600142222222222222222222222222222222222222222409c0000000000001600143333333333333333333333333333333333333333000000000001011fa086010000000000160014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01030421000000220603abababababababababababababababababababababababababababababababab181234567854000080000000800000008000000000000000000000220203cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd1812345678540000800000008000000080010000000000000000"
+
+    private fun buildFixturePsbt(
+        change: Bip32Derivation? = null,
+        changeOutputIndex: Int? = null,
+    ): ByteArray = buildUnsignedPsbt(
+        unsignedTxBytes = fromHex(fixtureUnsignedTx),
+        inputs = listOf(
+            PsbtInput(
+                witnessUtxoScriptPubKey = fromHex(fixtureInputScript),
+                witnessUtxoSatoshis = 100_000L,
+                masterFingerprint = fromHex("12345678"),
+                derivationPath = fixtureDerivationPath,
+                pubKey = fromHex(fixturePubKey),
+            ),
+        ),
+        change = change,
+        changeOutputIndex = changeOutputIndex,
+    )
+
+    private fun changeDerivation() = Bip32Derivation(
+        masterFingerprint = fromHex("12345678"),
+        path = fixtureChangePath,
+        pubKey = fromHex(fixtureChangePubKey),
+    )
+
+    @Test
+    fun `a PSBT with change reproduces the change-marked fixture byte for byte`() {
+        assertEquals(
+            fixturePsbtUnsignedWithChange,
+            toHex(buildFixturePsbt(changeDerivation(), changeOutputIndex = 1)),
+        )
+    }
+
+    @Test
+    fun `the change output map carries exactly one 0x02 key-value and no other output does`() {
+        val psbt = parsePsbt(buildFixturePsbt(changeDerivation(), changeOutputIndex = 1))
+
+        assertTrue("output 0 must stay unmarked", psbt.outputKeyValues[0].isEmpty())
+        assertEquals(1, psbt.outputKeyValues[1].size)
+
+        val changeKeyValue = psbt.outputKeyValues[1].single()
+        assertEquals("02$fixtureChangePubKey", toHex(changeKeyValue.key))
+        assertEquals(
+            "12345678" +
+                "54000080" +
+                "00000080" +
+                "00000080" +
+                "01000000" +
+                "00000000",
+            toHex(changeKeyValue.value),
+        )
+    }
+
+    @Test
+    fun `the parsed outputs expose the change derivation as a typed value`() {
+        val output = parsePsbt(buildFixturePsbt(changeDerivation(), changeOutputIndex = 1)).outputs[1]
+        val derivation = output.derivations.single()
+        assertEquals("12345678", toHex(derivation.masterFingerprint))
+        assertEquals(fixtureChangePath, derivation.path)
+        assertEquals(fixtureChangePubKey, toHex(derivation.pubKey!!))
+    }
+
+    @Test
+    fun `a PSBT without change leaves every output map empty`() {
+        val psbt = parsePsbt(buildFixturePsbt())
+        assertEquals(2, psbt.outputKeyValues.size)
+        assertTrue(psbt.outputKeyValues.all { it.isEmpty() })
+    }
+
+    @Test
+    fun `the signer's own derivation on the change output reproduces its scriptPubKey`() {
+        // The account key is m/84'/0'/0'; the change address is its 1/<index>
+        // child. A signer holding the seed follows the 0x02 derivation, derives
+        // that child and compares HASH160 of the key with the output's program.
+        val accountKey = com.xbtwallet.app.crypto.ExtendedPublicKey.parse(
+            "zpub6rFR7y4Q2AijBEqTUquhVz398htDFrtymD9xYYfG1m4wAcvPhXNfE3EfH1r1ADqtfSdVCToUG868RvUUkgDKf31mGDtKsAYz2oz2AGutZYs",
+        )
+        val changeIndex = 7L
+        val changeKey = accountKey.derive(listOf(1L, changeIndex))
+        val changeScript = com.xbtwallet.app.chain.p2wpkhScriptPubKey(changeKey.publicKey)
+
+        val unsignedTx = com.xbtwallet.app.chain.buildUnsignedTransaction(
+            inputs = listOf(com.xbtwallet.app.chain.TxInput(fixtureTxid, 0)),
+            outputs = listOf(
+                com.xbtwallet.app.chain.TxOutput(50_000L, fixtureRecipientScript),
+                com.xbtwallet.app.chain.TxOutput(40_000L, toHex(changeScript)),
+            ),
+        )
+        val accountPath = listOf(0x80000054L, 0x80000000L, 0x80000000L)
+        val built = buildUnsignedPsbt(
+            unsignedTxBytes = unsignedTx,
+            inputs = listOf(
+                PsbtInput(
+                    witnessUtxoScriptPubKey = fromHex(fixtureInputScript),
+                    witnessUtxoSatoshis = 100_000L,
+                    masterFingerprint = fromHex("12345678"),
+                    derivationPath = fixtureDerivationPath,
+                    pubKey = fromHex(fixturePubKey),
+                ),
+            ),
+            change = Bip32Derivation(
+                masterFingerprint = fromHex("12345678"),
+                path = accountPath + listOf(1L, changeIndex),
+                pubKey = changeKey.publicKey,
+            ),
+            changeOutputIndex = 1,
+        )
+
+        val parsed = parsePsbt(built)
+        val stated = parsed.outputs[1].derivations.single()
+        val derived = accountKey.derive(stated.path.drop(accountPath.size))
+        assertTrue(
+            "the derivation on the change output must resolve to its own scriptPubKey",
+            toHex(com.xbtwallet.app.chain.p2wpkhScriptPubKey(derived.publicKey)) ==
+                toHex(parsed.transaction.outputs[1].scriptPubKey),
+        )
+        assertEquals(
+            "the stated pubkey must be the key at the stated path",
+            toHex(changeKey.publicKey),
+            toHex(stated.pubKey!!),
+        )
+    }
+
+    @Test
+    fun `a change derivation without an output index is refused`() {
+        val failure = assertThrowsPsbt { buildFixturePsbt(changeDerivation()) }
+        assertTrue(failure.message.orEmpty().contains("change"))
+    }
+
+    @Test
+    fun `a change output index beyond the transaction's outputs is refused`() {
+        val failure = assertThrowsPsbt {
+            buildFixturePsbt(changeDerivation(), changeOutputIndex = 2)
+        }
+        assertTrue(failure.message.orEmpty().contains("change"))
+    }
+
+    @Test
+    fun `a change derivation without a public key is refused`() {
+        val failure = assertThrowsPsbt {
+            buildFixturePsbt(
+                Bip32Derivation(fromHex("12345678"), fixtureChangePath),
+                changeOutputIndex = 1,
+            )
+        }
+        assertTrue(failure.message.orEmpty().contains("public key"))
+    }
+
+    // ---------------------------------------------------------------------
     // Finalizing
     // ---------------------------------------------------------------------
 

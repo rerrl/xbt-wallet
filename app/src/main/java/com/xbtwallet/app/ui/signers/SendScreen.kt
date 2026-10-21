@@ -60,6 +60,7 @@ import com.xbtwallet.app.chain.buildUnsignedTransaction
 import com.xbtwallet.app.chain.p2wpkhScriptPubKey
 import com.xbtwallet.app.chain.planSend
 import com.xbtwallet.app.chain.scriptPubKeyFromAddress
+import com.xbtwallet.app.crypto.Bip32Derivation
 import com.xbtwallet.app.crypto.PsbtException
 import com.xbtwallet.app.crypto.PsbtInput
 import com.xbtwallet.app.crypto.UrPsbtAssembler
@@ -983,6 +984,11 @@ private const val QR_QUIET_SURROUND_DP = 8
  * the phone's storage — becomes both the witness_utxo's script and the
  * derivation's key.
  *
+ * The change output, when the plan has one, is labelled the same way at
+ * `account/<change chain>/<change index>`: the signer derives that key from its
+ * own seed and checks it against the output, which is how it recognises the
+ * change as its own rather than as a payment away.
+ *
  * @throws PsbtException when the wallet is not signing-ready or the change
  *   address cannot be resolved — both are pre-existing conditions, not user error.
  */
@@ -1005,11 +1011,11 @@ private fun prepareSend(
     val accountPath = parseDerivationPath(pathText)
     val fingerprint = masterFingerprintBytes(fingerprintHex)
 
-    val changeAddress = resolveChangeAddress(state)
+    val change = resolveChangeAddress(state)
         ?: throw PsbtException("no change address is available for this wallet")
 
     val recipientScript = scriptPubKeyFromAddress(recipient)
-    val changeScript = scriptPubKeyFromAddress(changeAddress)
+    val changeScript = scriptPubKeyFromAddress(change.address)
 
     // Derive each selected coin's public key once, and keep the absolute path it
     // was derived at — the two things a signer needs to check its own signature.
@@ -1040,6 +1046,30 @@ private fun prepareSend(
 
     val unsignedTx = buildUnsignedTransaction(plan)
 
+    // Where the change output landed, and the key that pays it: account/<change
+    // chain>/<change index>. Stamping this on the output's map is what lets a
+    // signer recognise the change as its own — otherwise SeedSigner can only warn
+    // that the whole UTXO is being sent away.
+    val changeOutputIndex = if (plan.hasChange) {
+        val changeScriptHex = changeScript.toHexString()
+        plan.outputs
+            .indexOfFirst { it.scriptPubKeyHex == changeScriptHex }
+            .takeIf { it >= 0 }
+            ?: throw PsbtException("the change output could not be located in the plan")
+    } else {
+        null
+    }
+    val changeDerivation = changeOutputIndex?.let {
+        val changeKey = accountKey
+            .deriveChild(AddressChain.CHANGE.index)
+            .deriveChild(change.index.toLong())
+        Bip32Derivation(
+            masterFingerprint = fingerprint,
+            path = accountPath + listOf(AddressChain.CHANGE.index, change.index.toLong()),
+            pubKey = changeKey.publicKey,
+        )
+    }
+
     val psbt = buildUnsignedPsbt(
         unsignedTxBytes = unsignedTx,
         inputs = plan.inputs.mapIndexed { index, input ->
@@ -1051,6 +1081,8 @@ private fun prepareSend(
                 pubKey = keys[index].first,
             )
         },
+        change = changeDerivation,
+        changeOutputIndex = changeOutputIndex,
     )
 
     return PreparedSend(
@@ -1062,6 +1094,9 @@ private fun prepareSend(
     )
 }
 
+/** A change address, with the index it was derived at — the PSBT needs both. */
+private class ChangeTarget(val address: String, val index: Int)
+
 /**
  * The change address: the **first unused** address of the account's change
  * chain in the cached snapshot, so change comes back to an address the account
@@ -1070,14 +1105,16 @@ private fun prepareSend(
  * When the scan knows of no unused change address — nothing cached yet, or every
  * one the scan visited is used — this falls back to deriving change index 0 from
  * the account key, which costs nothing and never waits on the network.
+ *
+ * The index travels with the address because the PSBT's change output must be
+ * labelled with the exact derivation path the address was built from.
  */
-private fun resolveChangeAddress(state: SignerChainState): String? {
+private fun resolveChangeAddress(state: SignerChainState): ChangeTarget? {
     val firstUnused = state.snapshot
         ?.change
         ?.firstOrNull { !it.used }
-        ?.address
-    if (firstUnused != null) return firstUnused
-    return state.scanner?.derive(AddressChain.CHANGE, 0)?.address
+    if (firstUnused != null) return ChangeTarget(firstUnused.address, firstUnused.index)
+    return state.scanner?.derive(AddressChain.CHANGE, 0)?.let { ChangeTarget(it.address, it.index) }
 }
 
 /** The estimated fee for [inputCount] inputs at [feeRateSatPerVb], in satoshis. */
