@@ -28,10 +28,6 @@ v0.1.0 in progress. Air-gapped watch + send with a SeedSigner (or any BC-UR sign
 
 The sections below are the detailed, technical documentation: screen-by-screen behaviour, the navigation model, key validation, and the chain-sync design. For the full plan see [PLAN.md](PLAN.md).
 
----
-
-## Technical appendix
-
 ## Home screen
 
 Top to bottom: **Server** (private Electrum endpoint), **Add wallet**, and
@@ -175,9 +171,10 @@ saved at all there is no error to show — the card says *Connect a server* and
 explains that balances come from the user's own server and nobody else's.
 
 Under the balance sit **UTXOs** and **Addresses** (each opens its own screen,
-see below) and **Send**/**Receive**, with Send live for a signing-ready wallet:
-sending is the air-gapped QR flow, and a wallet that offers a Send button that
-cannot send is a wallet that lies.
+see below) and **Send**/**Receive**, with Send reached through **UTXOs** →
+*Send selected* rather than the wallet-screen button: sending is the air-gapped
+QR flow, and a wallet that offers a Send button that cannot send is a wallet
+that lies.
 
 Two fiat lines dress the same balance in hardcoded placeholder rates, each
 labelled as such: the XBT figure at **$420.69/XBT** and, because BTC and XBT
@@ -240,8 +237,10 @@ scan instead of re-running it (the manual Refresh always forces one).
 The UTXO screen lists what the scan found: one monospaced row per output, its
 amount in sats on top and its provenance underneath — `txid:vout` with the
 middle elided, the chain and address index it sits at, and the height it
-confirmed at (or *unconfirmed*). An empty account says so. There is no coin
-control, no freezing and no selection yet; those are v0.2.0.
+confirmed at (or *unconfirmed*). An empty account says so.
+
+Multi-select with a *Send selected* bar is the entry to the send flow; freezing
+is still absent.
 
 ## Addresses
 
