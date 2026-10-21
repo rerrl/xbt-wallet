@@ -7,9 +7,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -46,6 +48,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -282,11 +285,22 @@ private fun SendFlow(
         amountSatoshis != null && maxSendable != null && amountSatoshis <= maxSendable
 
     Column(modifier = modifier) {
+        // The SHOW_QR step is the one step that must not scroll: its QR is sized
+        // by a weight, and a scrolling parent measures its content against an
+        // unbounded height — a weighted child there would be given nothing. Every
+        // other step keeps the scrolling column.
+        val stepScrollState = rememberScrollState()
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .verticalScroll(rememberScrollState()),
+                .then(
+                    if (step == SendStep.SHOW_QR) {
+                        Modifier
+                    } else {
+                        Modifier.verticalScroll(stepScrollState)
+                    },
+                ),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             when (step) {
@@ -326,6 +340,7 @@ private fun SendFlow(
                                 scanProgress = 0
                                 step = SendStep.SCAN
                             },
+                            modifier = Modifier.fillMaxSize(),
                         )
                     }
                 }
@@ -586,8 +601,13 @@ private fun FormStep(
 }
 
 /**
- * The unsigned PSBT as a QR, plus the summary a user checks before scanning it
+ * The unsigned PSBT as a QR, with the summary a user checks before scanning it
  * into their signer.
+ *
+ * The QR is the point of this step, so it is the element the layout gives the
+ * space to: one compact line above it (see [showQrSummary]), the symbol itself
+ * filling everything left between that line and the caption, and the "Scan QR"
+ * button pinned below both.
  *
  * A single-frame PSBT renders one static symbol. A bigger one animates: the
  * frames cycle through a `LaunchedEffect` about four times a second, which is
@@ -598,6 +618,7 @@ private fun FormStep(
 private fun ShowQrStep(
     prepared: PreparedSend,
     onScan: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val encoder = remember(prepared.psbtBytes) { UrPsbtEncoder(prepared.psbtBytes) }
     val frames = remember(encoder) { encoder.parts }
@@ -614,47 +635,53 @@ private fun ShowQrStep(
 
     val payload = frames[frameIndex.coerceIn(0, frames.size - 1)]
 
-    Text(
-        text = "Unsigned transaction",
-        style = MaterialTheme.typography.titleMedium,
-    )
-    AddressEdgeHighlight(prepared.recipient)
-    Text(
-        text = "Amount: ${formatSats(prepared.amountSatoshis)} sats",
-        style = MaterialTheme.typography.bodyMedium,
-        fontFamily = FontFamily.Monospace,
-    )
-    Text(
-        text = "Fee: ${formatSats(prepared.feeSatoshis)} sats" +
-            if (prepared.changeSatoshis > 0) {
-                "   Change: ${formatSats(prepared.changeSatoshis)} sats"
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            text = showQrSummary(
+                amountSatoshis = prepared.amountSatoshis,
+                recipient = prepared.recipient,
+                feeSatoshis = prepared.feeSatoshis,
+            ),
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // The symbol takes every pixel the summary above and the caption below
+        // leave, and stays square inside what is left: width or height,
+        // whichever binds, is what it is measured against.
+        Box(
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            contentAlignment = Alignment.Center,
+        ) {
+            QrImage(payload = payload, modifier = Modifier.aspectRatio(1f))
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = if (encoder.isSingleFrame) {
+                "Scan this with your SeedSigner to sign the transaction."
             } else {
-                ""
+                "Keep this in view of your SeedSigner \u2014 ${frames.size} frames."
             },
-        style = MaterialTheme.typography.bodyMedium,
-        fontFamily = FontFamily.Monospace,
-    )
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth(),
+        )
 
-    Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
-    QrImage(payload = payload)
-
-    Spacer(modifier = Modifier.height(8.dp))
-
-    Text(
-        text = if (encoder.isSingleFrame) {
-            "Scan this with your SeedSigner to sign the transaction."
-        } else {
-            "Keep this in view of your SeedSigner \u2014 ${frames.size} frames."
-        },
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-
-    Spacer(modifier = Modifier.height(12.dp))
-
-    Button(onClick = onScan, modifier = Modifier.fillMaxWidth()) {
-        Text("Scan QR")
+        Button(onClick = onScan, modifier = Modifier.fillMaxWidth()) {
+            Text("Scan QR")
+        }
     }
 }
 
@@ -860,10 +887,14 @@ private fun AddressEdgeHighlight(address: String) {
 }
 
 /**
- * The QR as it is drawn: a white panel with the symbol centred in it.
+ * The QR as it is drawn: a white panel with the symbol filling it.
  *
- * The white [Surface] is the quiet zone — a QR module touching the dark
- * background gives a camera nothing to find the finder patterns against. The
+ * The panel is the size it is given — the caller keeps it square — and the
+ * symbol scales into whatever that is, so a large panel is a large symbol
+ * rather than a fixed one with dead space around it. The white [Surface] is
+ * what is left of the quiet zone: a QR module touching the dark background
+ * gives a camera nothing to find the finder patterns against, so a thin white
+ * surround stays even though ZXing already pads the matrix it returns. The
  * bitmap is one pixel per module with `FilterQuality.None`, because a QR is
  * binary data and smoothing its modules is the blur a scanner cannot read.
  */
@@ -879,10 +910,32 @@ private fun QrImage(payload: String, modifier: Modifier = Modifier) {
             bitmap = bitmap.asImageBitmap(),
             contentDescription = "Unsigned transaction QR code",
             filterQuality = FilterQuality.None,
-            modifier = Modifier.padding(16.dp).size(240.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(QR_QUIET_SURROUND_DP.dp),
         )
     }
 }
+
+/**
+ * The one line [ShowQrStep] shows above the QR: the amount, the recipient and
+ * the fee — the three numbers a user checks against the signer's own screen.
+ *
+ * The recipient is not written out in full: the symbol beside this line is what
+ * is being verified, and an edge-shortened form — the first and last eight
+ * characters — is exactly what a person compares across two screens. It is the
+ * same head-and-tail the rest of the wallet uses ([shortenedMiddle]). Amount and
+ * fee are grouped the way every other satoshi figure in the wallet is
+ * ([formatSats]), so the numbers read as the same kind of thing wherever they
+ * appear.
+ */
+internal fun showQrSummary(
+    amountSatoshis: Long,
+    recipient: String,
+    feeSatoshis: Long,
+): String = "${formatSats(amountSatoshis)} sats \u2192 " +
+    shortenedMiddle(recipient, head = RECIPIENT_EDGE_CHARS, tail = RECIPIENT_EDGE_CHARS) +
+    " \u00b7 fee ${formatSats(feeSatoshis)} sats"
 
 /** The [BitMatrix] as pixels: black modules on white, one pixel each. */
 private fun qrBitmap(matrix: BitMatrix): Bitmap {
@@ -906,6 +959,18 @@ private const val LABEL_MAX_CHARS = 100
 
 /** How long each animated frame stays on screen, in milliseconds. */
 private const val FRAME_INTERVAL_MILLIS = 250L
+
+/** Characters kept at each end of the recipient on the SHOW_QR summary line. */
+private const val RECIPIENT_EDGE_CHARS = 8
+
+/**
+ * The white surround between the QR panel's edge and the symbol, in dp.
+ *
+ * ZXing already pads the matrix with a four-module quiet zone; this is the
+ * panel's own margin against the dark theme, kept thin so the symbol — not the
+ * border — is what the camera sees most of.
+ */
+private const val QR_QUIET_SURROUND_DP = 8
 
 /**
  * Builds everything a signer needs for this send: the plan, the unsigned
