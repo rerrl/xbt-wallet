@@ -17,11 +17,19 @@ import com.xbtwallet.app.crypto.Hashes
  * `crypto/` package's [Bech32], to turn a recipient address into the
  * scriptPubKey a transaction output carries.
  *
- * **Fee estimation is the same conservative rule the Send form already shows**
- * ([estimateSendVsize]): every input this wallet spends is P2WPKH, so its weight
- * is known without knowing anything about the actual UTXO. The estimate is the
- * same number "Max" is computed from, so the amount the user is allowed to type
- * and the amount the planner builds can never disagree.
+ * **Fee estimation is exact, and rounded the way the network rounds.** Every
+ * input this wallet spends is P2WPKH, so a spend's weight is known without
+ * knowing anything about the actual UTXO: [exactSendVsize] derives the size from
+ * the transaction's real structure and rounds the result **up** to whole virtual
+ * bytes, which is how a node counts them and therefore how the minimum relay fee
+ * is computed. The planner uses it with the outputs it is actually building, so
+ * the fee it charges is the fee that transaction needs — not a truncated
+ * approximation of it.
+ *
+ * The Send form's preview is a *different* question — "what is the most this
+ * send could cost?" — and it answers it with the worst-case output shape
+ * ([estimateSendVsize]), so the amount a user is allowed to type can never be
+ * more than the planner can pay for.
  */
 
 /**
@@ -84,13 +92,21 @@ fun planSend(
     require(feeRateSatPerVb >= 1) { "a fee rate of at least 1 sat/vB is required" }
 
     val total = inputs.sumOf { it.satoshis }
-    val estimatedFee = estimateSendVsize(inputs.size).toLong() * feeRateSatPerVb
-    val change = total - amountSatoshis - estimatedFee
+
+    // Price the send as it will actually be built: the recipient output, and
+    // provisionally a change output. The change output pays for its own bytes
+    // (well, for its own share of them) — and if the remainder cannot cover
+    // them it is dropped just below, and the plan reports what it really pays.
+    val feeWithChange = exactSendVsize(
+        inputCount = inputs.size,
+        outputScriptSizes = listOf(recipientScriptPubKey.size, changeScriptPubKey.size),
+    ).toLong() * feeRateSatPerVb
+    val change = total - amountSatoshis - feeWithChange
 
     val outputs = mutableListOf(TxOutput(amountSatoshis, Scripthash.toHex(recipientScriptPubKey)))
     return if (change >= DUST_THRESHOLD_SATOSHIS) {
         outputs.add(TxOutput(change, Scripthash.toHex(changeScriptPubKey)))
-        SendPlan(inputs, outputs, estimatedFee, amountSatoshis, change)
+        SendPlan(inputs, outputs, feeWithChange, amountSatoshis, change)
     } else {
         // The change was too small to be worth an output: it joins the fee. The
         // plan reports the fee it actually pays, not the one it estimated.
@@ -99,21 +115,93 @@ fun planSend(
 }
 
 /**
- * The estimated size, in virtual bytes, of a send that spends [inputCount]
- * P2WPKH inputs and carries two outputs: the recipient and the change.
+ * The size, in virtual bytes, of a send that spends [inputCount] P2WPKH inputs
+ * and carries one output per entry of [outputScriptSizes], each entry the size
+ * of that output's scriptPubKey — 22 for P2WPKH, 34 for P2TR.
  *
- * Deliberately conservative, and hard-coded rather than derived: the wallet only
- * ever spends P2WPKH (BIP-84) inputs, so the weights are known without knowing
- * anything about the actual UTXOs. 10 vB of transaction overhead, 68 vB per
- * input, and 62 vB for the two outputs. Guessing high costs the user a few sats
- * of headroom; guessing low would hand them a fee estimate their wallet cannot
- * pay, which is the worse error.
+ * Derived from the transaction's actual structure rather than a per-input
+ * constant, because the per-input constant is what got this wrong: `10 + 68·n +
+ * 62` says a 1-in/2-out P2WPKH send is 140 vB when it is 140.75, and a node
+ * rounds that up to 141 for the minimum relay fee. Paying 140 for a 141-vB
+ * transaction is a "min relay fee not met, 140 < 141" rejection.
+ *
+ * The arithmetic mirrors [buildUnsignedTransaction]: the base (non-witness)
+ * bytes are the version, the input and output counts, 41 bytes per input (a
+ * 32-byte outpoint, a 4-byte index, an empty scriptSig's zero length, a 4-byte
+ * sequence), then each output's 8-byte value, script length and script, then the
+ * 4-byte locktime. The witness is the marker and flag, then per input a stack
+ * with a signature and a public key.
+ *
+ * The signature is **sized at the 73-byte worst case** rather than the 71-72 a
+ * low-R signature usually comes to. It is the same number every time and it is
+ * an upper bound: an attacker cannot grind a signature to make the transaction
+ * larger than this, so the fee is never short. (A transaction whose real sig is
+ * 72 bytes is one vB smaller than this — the surplus sat is the price of not
+ * having to guess.)
+ *
+ * The result is **ceiling-divided**: virtual bytes are `ceil(weight / 4)`
+ * because a node's `GetVirtualTransactionSize` rounds up, and the fee must be
+ * computed on the same integer the node checks against.
+ */
+fun exactSendVsize(inputCount: Int, outputScriptSizes: List<Int>): Int {
+    require(inputCount >= 0) { "an input count cannot be negative" }
+
+    val base = 4 +
+        varintLen(inputCount) +
+        41 * inputCount +
+        varintLen(outputScriptSizes.size) +
+        outputScriptSizes.sumOf { scriptSize -> 8 + varintLen(scriptSize) + scriptSize } +
+        4
+
+    // marker (1) + flag (1), then per input: one stack item for the signature
+    // (length prefix + 73 bytes) and one for the public key (prefix + 33 bytes),
+    // preceded by the stack size varint.
+    val witness = 2 + inputCount * (1 + (1 + 73) + (1 + 33))
+
+    // ceil(weight / 4): Bitcoin Core's GetVirtualTransactionSize rounds up, and
+    // so must we, or the fee is computed against a smaller number than the
+    // network will.
+    return (4 * base + witness + 3) / 4
+}
+
+/**
+ * The **worst-case** size, in virtual bytes, of a send that spends [inputCount]
+ * P2WPKH inputs and carries two outputs: the recipient's and the change.
+ *
+ * This is the Send form's preview, not the planner's number — the planner knows
+ * its actual outputs and uses [exactSendVsize]. The form does not yet: it shows
+ * this before an address has been resolved to a script, so it must assume the
+ * largest output this wallet can build for. That is a taproot output — an
+ * 8-byte value, a 1-byte length and a 34-byte scriptPubKey, 43 bytes — and
+ * assuming two of them can only over-estimate. Over-estimating costs the user a
+ * little headroom; under-estimating would let "Max" promise a send the planner
+ * cannot pay for.
  *
  * Lives here — rather than beside the Send form that displays it — because the
- * planner is what *spends* the estimate, and `chain/` must not reach up into
- * `ui/`. The form imports it; the arithmetic is in one place.
+ * form's "Max" and the planner must be reasoned about together, and `chain/`
+ * must not reach up into `ui/`.
  */
-fun estimateSendVsize(inputCount: Int): Int = 10 + 68 * inputCount + 62
+fun estimateSendVsize(inputCount: Int): Int = exactSendVsize(inputCount, WORST_CASE_OUTPUT_SCRIPT_SIZES)
+
+/**
+ * The scriptPubKey sizes of the two most expensive outputs this wallet can
+ * build: [P2TR_SCRIPT_SIZE] twice — 43-byte outputs, the largest any accepted
+ * address produces. Every other shape the Send form accepts is 31 bytes.
+ */
+private val WORST_CASE_OUTPUT_SCRIPT_SIZES = listOf(P2TR_SCRIPT_SIZE, P2TR_SCRIPT_SIZE)
+
+/** A P2TR scriptPubKey: `OP_1 PUSH32 <32-byte program>`. */
+private const val P2TR_SCRIPT_SIZE = 34
+
+/**
+ * The number of bytes a Bitcoin CompactSize integer takes: 1 below 0xFD, 3 up to
+ * 0xFFFF, 5 above — the same rule [writeVarInt] serialises.
+ */
+private fun varintLen(value: Int): Int = when {
+    value < 0xFD -> 1
+    value <= 0xFFFF -> 3
+    else -> 5
+}
 
 /**
  * Serialises the unsigned transaction: version 2, every sequence final, locktime

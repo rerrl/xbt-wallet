@@ -162,34 +162,40 @@ class SendValidationTest {
     // --- estimateSendVsize --------------------------------------------------
 
     @Test
-    fun `the send vsize estimate is 10 plus 68 per input plus 62`() {
-        assertEquals(140, estimateSendVsize(1))
-        assertEquals(208, estimateSendVsize(2))
-        assertEquals(72, estimateSendVsize(0))
+    fun `the send vsize estimate is the worst case — two 43-byte outputs, rounded up`() {
+        // Not a linear guess any more: the same ceiling arithmetic the planner
+        // uses, run on the largest output this wallet can build (a P2TR output:
+        // 8 + 1 + 34 = 43 bytes, i.e. a 34-byte scriptPubKey). 1 input:
+        // 4·137 + 111 = 659 weight units, ceil(659/4) = 165 — 25 vB above the
+        // 140 the old constant claimed, which is headroom, not a guess.
+        assertEquals(165, estimateSendVsize(1))
+        assertEquals(233, estimateSendVsize(2))
+        assertEquals(97, estimateSendVsize(0))
     }
 
     // --- maxSendableSatoshis ------------------------------------------------
 
     @Test
     fun `the max spendable subtracts the estimated fee at the given rate`() {
-        // 2 inputs → 208 vB; at 1 sat/vB that is 208 sats.
-        assertEquals(99_792L, maxSendableSatoshis(100_000L, 2, 1L))
-        // …and at 5 sat/vB, 208 * 5 = 1_040 sats.
-        assertEquals(98_960L, maxSendableSatoshis(100_000L, 2, 5L))
+        // 2 inputs → 233 vB; at 1 sat/vB that is 233 sats.
+        assertEquals(99_767L, maxSendableSatoshis(100_000L, 2, 1L))
+        // …and at 5 sat/vB, 233 * 5 = 1_165 sats.
+        assertEquals(98_835L, maxSendableSatoshis(100_000L, 2, 5L))
     }
 
     @Test
     fun `the max spendable multiplies the exact vsize by the rate`() {
-        // 1 input → 140 vB; 140 * 3 = 420.
-        assertEquals(100_000L - 140L * 3L, maxSendableSatoshis(100_000L, 1, 3L))
-        assertEquals(100_000L - 72L * 7L, maxSendableSatoshis(100_000L, 0, 7L))
+        // 1 input → 165 vB; 165 * 3 = 495.
+        assertEquals(100_000L - 165L * 3L, maxSendableSatoshis(100_000L, 1, 3L))
+        assertEquals(100_000L - 97L * 7L, maxSendableSatoshis(100_000L, 0, 7L))
     }
 
     @Test
     fun `the max spendable floors at zero when the fee would exceed the total`() {
         assertEquals(0L, maxSendableSatoshis(100L, 2, 5L))
         assertEquals(0L, maxSendableSatoshis(0L, 1, 1L))
-        assertEquals(0L, maxSendableSatoshis(208L, 2, 1L))
+        // Exactly the worst-case fee for 2 inputs: nothing is spendable.
+        assertEquals(0L, maxSendableSatoshis(233L, 2, 1L))
     }
 
     // --- splitAddressEdges --------------------------------------------------

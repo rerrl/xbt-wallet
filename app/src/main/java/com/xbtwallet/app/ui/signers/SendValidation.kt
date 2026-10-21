@@ -104,13 +104,21 @@ fun parseFeeRate(input: String): Long? {
  * Moved to `chain/` when the send flow grew a planner: the fee estimate is what
  * a *transaction* is built from ([com.xbtwallet.app.chain.planSend]), and the
  * chain layer must not reach up into the UI. It is imported here so the form's
- * "Max" and the planner's fee are the same number by construction. See
- * [estimateSendVsize] for the weights.
+ * "Max" and the planner's fee are reasoned about together. See
+ * [estimateSendVsize] for why this one is the **worst case** (two taproot-sized
+ * outputs) while the planner computes its own from the outputs it really builds.
  */
 
 /**
  * The most that can be sent out of [totalSatoshis] selected coins without the
  * estimated fee eating into it, or 0 when the fee would take everything.
+ *
+ * The estimate here is the **worst case** ([estimateSendVsize]: two
+ * taproot-sized outputs), because the form computes this before the address has
+ * been resolved to a script. That is deliberate: "Max" must never promise an
+ * amount the planner then cannot pay for. The planner, which *does* know the
+ * outputs, prices them exactly — so the fee it charges is ≤ this estimate, never
+ * more.
  *
  * This is recomputed whenever the fee rate changes — the max spendable is a
  * property of the fee, not a constant — and it is floored at 0 rather than
