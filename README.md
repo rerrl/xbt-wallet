@@ -1,61 +1,36 @@
 # xbt-wallet
 
-An **XBT / SeedSigner coordinator** — a SeedSigner-first, watch-only Android
-overview for **XBT** (the Bitcoin BLAKE2b fork), built for GrapheneOS. Keys
-never touch the phone: the app is a coordinator that pairs with an air-gapped
-signer over animated QR. It is a watch-only overview of balances and addresses,
-not a wallet. MIT licensed. See [PLAN.md](PLAN.md) for the full plan and
-roadmap.
+**Your keys never touch your phone.** xbt-wallet is an air-gapped coordinator for **XBT** (the Bitcoin BLAKE2b fork) that pairs with your SeedSigner over animated QR codes. The app watches your balances, builds your transactions, and hands them to the signer to sign — the seed stays on the signer, where it belongs. Built for GrapheneOS. MIT licensed. Zero Google dependencies.
 
-Status: **v0.1.0 in progress** — the skeleton, the crypto layer, and the
-wallet-first restructure (the unit the app organises around is a **wallet**; the
-physical device is the **signer**):
+## Why xbt-wallet
 
-- **Wallets** — the app's unit of organisation. A wallet is a name plus a type,
-  and today the only type is a watch-only xpub. Wallets are a plain list (there is
-  no "active wallet"), and everything that acts on one happens on that wallet's
-  own screen.
-- **Add wallet** — a chooser of three rows: **SeedSigner** and **Other signing
-  device** both read an animated BC-UR export (the *Export Xpub → single-sig →
-  native segwit → Animated* path on a SeedSigner; Keystone and Jade the same way),
-  and **Watch-only xpub** scans a plain text QR, where an
-  account-level `xpub`/`ypub`/`zpub` is validated clean-room (Base58Check, version
-  bytes, compressed key, checksum) and stored as a watch-only wallet. The row the
-  user tapped is what the wallet records as its *origin*, which is what it wears
-  as a tag: orange *seedsigner*, blue *signing device*, or grey *watch-only*.
-- **Wallets list** — every saved wallet, oldest first, with its tag and a
-  head…tail key snippet; tap to open, **⋮** → *Remove wallet* (with a confirm
-  dialog) to delete.
-- **Wallet screen** — one wallet's own screen: its **live balance** from your
-  own Electrum server (sats first, then the coin amount and two clearly-marked
-  placeholder fiat lines), then **UTXOs**, **Addresses**, and **Send**/**Receive**
-  shown disabled until the air-gapped signing flow exists, with the account's
-  **transaction history** at the foot of the screen.
-- **Transactions (on the wallet screen)** — every transaction touching any
-  scanned address of the account (both chains), deduped by txid and ordered
-  *unconfirmed first, then newest block first*, capped at the latest 50. Each row
-  shows the wallet's **net effect** — `+0.00012345 XBT in` in green, `-0.00012345
-  XBT out` in red — plus a confirmation badge: red *Unconfirmed*, amber `N confs`
-  for 1–5, green `6+ confs`. The net amount is read from the transactions
-  themselves (the scan's `get_history` answers say a tx touched an address, not
-  which way value moved), so change returning to our own addresses is counted on
-  the incoming side and a send reads as `-(payment + fee)`. Rows are static: no
-  tap-to-copy and no detail view.
-- **UTXO list** — every spendable output the scan found: amount, outpoint,
-  address chain/index, and confirmation height (or *unconfirmed*).
-- **Addresses viewer** — derived native-segwit receive/change addresses per
-  account key, now annotated with on-chain usage: *used*, *unused*, or the
-  highlighted *first unused*.
-- **Private Electrum server** — enter host/port, flip the **Use SSL** switch,
-  hit *Test connection* and watch the Electrum JSON-RPC handshake in an on-screen
-  log. A host ending in `.onion` is routed through the app's **bundled Tor** (no
-  Orbot); any other host is dialled directly.
+- **Send, fully air-gapped.** Pick the exact coins to spend, finalize the transaction on the phone, and sign it on your SeedSigner through animated QR codes — then broadcast from the app. Nothing ever asks you for a seed, because the app has nowhere to put one.
+- **Replay protected.** Every transaction is signed with SIGHASH_ALL + SIGHASH_UNIFIED, and the app refuses to broadcast anything signed without it. Your coins cannot be replayed onto another chain.
+- **Your own server, your own privacy.** The app talks only to *your* Electrum server. `.onion` endpoints are reached through the bundled Tor — no Orbot, no third-party servers, no price feeds phoning home.
+- **Made for SeedSigner.** The whole flow is designed around the device you already carry: import by scanning its animated xpub export, sign by scanning its animated transaction QR. Keystone and Jade speak the same language and work the same way.
+- **No Google, ever.** No Play Services, no Firebase, no ML Kit — built for GrapheneOS and headed for F-Droid.
 
-All crypto is public-key only: no private key, seed or signing code exists
-anywhere in this repository. The receive QR and sending are
-still missing, and the two fiat figures on the wallet screen are **hardcoded
-placeholders** — this build requests no price feed from anyone. Tor is bundled
-for `.onion` endpoints only; clearnet connections to a LAN node stay direct.
+## How a send works
+
+1. **Choose your coins.** On the UTXO screen, tap the outputs you want to spend and hit *Send selected*.
+2. **Build the transaction.** Recipient (type it or scan a QR), amount (with a fee-aware *Max*), fee rate, and an optional label — then *Finalize transaction for signing*.
+3. **Sign on the SeedSigner.** The phone shows the unsigned transaction as a big animated QR. On the SeedSigner: *Scan → Sign*, review the details — change comes back to a verified address — and let it show the signed transaction QR.
+4. **Scan it back.** Hit *Scan QR* in the app and read the signed transaction off the SeedSigner's screen.
+5. **Broadcast.** One button sends it to your Electrum server. It shows up in your history as unconfirmed until the next block.
+
+Watching is just as simple: add a wallet by scanning the SeedSigner's animated xpub export (*Export Xpub → single-sig → native segwit → Animated*), and the app keeps its balance, UTXOs, addresses and transaction history in sync from your server.
+
+## Status and roadmap
+
+v0.1.0 in progress. Air-gapped watch + send with a SeedSigner (or any BC-UR signing device) works end to end against your own Electrum server. The two fiat figures on the wallet screen are clearly-marked placeholders — the app requests no price feed. On the roadmap: a hot wallet for small everyday spends, and more.
+
+## Appendix
+
+The sections below are the detailed, technical documentation: screen-by-screen behaviour, the navigation model, key validation, and the chain-sync design. For the full plan see [PLAN.md](PLAN.md).
+
+---
+
+## Technical appendix
 
 ## Home screen
 
@@ -200,9 +175,9 @@ saved at all there is no error to show — the card says *Connect a server* and
 explains that balances come from the user's own server and nobody else's.
 
 Under the balance sit **UTXOs** and **Addresses** (each opens its own screen,
-see below) and **Send**/**Receive**, shown disabled with *coming soon*: sending
-is the air-gapped QR flow, which does not exist yet, and a wallet that offers a
-Send button that cannot send is a wallet that lies.
+see below) and **Send**/**Receive**, with Send live for a signing-ready wallet:
+sending is the air-gapped QR flow, and a wallet that offers a Send button that
+cannot send is a wallet that lies.
 
 Two fiat lines dress the same balance in hardcoded placeholder rates, each
 labelled as such: the XBT figure at **$420.69/XBT** and, because BTC and XBT
@@ -219,7 +194,7 @@ left and a confirmation badge on the right, with the truncated txid underneath:
 `+0.00012345 XBT in` in green when value arrived, `-0.00012345 XBT out` in red
 when it left, and a neutral amount when the two sides cancel (a self-send).
 The badge is red *Unconfirmed*, amber `N confs` for one to five, and green
-`6+ confs` from six blocks.
+`N confs` from six, capped at `100+ confs`.
 
 The net amount is computed from the transactions themselves: the scan's
 `get_history` answers only say a tx touched an address, so the row fetches each
