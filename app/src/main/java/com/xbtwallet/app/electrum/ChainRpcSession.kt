@@ -95,9 +95,33 @@ class ChainRpcSession internal constructor(
             is String -> result
             is Map<*, *> -> result["hex"] as? String
                 ?: throw ElectrumException("block.header did not answer with hex: ${MiniJson.encode(result)}")
+
             else -> throw ElectrumException("block.header did not answer with hex: ${MiniJson.encode(result)}")
         }
     }
+
+    /**
+     * `blockchain.transaction.broadcast`: send the raw transaction and return
+     * its id.
+     *
+     * The success answer is the txid as a hex string. A server that **refuses**
+     * the transaction answers with its reason — some builds raise a JSON-RPC
+     * error (which [ElectrumClient]'s `rpc` turns into an [ElectrumException]
+     * before this sees it), and some return the reason text in place of a txid.
+     * The second shape is what this guards: a string that is not a 64-hex txid
+     * goes back as the reason, never as a txid a caller could believe.
+     */
+    override fun broadcast(txHex: String): String {
+        val result = call("blockchain.transaction.broadcast", listOf(txHex))
+        val answer = result as? String
+            ?: throw ElectrumException("transaction.broadcast did not answer with a txid: ${MiniJson.encode(result)}")
+        if (!isTxid(answer)) throw ElectrumException("the server rejected the transaction: $answer")
+        return answer.lowercase()
+    }
+
+    /** True when [value] is 64 hex digits — the shape of a txid. */
+    private fun isTxid(value: String): Boolean =
+        value.length == 64 && value.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' }
 
     private fun Map<*, *>.string(key: String): String = this[key] as? String
         ?: throw ElectrumException("reply field '$key' is missing or not a string: ${MiniJson.encode(this)}")

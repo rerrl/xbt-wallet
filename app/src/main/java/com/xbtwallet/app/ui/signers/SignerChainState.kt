@@ -303,6 +303,25 @@ class SignerChainState(
     /** Re-runs the scan, whatever the current phase — the Refresh/Retry button. */
     suspend fun reload() = scanNow(snapshot)
 
+    /**
+     * Broadcasts a raw, signed transaction over the same plumbing a scan uses —
+     * [ElectrumClient.withChainSession] on the configured endpoint, so a `.onion`
+     * server goes through the bundled Tor exactly as every other chain read does.
+     *
+     * It deliberately does **not** scan afterwards: the caller decides when to
+     * refresh, so a screen can show the broadcast's own result before the list
+     * underneath it changes. A broadcast that the server refuses throws with the
+     * server's reason text (see [ChainQuery.broadcast]); a missing endpoint is a
+     * sentence rather than a failure.
+     *
+     * @return the broadcast transaction's id, lowercase hex.
+     */
+    suspend fun broadcastTransaction(txHex: String): String {
+        val server = configuredServer()
+            ?: throw ElectrumException("no Electrum server is configured \u2014 connect one from the home screen first")
+        return ElectrumClient(server = server, log = {}).withChainSession { query -> query.broadcast(txHex) }
+    }
+
     // ---- the live subscription's lifecycle ---------------------------------
 
     /**
@@ -899,6 +918,8 @@ private class LiveSubscriptionSession(
     override fun getTipHeight(): Int = session.getTipHeight()
 
     override fun blockHeader(height: Int): String = session.blockHeader(height)
+
+    override fun broadcast(txHex: String): String = session.broadcast(txHex)
 
     override fun close() = session.close()
 }

@@ -61,4 +61,20 @@ interface ChainQuery {
      * height and no time, and the time lives in the header.
      */
     fun blockHeader(height: Int): String
+
+    /**
+     * Broadcasts a raw, signed transaction — what
+     * [`blockchain.transaction.broadcast`] answers, a txid.
+     *
+     * The one **write** in this interface: everything else is a read the wallet
+     * can repeat harmlessly. A server that rejects the transaction answers with
+     * its reason (a JSON-RPC error, or a refusal string in place of the txid),
+     * and implementations must surface that reason as an exception rather than
+     * inventing a txid — a caller that believed one would tell the user the
+     * payment was away when it was not.
+     *
+     * @return the broadcast transaction's id, as lowercase display-order hex.
+     * @throws Exception with the server's own reason text when it is rejected.
+     */
+    fun broadcast(txHex: String): String
 }

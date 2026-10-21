@@ -1,7 +1,9 @@
 package com.xbtwallet.app.ui.signers
 
+import com.xbtwallet.app.chain.estimateSendVsize
 import com.xbtwallet.app.crypto.Bech32
 import com.xbtwallet.app.crypto.Bech32Exception
+import com.xbtwallet.app.crypto.ExtendedPublicKey
 import com.xbtwallet.app.crypto.SegwitAddress
 
 /**
@@ -99,14 +101,12 @@ fun parseFeeRate(input: String): Long? {
  * The estimated size, in virtual bytes, of a send that spends [inputCount]
  * P2WPKH inputs and carries two outputs: the recipient and the change.
  *
- * Deliberately conservative, and hard-coded rather than derived: the wallet
- * only ever spends P2WPKH (BIP-84) inputs, so the weights are known without
- * knowing anything about the actual UTXOs. 10 vB of transaction overhead, 68 vB
- * per input, and 62 vB for the two outputs. Guessing high costs the user a few
- * sats of headroom; guessing low would hand them a fee estimate their wallet
- * cannot pay, which is the worse error.
+ * Moved to `chain/` when the send flow grew a planner: the fee estimate is what
+ * a *transaction* is built from ([com.xbtwallet.app.chain.planSend]), and the
+ * chain layer must not reach up into the UI. It is imported here so the form's
+ * "Max" and the planner's fee are the same number by construction. See
+ * [estimateSendVsize] for the weights.
  */
-fun estimateSendVsize(inputCount: Int): Int = 10 + 68 * inputCount + 62
 
 /**
  * The most that can be sent out of [totalSatoshis] selected coins without the
@@ -159,4 +159,45 @@ fun splitAddressEdges(address: String): Triple<String, String, String> {
         address.substring(8, address.length - 8),
         address.substring(address.length - 8),
     )
+}
+
+/**
+ * A derivation path written the way a signer writes it — `84'/0'/0'` — as the
+ * absolute path a PSBT's BIP32 derivation carries: one unsigned 32-bit step per
+ * component, with the hardened flag ([ExtendedPublicKey.HARDENED_OFFSET]) in bit
+ * 31 of a component marked hardened (`'`, `h` or `H`).
+ *
+ * The stored path is the *account* path (`84'/0'/0'`); the send flow appends the
+ * chain and index of the coin being spent to get each input's absolute path.
+ *
+ * @throws IllegalArgumentException when a component is not a number in range.
+ */
+fun parseDerivationPath(path: String): List<Long> =
+    path.split('/')
+        .filter { it.isNotBlank() }
+        .map { component ->
+            val hardened = component.endsWith("'") || component.endsWith("h") || component.endsWith("H")
+            val digits = component.dropLast(if (hardened) 1 else 0)
+            val index = digits.toLongOrNull()
+                ?: throw IllegalArgumentException("'$component' is not a path step")
+            require(index in 0 until ExtendedPublicKey.HARDENED_OFFSET) {
+                "path step $component is out of range"
+            }
+            if (hardened) index or ExtendedPublicKey.HARDENED_OFFSET else index
+        }
+
+/**
+ * A master fingerprint written as eight hex digits — the form the signer record
+ * stores — as the four bytes a PSBT's BIP32 derivation carries.
+ *
+ * @throws IllegalArgumentException when the string is not exactly eight hex digits.
+ */
+fun masterFingerprintBytes(hex: String): ByteArray {
+    val trimmed = hex.trim()
+    require(trimmed.length == 8) { "a master fingerprint is eight hex digits, got '$hex'" }
+    return ByteArray(4) { i ->
+        val value = trimmed.substring(i * 2, i * 2 + 2).toIntOrNull(16)
+            ?: throw IllegalArgumentException("'$hex' is not a hex fingerprint")
+        value.toByte()
+    }
 }

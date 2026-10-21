@@ -1,5 +1,6 @@
 package com.xbtwallet.app.ui.signers
 
+import com.xbtwallet.app.chain.estimateSendVsize
 import com.xbtwallet.app.crypto.SegwitAddress
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull

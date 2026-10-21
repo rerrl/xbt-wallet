@@ -591,5 +591,8 @@ class TransactionDetailsTest {
             headerCalls += height
             return blockHeaders[height] ?: throw IllegalStateException("no header fixture for height $height")
         }
+
+        override fun broadcast(txHex: String): String =
+            throw UnsupportedOperationException("this fake does not broadcast")
     }
 }
