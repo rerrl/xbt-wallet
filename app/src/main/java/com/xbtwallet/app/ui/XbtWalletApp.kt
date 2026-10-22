@@ -256,7 +256,6 @@ fun XbtWalletApp() {
                     appSettings.keepScreenOnWhileOpen = checked
                 },
                 onOpenServer = { nav.push(Route(Screen.SERVER)) },
-                onAddSigner = { nav.push(Route(Screen.ADD_SIGNER)) },
                 onOpenSigners = { nav.push(Route(Screen.SIGNERS)) },
             )
         }

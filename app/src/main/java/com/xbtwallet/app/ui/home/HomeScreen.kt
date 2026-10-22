@@ -1,7 +1,6 @@
 package com.xbtwallet.app.ui.home
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -511,16 +510,21 @@ fun rememberHomeScreenState(
  * Home screen — the app's hub, and its statement of what the app is: a
  * coordinator holding xpubs, not a wallet holding keys.
  *
- * Top to bottom: **Server** (private Electrum endpoint) with its live status
- * line, then the two things you do with wallets — **Add wallet** and
- * **Wallets** — then a small **Preferences** section (see below). The old
- * standalone "Import xpub", "Select active xpub" and
+ * This screen is navigation and app-level setup only. Top to bottom:
+ * **Preferences** (the app-level flags — see below), then **Server** (private
+ * Electrum endpoint) with its live status line, then the flexible space, then
+ * **Wallets** with the wallet count pinned to the bottom, then the footer
+ * tagline.
+ *
+ * **Add wallet is not on this screen.** It lives at the top of the Wallets
+ * screen now, next to the list it adds to, so adding a wallet and browsing the
+ * wallets are one destination. Home keeps only the two app-level things — the
+ * Preferences switch and the Server endpoint — plus the one way into the wallet
+ * list. The old standalone "Import xpub", "Select active xpub" and
  * "Addresses" buttons are gone: xpubs are wallets now, they live in a list
  * rather than behind an "active" selection, and everything that works on one
- * wallet (addresses included) is reached by opening that wallet. **Add wallet**
- * opens the three-row chooser (SeedSigner / other signing device / watch-only
- * xpub) and **Wallets** the list of what is saved; a wallet's own detail screen
- * is where the rest lives.
+ * wallet (addresses included) is reached by opening that wallet on the Wallets
+ * screen; a wallet's own detail screen is where the rest lives.
  *
  * Under the Server button the screen shows the live connection status: the
  * "connect your own server" hint until an endpoint is saved, then a dot with
@@ -533,7 +537,7 @@ fun rememberHomeScreenState(
  *
  * The screen owns no state: it renders [state] and forwards taps.
  *
- * **Preferences.** Below the signer buttons sits a small *Preferences* section
+ * **Preferences.** At the top of the screen sits a small *Preferences* section
  * with the app-level flags — today just *Keep screen on while app is open*, which
  * holds the display on the whole time the app is in the foreground, so the
  * screen never sleeps out from under a scan or out from under the user reading a
@@ -552,7 +556,6 @@ fun HomeScreen(
     keepScreenOn: Boolean,
     onKeepScreenOnChange: (Boolean) -> Unit,
     onOpenServer: () -> Unit,
-    onAddSigner: () -> Unit,
     onOpenSigners: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -563,64 +566,12 @@ fun HomeScreen(
                 .padding(innerPadding)
                 .padding(horizontal = 24.dp, vertical = 32.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
         ) {
-            // 1. Server first: it is the one setup step that has nothing to do
-            //    with keys, so the screen reads as "configure, then wallets".
-            OutlinedButton(
-                onClick = onOpenServer,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Server")
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Live server status: the facts (configured? reachable?) are the
-            // state's, this only renders them.
-            ServerStatusLine(status = state.serverStatus, torProgressPercent = state.torProgressPercent)
-
-            Spacer(modifier = Modifier.height(28.dp))
-
-            // 2. Add a wallet — the one way in.
-            Button(
-                onClick = onAddSigner,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Add wallet")
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // 3. The saved wallets. Always tappable: the list screen is where an
-            //    empty list explains itself.
-            Button(
-                onClick = onOpenSigners,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Wallets")
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = when (state.signers.size) {
-                    0 -> "No wallet yet — add one to begin."
-                    1 -> "1 wallet."
-                    else -> "${state.signers.size} wallets."
-                },
-                style = MaterialTheme.typography.bodySmall,
-                textAlign = TextAlign.Center,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            Spacer(modifier = Modifier.height(32.dp))
-
-            // 4. Preferences — app-level behaviour, not per-signer setup. One
-            //    switch today: holding the screen on the whole time the app is
-            //    open in the foreground, so it cannot sleep mid-scan or mid-read.
-            //    Flipping it writes straight through to the store (the caller owns
-            //    that).
+            // 1. Preferences at the top — app-level behaviour, not per-signer
+            //    setup. One switch today: holding the screen on the whole time
+            //    the app is open in the foreground, so it cannot sleep mid-scan
+            //    or mid-read. Flipping it writes straight through to the store
+            //    (the caller owns that).
             Text(
                 text = "Preferences",
                 style = MaterialTheme.typography.labelMedium,
@@ -643,6 +594,49 @@ fun HomeScreen(
                     onCheckedChange = onKeepScreenOnChange,
                 )
             }
+
+            Spacer(modifier = Modifier.height(28.dp))
+
+            // 2. Server underneath: it is the one setup step that has nothing to
+            //    do with keys.
+            OutlinedButton(
+                onClick = onOpenServer,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Server")
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Live server status: the facts (configured? reachable?) are the
+            // state's, this only renders them.
+            ServerStatusLine(status = state.serverStatus, torProgressPercent = state.torProgressPercent)
+
+            // 3. Flexible space, so the wallet cluster below is pinned to the
+            //    bottom of the screen, within thumb reach.
+            Spacer(modifier = Modifier.weight(1f))
+
+            // 4. The saved wallets. Always tappable: the list screen is where an
+            //    empty list explains itself and where a wallet is added.
+            Button(
+                onClick = onOpenSigners,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Wallets")
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = when (state.signers.size) {
+                    0 -> "No wallet yet — add one to begin."
+                    1 -> "1 wallet."
+                    else -> "${state.signers.size} wallets."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                textAlign = TextAlign.Center,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
 
             Spacer(modifier = Modifier.height(24.dp))
 
@@ -747,7 +741,6 @@ private fun HomeScreenPreview() {
             keepScreenOn = true,
             onKeepScreenOnChange = {},
             onOpenServer = {},
-            onAddSigner = {},
             onOpenSigners = {},
         )
     }
@@ -766,7 +759,6 @@ private fun HomeScreenEmptyPreview() {
             keepScreenOn = true,
             onKeepScreenOnChange = {},
             onOpenServer = {},
-            onAddSigner = {},
             onOpenSigners = {},
         )
     }

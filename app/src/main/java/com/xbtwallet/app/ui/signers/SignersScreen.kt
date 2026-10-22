@@ -57,6 +57,12 @@ import com.xbtwallet.app.ui.theme.XbtPrimary
  * Deletion is a two-step (menu → confirm dialog) on purpose: a watch-only xpub
  * is the only record of an account on this phone, so a stray tap must not be
  * able to lose it.
+ *
+ * **Add wallet is the primary action at the top of this screen** — it moved
+ * here from Home, so adding a wallet happens next to the list it adds to. Below
+ * the header and that button, the wallet list occupies the bottom half of the
+ * screen: the rows are pinned to the bottom edge for one-handed reach, which is
+ * where a thumb naturally lands.
  */
 @Composable
 fun SignersScreen(
@@ -89,9 +95,20 @@ fun SignersScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
+            // The primary action, at the top and in both states — the same
+            // button whether or not a wallet exists (it moved here from Home).
+            Button(
+                onClick = onAddSigner,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Add wallet")
+            }
+
             if (signers.isEmpty()) {
-                // The empty state does the explaining and offers the way out of
-                // itself, so an empty list is never a dead end.
+                // The empty state does the explaining; the way out of itself is
+                // the Add wallet button above, so an empty list is never a dead
+                // end.
+                Spacer(modifier = Modifier.height(16.dp))
                 Text(
                     text = "No wallets yet.",
                     style = MaterialTheme.typography.bodyMedium,
@@ -104,36 +121,35 @@ fun SignersScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Spacer(modifier = Modifier.height(16.dp))
-                Button(
-                    onClick = onAddSigner,
-                    modifier = Modifier.fillMaxWidth(),
+            } else {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Tap a wallet to open it. Its xpub stays on this phone.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                // Flexible space, then the list in the bottom half of the
+                // screen: Arrangement.Bottom pins the rows to its bottom edge,
+                // so the wallets sit within thumb reach.
+                Spacer(modifier = Modifier.weight(1f))
+
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.Bottom),
                 ) {
-                    Text("Add wallet")
-                }
-                return@Column
-            }
-
-            Text(
-                text = "Tap a wallet to open it. Its xpub stays on this phone.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                items(signers, key = { it.id }) { signer ->
-                    SignerRow(
-                        signer = signer,
-                        onClick = { onOpenSigner(signer) },
-                        menuOpen = menuForId == signer.id,
-                        onMenuOpenChange = { open -> menuForId = if (open) signer.id else null },
-                        onRemoveClick = {
-                            menuForId = null
-                            confirmingDeleteId = signer.id
-                        },
-                    )
+                    items(signers, key = { it.id }) { signer ->
+                        SignerRow(
+                            signer = signer,
+                            onClick = { onOpenSigner(signer) },
+                            menuOpen = menuForId == signer.id,
+                            onMenuOpenChange = { open -> menuForId = if (open) signer.id else null },
+                            onRemoveClick = {
+                                menuForId = null
+                                confirmingDeleteId = signer.id
+                            },
+                        )
+                    }
                 }
             }
         }
