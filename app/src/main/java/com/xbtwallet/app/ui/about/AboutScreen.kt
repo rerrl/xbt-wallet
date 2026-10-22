@@ -72,8 +72,7 @@ fun AboutScreen(
                 text = "XBT Wallet is a watch-only coordinator for your air-gapped " +
                     "signer: it holds public keys only, so this phone can track " +
                     "balances and prepare transactions while your seed stays " +
-                    "offline.\n\nSample copy \u2014 the final about text lands in a " +
-                    "later pass.",
+                    "offline.",
                 style = MaterialTheme.typography.bodyMedium,
             )
         }

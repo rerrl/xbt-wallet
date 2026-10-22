@@ -589,11 +589,14 @@ fun HomeScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 24.dp, vertical = 32.dp),
+                .padding(start = 24.dp, end = 24.dp, top = 12.dp, bottom = 32.dp),
             horizontalAlignment = Alignment.Start,
         ) {
-            // 1. About at the very top: the way into what this app is.
-            TextButton(onClick = onOpenAbout) { Text("About") }
+            // 1. About at the very top, in the same header row the other screens
+            //    use for "← Back": the same 12.dp top padding, the same row shape.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onOpenAbout) { Text("About") }
+            }
 
             Spacer(modifier = Modifier.height(16.dp))
 
@@ -638,7 +641,7 @@ fun HomeScreen(
             Spacer(modifier = Modifier.height(20.dp))
 
             // 5. Wallets: the heading and the count, then the list itself.
-            Text("Wallets", style = MaterialTheme.typography.titleMedium)
+            Text("Wallets", style = MaterialTheme.typography.titleLarge)
 
             Spacer(modifier = Modifier.height(4.dp))
 
