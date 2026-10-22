@@ -125,7 +125,7 @@ class RouteCodecTest {
 
     @Test
     fun `legacy one- and two-segment strings decode unchanged`() {
-        assertEquals(Route(Screen.SIGNERS), Route.decode("SIGNERS"))
+        assertEquals(Route(Screen.SETTINGS), Route.decode("SETTINGS"))
         assertEquals(
             Route(Screen.SIGNER_ADDRESSES, signerId = "id-7"),
             Route.decode("SIGNER_ADDRESSES|id-7"),

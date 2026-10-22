@@ -1,33 +1,21 @@
 package com.xbtwallet.app.ui.signers
 
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
@@ -38,161 +26,25 @@ import com.xbtwallet.app.ui.theme.XbtDeviceTagDark
 import com.xbtwallet.app.ui.theme.XbtPrimary
 
 /**
- * The list of saved wallets — the app's inventory.
+ * The shared wallet-row components.
  *
- * Every wallet is here by the name the user gave it, with its *type* tag
- * ("watch-only", "seedsigner" or "signing device" — see [signerTagFor]) and a
- * head…tail snippet of its key. Nothing is selected and nothing is "active":
- * tapping a row opens that wallet's own screen, which is the only place a
- * per-wallet action lives.
+ * This file used to hold the standalone Wallets screen; that screen is retired
+ * and the wallet list now lives inline on the home landing page, so all that
+ * remains here are the pieces other screens draw a wallet with: [SignerRow] (one
+ * row of the list — name, a head…tail snippet of the key, the type tag and the
+ * ⋮ overflow menu) and [TypeBadge] (the little pill beside a wallet's name).
  *
- * The screen is otherwise stateless — [signers] is passed in from the same
- * [com.xbtwallet.app.ui.home.HomeScreenState] the home screen counts, so the two
- * screens can never disagree about what is saved. The only state it keeps is
- * local to the interaction: which row's overflow menu is open, and which wallet
- * is waiting on a delete confirmation. Neither outlives the screen, and neither
- * touches storage — removing a wallet is [onDeleteSigner]'s job, on the screen
- * that owns the store.
- *
- * Deletion is a two-step (menu → confirm dialog) on purpose: a watch-only xpub
- * is the only record of an account on this phone, so a stray tap must not be
- * able to lose it.
- *
- * **Add wallet is the primary action pinned to the bottom edge of this screen**
- * — it moved here from Home, so adding a wallet happens next to the list it adds
- * to. The screen reads top to bottom: the header, then the hint, then the wallet
- * list itself, which starts directly under the hint and fills everything that is
- * left. The button sits last, on the bottom edge for one-handed reach, which is
- * where a thumb naturally lands.
+ * [SignerRow] is `internal` so Home can reuse it; its rendering and its
+ * overflow-menu API are unchanged from when the Wallets screen owned it. A row
+ * still selects nothing and marks nothing "active": tapping it opens that
+ * wallet's own screen, which is the only place a per-wallet action lives, and
+ * the only state the row carries is which menu is open — passed in, so the
+ * caller decides. The tag itself comes from [signerTagFor], so the row and a
+ * signer's own screen cannot disagree about what a wallet is.
  */
-@Composable
-fun SignersScreen(
-    signers: List<Signer>,
-    onOpenSigner: (Signer) -> Unit,
-    onAddSigner: () -> Unit,
-    onDeleteSigner: (Signer) -> Unit,
-    onBack: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    // Which row's "⋮" menu is open, by signer id — one at a time.
-    var menuForId by remember { mutableStateOf<String?>(null) }
-
-    // Which signer is awaiting confirmation, by signer id. Saved across
-    // configuration changes so a rotation does not silently drop the question.
-    var confirmingDeleteId by rememberSaveable { mutableStateOf<String?>(null) }
-
-    Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .padding(horizontal = 20.dp, vertical = 12.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onBack) { Text("\u2190 Back") }
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("Wallets", style = MaterialTheme.typography.titleLarge)
-            }
-
-            if (signers.isEmpty()) {
-                // The empty state does the explaining; the way out of itself is
-                // the Add wallet button pinned to the bottom edge, so an empty
-                // list is never a dead end.
-                Spacer(modifier = Modifier.height(16.dp))
-                Text(
-                    text = "No wallets yet.",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "Add a wallet to watch an account: scan the account xpub " +
-                        "from your air-gapped signer and this phone can see it without " +
-                        "ever holding its keys.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-
-                // Flexible space, so the Add wallet button below still lands on
-                // the bottom edge of the screen.
-                Spacer(modifier = Modifier.weight(1f))
-            } else {
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "Tap a wallet to open it. Its xpub stays on this phone.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // The list starts at the top, directly under the hint, and takes
-                // every remaining pixel: the first wallet renders right below the
-                // hint and the list scrolls down from there.
-                LazyColumn(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    items(signers, key = { it.id }) { signer ->
-                        SignerRow(
-                            signer = signer,
-                            onClick = { onOpenSigner(signer) },
-                            menuOpen = menuForId == signer.id,
-                            onMenuOpenChange = { open -> menuForId = if (open) signer.id else null },
-                            onRemoveClick = {
-                                menuForId = null
-                                confirmingDeleteId = signer.id
-                            },
-                        )
-                    }
-                }
-            }
-
-            // The primary action, and the last thing on the screen: full-width
-            // and pinned to the bottom edge in both states, where a thumb
-            // naturally lands.
-            Button(
-                onClick = onAddSigner,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Add wallet")
-            }
-        }
-    }
-
-    // Resolve the pending id against the current list at render time: if the
-    // signer went away underneath us, there is nothing to confirm and the dialog
-    // simply is not shown.
-    val pendingDelete = confirmingDeleteId?.let { id -> signers.firstOrNull { it.id == id } }
-    if (pendingDelete != null) {
-        AlertDialog(
-            onDismissRequest = { confirmingDeleteId = null },
-            title = { Text("Remove wallet?") },
-            text = {
-                Text(
-                    "\u201c${pendingDelete.name}\u201d will be removed from this phone. " +
-                        "Only the public key is stored here, so nothing is deleted on " +
-                        "the signer itself \u2014 you can add it back any time.",
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        confirmingDeleteId = null
-                        onDeleteSigner(pendingDelete)
-                    },
-                ) {
-                    Text("Remove")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmingDeleteId = null }) { Text("Cancel") }
-            },
-        )
-    }
-}
 
 @Composable
-private fun SignerRow(
+internal fun SignerRow(
     signer: Signer,
     onClick: () -> Unit,
     menuOpen: Boolean,

@@ -118,7 +118,7 @@ class NavStackTest {
     @Test
     fun `a per-signer screen carries its own signer in the stack entry`() {
         val stack = NavStack()
-        stack.push(Route(Screen.SIGNERS))
+        stack.push(Route(Screen.SETTINGS))
         stack.push(Route(Screen.SIGNER_DETAIL, signerId = "id-7"))
         stack.push(Route(Screen.SIGNER_UTXOS, signerId = "id-7"))
 
@@ -131,7 +131,7 @@ class NavStackTest {
         assertEquals("id-7", stack.current.signerId)
 
         assertTrue(stack.pop())
-        assertEquals(Screen.SIGNERS, stack.current.screen)
+        assertEquals(Screen.SETTINGS, stack.current.screen)
         assertNull("a screen that needs no argument carries none", stack.current.signerId)
     }
 
@@ -154,8 +154,8 @@ class NavStackTest {
         // What saving the import form does: the walk must not sit under the list.
         stack.reset()
         assertEquals(listOf(Route(Screen.HOME)), stack.routes)
-        stack.push(Route(Screen.SIGNERS))
-        assertEquals(listOf(Route(Screen.HOME), Route(Screen.SIGNERS)), stack.routes)
+        stack.push(Route(Screen.SETTINGS))
+        assertEquals(listOf(Route(Screen.HOME), Route(Screen.SETTINGS)), stack.routes)
 
         stack.reset(Route(Screen.SERVER))
         assertEquals(listOf(Route(Screen.SERVER)), stack.routes)
@@ -165,7 +165,7 @@ class NavStackTest {
     @Test
     fun `the saver round-trips the stack with its arguments`() {
         val stack = NavStack()
-        stack.push(Route(Screen.SIGNERS))
+        stack.push(Route(Screen.SETTINGS))
         // A real signer id: a UUID (see SignerStore). Ids never contain the `|`
         // the route string is split on, so each entry's arguments come back
         // intact; see RouteCodecTest for the codec's own rules.

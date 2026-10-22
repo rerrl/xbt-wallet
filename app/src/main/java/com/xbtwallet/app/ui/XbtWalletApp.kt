@@ -24,10 +24,12 @@ import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerOrigin
 import com.xbtwallet.app.data.SignerStore
 import com.xbtwallet.app.data.SnapshotStore
+import com.xbtwallet.app.ui.about.AboutScreen
 import com.xbtwallet.app.ui.home.HomeScreen
 import com.xbtwallet.app.ui.home.rememberHomeScreenState
 import com.xbtwallet.app.ui.server.ServerScreen
 import com.xbtwallet.app.ui.server.rememberServerScreenState
+import com.xbtwallet.app.ui.settings.SettingsScreen
 import com.xbtwallet.app.ui.addresses.AddressesScreen
 import com.xbtwallet.app.ui.receive.ReceiveScreen
 import com.xbtwallet.app.ui.signers.AddSignerScreen
@@ -37,7 +39,6 @@ import com.xbtwallet.app.ui.signers.ImportXpubScreen
 import com.xbtwallet.app.ui.signers.SignerChainStateStore
 import com.xbtwallet.app.ui.signers.SignerDetailScreen
 import com.xbtwallet.app.ui.signers.SendScreen
-import com.xbtwallet.app.ui.signers.SignersScreen
 import com.xbtwallet.app.ui.signers.UtxosScreen
 import com.xbtwallet.app.ui.signers.rememberAddSigningDeviceScreenState
 import com.xbtwallet.app.ui.signers.rememberImportXpubScreenState
@@ -59,17 +60,17 @@ import kotlinx.coroutines.launch
  * name, not a route); it rides in the [Route] that carries this screen onto the
  * back stack, so each level remembers its own argument. See [NavStack].
  */
-enum class Screen { HOME, SERVER, SIGNERS, ADD_SIGNER, IMPORT_XPUB, ADD_SIGNING_DEVICE, SIGNER_DETAIL, SIGNER_UTXOS, SIGNER_ADDRESSES, RECEIVE, SEND }
+enum class Screen { HOME, SERVER, SETTINGS, ABOUT, ADD_SIGNER, IMPORT_XPUB, ADD_SIGNING_DEVICE, SIGNER_DETAIL, SIGNER_UTXOS, SIGNER_ADDRESSES, RECEIVE, SEND }
 
 /**
  * The app's navigation and its shared stores.
  *
  * [rememberHomeScreenState] is held here rather than inside the home composable
- * because two screens agree on the same fact — which signers are saved. The
- * Signers list reads the same snapshot the home screen counts, so one instance
- * at the navigation level is the cheapest way to keep them consistent. The
- * `when` below only ever renders one screen at a time, so the state is never
- * observed from two places at once.
+ * because the wallet list and the count above it agree on the same fact — which
+ * signers are saved. Both read the same snapshot, so one instance at the
+ * navigation level is the cheapest way to keep them consistent. The `when` below
+ * only ever renders one screen at a time, so the state is never observed from two
+ * places at once.
  *
  * There is no active-signer state any more: signers are a plain list, and
  * anything that acts on one acts inside that signer's own screen.
@@ -107,10 +108,10 @@ enum class Screen { HOME, SERVER, SIGNERS, ADD_SIGNER, IMPORT_XPUB, ADD_SIGNING_
  * `SIGNING_DEVICE_UR` respectively — the origin rides on the route), and
  * **Watch-only xpub** pushes [Screen.IMPORT_XPUB]. So back from any form returns
  * to the chooser that sent you there. All three save into the same store through
- * the same call. Saving resets the stack to HOME → [Screen.SIGNERS]
- * rather than pushing on top of the form: the new wallet is immediately visible
- * where the add most often starts, and a back press from the list goes Home, not
- * back into a form that has already been submitted.
+ * the same call. Saving resets the stack to HOME rather than pushing on top of
+ * the form: the wallet list lives on Home now, so the new wallet is immediately
+ * visible where the add most often starts, and a back press from there leaves the
+ * app rather than reopening a form that has already been submitted.
  */
 @Composable
 fun XbtWalletApp() {
@@ -164,9 +165,9 @@ fun XbtWalletApp() {
 
     // --- One screen-on flag for the whole app --------------------------------
     //
-    // The screen-on preference as Compose state, so flipping the switch on Home
-    // recomposes the effect below at once; every change is written straight back
-    // to the store.
+    // The screen-on preference as Compose state, so flipping the switch on
+    // Settings recomposes the effect below at once; every change is written
+    // straight back to the store.
     var keepScreenOn by remember { mutableStateOf(appSettings.keepScreenOnWhileOpen) }
 
     // While the preference is on, the app holds the display on for as long as it
@@ -248,15 +249,34 @@ fun XbtWalletApp() {
                 }
             }
 
+            // The landing page, and the wallet list itself: a row opens that
+            // wallet's own screen, and removing one is the row's ⋮ overflow menu
+            // (the store write lives in [onDeleteSigner] below).
             HomeScreen(
                 state = homeState,
-                keepScreenOn = keepScreenOn,
-                onKeepScreenOnChange = { checked ->
-                    keepScreenOn = checked
-                    appSettings.keepScreenOnWhileOpen = checked
+                onOpenAbout = { nav.push(Route(Screen.ABOUT)) },
+                onOpenSettings = { nav.push(Route(Screen.SETTINGS)) },
+                onOpenSigner = { signer: Signer ->
+                    nav.push(Route(Screen.SIGNER_DETAIL, signerId = signer.id))
                 },
-                onOpenServer = { nav.push(Route(Screen.SERVER)) },
-                onOpenSigners = { nav.push(Route(Screen.SIGNERS)) },
+                onAddSigner = { nav.push(Route(Screen.ADD_SIGNER)) },
+                onDeleteSigner = { signer: Signer ->
+                    // The one place a signer is removed: the screen that owns the
+                    // store. Re-read through Home so the list (which renders
+                    // Home's snapshot) drops the row immediately, and any detail
+                    // entry still on the stack — should there be one — stops
+                    // resolving (that branch restarts at Home).
+                    signerStore.delete(signer.id)
+                    // Drop this signer's cached scan too, so a later signer that
+                    // happens to reuse the id can never open on another account's
+                    // addresses, UTXOs or balance.
+                    snapshotStore.clear(signer.id)
+                    // And forget its in-memory chain state: this cancels any scan
+                    // still in flight for it and drops the state, so a reused id
+                    // starts from scratch rather than inheriting the old scan.
+                    chainStateStore.remove(signer.id)
+                    homeState.refresh()
+                },
             )
         }
 
@@ -265,31 +285,22 @@ fun XbtWalletApp() {
             ServerScreen(state = state, onBack = { nav.pop() })
         }
 
-        Screen.SIGNERS -> SignersScreen(
-            signers = homeState.signers,
-            onOpenSigner = { signer: Signer ->
-                nav.push(Route(Screen.SIGNER_DETAIL, signerId = signer.id))
+        // Settings: the app-level preferences (moved off Home) and the way into
+        // the Server screen, which is unchanged behind the button. The
+        // keep-screen-on value is owned here and persisted the moment the switch
+        // is flipped.
+        Screen.SETTINGS -> SettingsScreen(
+            keepScreenOn = keepScreenOn,
+            onKeepScreenOnChange = { checked ->
+                keepScreenOn = checked
+                appSettings.keepScreenOnWhileOpen = checked
             },
-            onAddSigner = { nav.push(Route(Screen.ADD_SIGNER)) },
-            onDeleteSigner = { signer: Signer ->
-                // The one place a signer is removed: the screen that owns the
-                // store. Re-read through Home so the list (which renders
-                // Home's snapshot) drops the row immediately, and any detail
-                // entry still on the stack — should there be one — stops
-                // resolving (that branch restarts at Home).
-                signerStore.delete(signer.id)
-                // Drop this signer's cached scan too, so a later signer that
-                // happens to reuse the id can never open on another account's
-                // addresses, UTXOs or balance.
-                snapshotStore.clear(signer.id)
-                // And forget its in-memory chain state: this cancels any scan
-                // still in flight for it and drops the state, so a reused id
-                // starts from scratch rather than inheriting the old scan.
-                chainStateStore.remove(signer.id)
-                homeState.refresh()
-            },
+            onOpenServer = { nav.push(Route(Screen.SERVER)) },
             onBack = { nav.pop() },
         )
+
+        // About: the app's own explanation, one level off the landing page.
+        Screen.ABOUT -> AboutScreen(onBack = { nav.pop() })
 
         Screen.ADD_SIGNER -> AddSignerScreen(
             // One handler for the three rows. What a row opens — destination *and*
@@ -302,14 +313,12 @@ fun XbtWalletApp() {
 
         Screen.IMPORT_XPUB -> {
             val state = rememberImportXpubScreenState(signerStore) { _: Signer ->
-                // Re-read through the store so Home and the Signers list show
-                // the new signer, then land on the list the signer just joined —
-                // which is where an add started from (the empty state's shortcut).
-                // The stack is reset first so the submitted form is not left
-                // underneath the list (see the class doc).
+                // Re-read through the store so Home shows the new signer, then
+                // land back on Home — where the wallet list lives now, and where
+                // an add started from. The stack is reset so the submitted form is
+                // not left underneath it (see the class doc).
                 homeState.refresh()
                 nav.reset()
-                nav.push(Route(Screen.SIGNERS))
             }
             ImportXpubScreen(state = state, onBack = { nav.pop() })
         }
@@ -327,9 +336,10 @@ fun XbtWalletApp() {
         Screen.ADD_SIGNING_DEVICE -> {
             val origin = route.origin ?: SignerOrigin.SEEDSIGNER_UR
             val state = rememberAddSigningDeviceScreenState(signerStore, origin) { _: Signer ->
+                // Same landing as the text-import form above: the reset puts the
+                // user back on Home, where the new wallet is in the list.
                 homeState.refresh()
                 nav.reset()
-                nav.push(Route(Screen.SIGNERS))
             }
             AddSigningDeviceScreen(state = state, onBack = { nav.pop() })
         }
