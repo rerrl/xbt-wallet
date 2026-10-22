@@ -58,10 +58,11 @@ import com.xbtwallet.app.ui.theme.XbtPrimary
  * is the only record of an account on this phone, so a stray tap must not be
  * able to lose it.
  *
- * **Add wallet is the primary action at the top of this screen** — it moved
- * here from Home, so adding a wallet happens next to the list it adds to. Below
- * the header and that button, the wallet list occupies the bottom half of the
- * screen: the rows are pinned to the bottom edge for one-handed reach, which is
+ * **Add wallet is the primary action pinned to the bottom edge of this screen**
+ * — it moved here from Home, so adding a wallet happens next to the list it adds
+ * to. The screen reads top to bottom: the header, then the hint, then the wallet
+ * list itself, which starts directly under the hint and fills everything that is
+ * left. The button sits last, on the bottom edge for one-handed reach, which is
  * where a thumb naturally lands.
  */
 @Composable
@@ -93,21 +94,10 @@ fun SignersScreen(
                 Text("Wallets", style = MaterialTheme.typography.titleLarge)
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // The primary action, at the top and in both states — the same
-            // button whether or not a wallet exists (it moved here from Home).
-            Button(
-                onClick = onAddSigner,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Add wallet")
-            }
-
             if (signers.isEmpty()) {
                 // The empty state does the explaining; the way out of itself is
-                // the Add wallet button above, so an empty list is never a dead
-                // end.
+                // the Add wallet button pinned to the bottom edge, so an empty
+                // list is never a dead end.
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
                     text = "No wallets yet.",
@@ -121,6 +111,10 @@ fun SignersScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+
+                // Flexible space, so the Add wallet button below still lands on
+                // the bottom edge of the screen.
+                Spacer(modifier = Modifier.weight(1f))
             } else {
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
@@ -129,14 +123,14 @@ fun SignersScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
 
-                // Flexible space, then the list in the bottom half of the
-                // screen: Arrangement.Bottom pins the rows to its bottom edge,
-                // so the wallets sit within thumb reach.
-                Spacer(modifier = Modifier.weight(1f))
+                Spacer(modifier = Modifier.height(12.dp))
 
+                // The list starts at the top, directly under the hint, and takes
+                // every remaining pixel: the first wallet renders right below the
+                // hint and the list scrolls down from there.
                 LazyColumn(
                     modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.Bottom),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     items(signers, key = { it.id }) { signer ->
                         SignerRow(
@@ -151,6 +145,16 @@ fun SignersScreen(
                         )
                     }
                 }
+            }
+
+            // The primary action, and the last thing on the screen: full-width
+            // and pinned to the bottom edge in both states, where a thumb
+            // naturally lands.
+            Button(
+                onClick = onAddSigner,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Add wallet")
             }
         }
     }
