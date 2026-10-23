@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  API 31+ splash screen: the platform's default splash uses the launcher icon, which
+  is circle-masked and clips the XBT coin. Point it at a dedicated, inset logo over the
+  launcher background colour instead. These two attributes are API 31+, so they live in
+  values-v31 and every other API level stays on the base theme.
+
+  The parent is the base theme's parent, NOT "Theme.XbtWallet": a style that names
+  itself as its parent is a circular parental dependency, and AssetManager2::GetBag
+  drops a circular parent entirely ("nothing to inherit", libs/androidfw/
+  AssetManager2.cpp) — so the v31 override would silently lose Theme.Material.NoActionBar
+  and everything the base theme sets on Android 12+: no windowNoTitle (the framework then
+  inflates the legacy R.layout.screen_title decor), no dark windowBackground, no
+  transparent system bars.
+
+  Resource bags do not merge across configurations, so the v31 style has to repeat the
+  base items. Keep the first four in sync with values/themes.xml.
+-->
+<resources>
+    <style name="Theme.XbtWallet" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/xbt_background</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowSplashScreenBackground">@color/ic_launcher_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_splash_logo</item>
+    </style>
+</resources>

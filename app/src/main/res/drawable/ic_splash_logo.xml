@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Splash-screen logo (API 31+): the XBT coin, inset so it sits fully inside the
+  splash icon's inner safe circle. The launcher adaptive icon's foreground layer
+  bleeds to the edges (only the inner ~2/3 of the viewport is guaranteed visible
+  under the circle mask), so we re-draw the coin smaller over the same solid
+  background colour instead of reusing the adaptive icon.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/ic_launcher_background" />
+    <item>
+        <inset
+            android:drawable="@drawable/ic_launcher_foreground"
+            android:inset="20%" />
+    </item>
+</layer-list>
