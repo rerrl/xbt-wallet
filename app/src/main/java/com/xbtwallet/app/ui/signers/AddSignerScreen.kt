@@ -1,5 +1,6 @@
 package com.xbtwallet.app.ui.signers
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -18,6 +19,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -25,6 +27,7 @@ import com.xbtwallet.app.data.SignerOrigin
 import com.xbtwallet.app.ui.OrangeOutlineButton
 import com.xbtwallet.app.ui.Route
 import com.xbtwallet.app.ui.Screen
+import com.xbtwallet.app.ui.theme.XbtPrimary
 import com.xbtwallet.app.ui.theme.XbtWalletTheme
 
 /**
@@ -58,6 +61,23 @@ import com.xbtwallet.app.ui.theme.XbtWalletTheme
  * lives in the constants below, free of Compose imports, so [AddSignerCopyTest]
  * can pin it as Kotlin rather than a rendering detail a JVM test cannot reach.
  */
+
+/**
+ * The border worn by a card, per wallet kind. Each card is a way in, and the
+ * hairline colour is the only thing that tells the three apart at a glance: the
+ * orange the app already uses for a SeedSigner-signing path, an orange-red for
+ * the keys-on-this-phone path, and a soft half-strength blue for the path that
+ * can never spend. The fill is transparent, so the border is the whole cue.
+ */
+
+/** Card 1's border: the wallet's own bitcoin orange. */
+private val AddWalletExternalBorder = XbtPrimary
+
+/** Card 2's border: orange-red, hotter than the SeedSigner orange. */
+private val AddWalletHotBorder = Color(0xFFFF5722)
+
+/** Card 3's border: a soft, half-transparent blue — public keys only. */
+private val AddWalletWatchBorder = Color(0xFF3D7BD9).copy(alpha = 0.6f)
 
 /** The header's back affordance, unchanged. */
 internal const val ADD_SIGNER_BACK_LABEL = "\u2190 Back"
@@ -173,6 +193,13 @@ internal fun SignerScreenHeader(title: String, onBack: () -> Unit) {
  * are visibly the same thing — a list of choices — rather than two hand-built
  * layouts that happen to resemble each other.
  *
+ * The card is an *outline*, not a panel: a transparent fill behind a 1.dp
+ * coloured border, so a list of cards reads as a set of equally-weighty choices
+ * and the border colour carries the only distinction between them.
+ *
+ * @param borderColor the card's 1.dp outline colour. Required, with no default:
+ *   every card must say which kind of wallet it opens, and a silent fallback
+ *   would let one card drift back to looking like the others.
  * @param copy the card's sentence, given the paragraph treatment
  *   (`bodySmall`/`onSurfaceVariant`) because it is supporting text under the
  *   title, not a heading.
@@ -182,11 +209,14 @@ internal fun SignerScreenHeader(title: String, onBack: () -> Unit) {
 internal fun AddWalletCard(
     title: String,
     copy: String,
+    borderColor: Color,
     buttons: @Composable () -> Unit,
 ) {
     Surface(
         shape = MaterialTheme.shapes.medium,
-        tonalElevation = 2.dp,
+        color = Color.Transparent,
+        tonalElevation = 0.dp,
+        border = BorderStroke(1.dp, borderColor),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -229,7 +259,11 @@ fun AddSignerScreen(
             Spacer(modifier = Modifier.height(16.dp))
 
             // --- 1. The external signer: one button, one follow-up question. --
-            AddWalletCard(title = ADD_SIGNER_EXTERNAL_TITLE, copy = ADD_SIGNER_EXTERNAL_COPY) {
+            AddWalletCard(
+                title = ADD_SIGNER_EXTERNAL_TITLE,
+                copy = ADD_SIGNER_EXTERNAL_COPY,
+                borderColor = AddWalletExternalBorder,
+            ) {
                 OrangeOutlineButton(
                     onClick = onOpenSigningDeviceChoice,
                     modifier = Modifier.fillMaxWidth(),
@@ -241,7 +275,11 @@ fun AddSignerScreen(
             Spacer(modifier = Modifier.height(16.dp))
 
             // --- 2. The hot wallet: two ways in, both still UI-only. ----------
-            AddWalletCard(title = ADD_SIGNER_HOT_TITLE, copy = ADD_SIGNER_HOT_COPY) {
+            AddWalletCard(
+                title = ADD_SIGNER_HOT_TITLE,
+                copy = ADD_SIGNER_HOT_COPY,
+                borderColor = AddWalletHotBorder,
+            ) {
                 Row(modifier = Modifier.fillMaxWidth()) {
                     OrangeOutlineButton(
                         onClick = onOpenHotWalletCreate,
@@ -262,7 +300,11 @@ fun AddSignerScreen(
             Spacer(modifier = Modifier.height(16.dp))
 
             // --- 3. Watch only: the unchanged text-xpub path. ----------------
-            AddWalletCard(title = ADD_SIGNER_WATCH_TITLE, copy = ADD_SIGNER_WATCH_COPY) {
+            AddWalletCard(
+                title = ADD_SIGNER_WATCH_TITLE,
+                copy = ADD_SIGNER_WATCH_COPY,
+                borderColor = AddWalletWatchBorder,
+            ) {
                 OrangeOutlineButton(
                     onClick = onOpenWatchOnly,
                     modifier = Modifier.fillMaxWidth(),
