@@ -15,14 +15,15 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -73,6 +74,14 @@ import com.xbtwallet.app.ui.theme.XbtWarningDark
  * Like the text path, a scan that ends badly **clears** everything it would have
  * populated before it records its message: a stale earlier key must never look
  * like the one that was just scanned.
+ *
+ * The panel is the screen's entry point, not something a button opens: the
+ * screen asks for the camera once on entry, and the panel comes down as soon as
+ * a scan has ended — a whole export, a refusal, or a stall — because a live
+ * camera after the answer is not wanted. **Rescan** is the way back: it clears
+ * the last export's confirmation (and its complaint, if it had one), resets the
+ * assembly and brings the panel up again. A cancelled scan is not a state this
+ * screen has: nothing here takes the panel down except a scan that ended.
  */
 @Stable
 class AddSigningDeviceScreenState(
@@ -150,22 +159,33 @@ class AddSigningDeviceScreenState(
     }
 
     /**
-     * Dismisses the panel (Cancel). Whatever the last completed export produced
-     * is left exactly as it was — cancelling a scan is not the same as scanning
-     * a bad one — and the half-assembled frames are thrown away.
+     * **Rescan** — the user is not keeping what the last scan produced (or is
+     * having another go at an export that refused or timed out).
+     *
+     * Everything the last scan left behind goes: the decoded account and its
+     * metadata, any complaint about it, and the half-assembled frames. The panel
+     * comes back up on that empty slate, so the summary below can only ever
+     * describe the export that is in front of the camera now.
+     *
+     * The caller checks the CAMERA permission before this, exactly as it does on
+     * entry: [onRescanRequested] is only ever reached with the permission in
+     * hand, which is also why it clears any earlier denial.
      */
-    fun onScannerDismissed() {
-        showScanner = false
+    fun onRescanRequested() {
+        clearScanned()
+        scanError = null
+        cameraDenied = false
         assembler.reset()
         scanProgress = 0
+        showScanner = true
     }
 
     /**
      * The animation stalled: no new frame for a minute.
      *
-     * Closes the panel and says so. The screen is left fully usable — the scan
-     * button is right there again — which is the point of timing out rather than
-     * spinning forever.
+     * Closes the panel and says so. The screen is left fully usable — Rescan
+     * opens a clean panel again — which is the point of timing out rather than
+     * spinning forever at a signer the camera cannot see.
      */
     fun onScanTimedOut() {
         showScanner = false
@@ -277,7 +297,7 @@ class AddSigningDeviceScreenState(
     companion object {
         /** Shown when the animation stops producing frames. */
         const val SCAN_TIMED_OUT_MESSAGE =
-            "The scan timed out before the export finished \u2014 tap Scan QR and keep " +
+            "The scan timed out before the export finished \u2014 tap Rescan and keep " +
                 "the signer's animated QR in view."
     }
 }
@@ -321,6 +341,18 @@ fun rememberAddSigningDeviceScreenState(
  * each other — so each says plainly what it did not get, rather than complaining
  * about Base58 for a payload that was never Base58 in the first place.
  *
+ * **The scanner is up from the moment the screen opens, and it is the only way
+ * in.** Entering the screen asks for the camera once ([LaunchedEffect] below):
+ * already-granted opens the panel immediately, otherwise the one system
+ * permission dialog runs. There is no button to press first, and while the panel
+ * is up there is no cancel and no way to put it away either — the ways out are a
+ * scan that ends (a completed export, a refusal, or a stall) or leaving the
+ * screen.
+ *
+ * An ended scan puts the panel away, and **Rescan** is the way back: it clears
+ * the last export's confirmation and complaint, resets the assembly and reopens
+ * the panel through the same permission check as entry.
+ *
  * The name validates inline and the save is refused until the name is set and an
  * export has decoded.
  */
@@ -332,27 +364,43 @@ fun AddSigningDeviceScreen(
 ) {
     val context = LocalContext.current
 
+    // What to open once CAMERA is in hand. Both ways the panel comes up — entry
+    // into the screen and Rescan — go through this one system request, and the
+    // launcher's answer continues with whichever action was asked for.
+    var pendingOpen by remember { mutableStateOf<(() -> Unit)?>(null) }
+
     // CAMERA is asked for by this app, not by the scanner library: the panel is
-    // our own composable and it can only work with the permission in hand. A
-    // granted request opens the panel; a refusal is remembered so the screen can
-    // explain itself.
+    // our own composable and it can only work with the permission in hand. The
+    // answer completes whatever request was in flight — requestCamera always
+    // arms one before it launches — and a refusal is the one thing the screen has
+    // to report.
     val scanPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        if (granted) state.onCameraPermissionGranted() else state.onCameraPermissionDenied()
+        val open = pendingOpen
+        pendingOpen = null
+        if (granted) open?.invoke() else state.onCameraPermissionDenied()
     }
 
-    // "Scan QR" and "Try again" do the same thing: with the permission already
-    // held, open the panel at once; otherwise ask for it.
-    val pendingScanRequest: () -> Unit = {
+    // The one way the panel is opened: with the permission already held the
+    // action runs at once (no pointless dialog); otherwise the request goes out
+    // and its answer completes the same action. "Try again" and Rescan both call
+    // this.
+    val requestCamera: (() -> Unit) -> Unit = { action ->
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
         ) {
-            state.onCameraPermissionGranted()
+            action()
         } else {
+            pendingOpen = action
             scanPermissionLauncher.launch(Manifest.permission.CAMERA)
         }
     }
+
+    // The screen's entry point *is* the scanner: opening the screen opens the
+    // panel (or fires the one permission request it needs). Keyed on Unit, so it
+    // happens once per visit rather than on every recomposition.
+    LaunchedEffect(Unit) { requestCamera { state.onCameraPermissionGranted() } }
 
     Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
         Column(
@@ -396,13 +444,6 @@ fun AddSigningDeviceScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            OutlinedButton(
-                onClick = pendingScanRequest,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Scan QR")
-            }
-
             if (state.cameraDenied) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
@@ -411,7 +452,9 @@ fun AddSigningDeviceScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                TextButton(onClick = pendingScanRequest) { Text("Try again") }
+                TextButton(onClick = { requestCamera { state.onCameraPermissionGranted() } }) {
+                    Text("Try again")
+                }
             }
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -419,13 +462,19 @@ fun AddSigningDeviceScreen(
             // The scanner is a panel inside this column, portrait. It decodes
             // continuously: the export is a fountain-coded animation, so every
             // frame is offered to the assembly and the panel stays up until the
-            // state says the export is whole (or the animation stalls).
+            // state says the export is whole (or it refuses the code, or the
+            // animation stalls). `showCancel = false`: there is nothing to cancel
+            // here — the panel is the only way in, and Rescan is the way back to
+            // it once a scan has ended.
             if (state.showScanner) {
                 UrQrScannerPanel(
                     progress = state.scanProgress,
                     onFrame = state::onScanFrame,
-                    onCancel = state::onScannerDismissed,
+                    // Never invoked: this panel draws no cancel (showCancel is
+                    // false).
+                    onCancel = {},
                     onTimeout = state::onScanTimedOut,
+                    showCancel = false,
                     modifier = Modifier.fillMaxWidth(),
                 )
 
@@ -450,6 +499,24 @@ fun AddSigningDeviceScreen(
                     warnings = state.warnings,
                 )
                 Spacer(modifier = Modifier.height(20.dp))
+            }
+
+            // Once a scan has ended — a decoded account, a refusal, or a stall —
+            // the panel is gone and this is the way back to it. It clears the
+            // last export's confirmation and complaint and resets the assembly
+            // first, so nothing on screen can belong to an export the user just
+            // threw away. Tonal rather than the vibrant filled style of "Add
+            // wallet" beside it: it is the secondary action, and the two must not
+            // read as competing.
+            if (state.scannedXpub != null || state.scanError != null) {
+                FilledTonalButton(
+                    onClick = { requestCamera { state.onRescanRequested() } },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Rescan")
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
             }
 
             Button(

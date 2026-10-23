@@ -13,14 +13,15 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -57,6 +58,15 @@ import com.xbtwallet.app.data.SignerStore
  * have we got" is exactly "what did the last scan produce". A bad scan clears
  * every scanned field before it records its error, so a stale earlier key can
  * never look like the one that was just scanned.
+ *
+ * The panel is not a screen of its own: the screen opens it on entry (asking the
+ * one camera permission it needs), and it comes down again as soon as a scan has
+ * produced a result — a live camera after the key is captured is not wanted.
+ * What brings it back is **Rescan**, and that starts from a clean slate: it
+ * forgets the last result, its metadata and its complaint before the panel
+ * reappears, so nothing on screen can belong to a key the user just threw away.
+ * There is no cancel while the panel is up: the ways out are a scan, or leaving
+ * the screen.
  */
 @Stable
 class ImportXpubScreenState(
@@ -95,7 +105,9 @@ class ImportXpubScreenState(
      *
      * The panel is part of this screen, not a separate activity, so "is the
      * scanner up" is screen state like any other — and, being plain state, it is
-     * testable without a camera.
+     * testable without a camera. It is opened by the screen on entry (or by
+     * [onRescanRequested]) and closed by a scan that produced a result; no
+     * control on the screen puts it away, because the QR is the only way in.
      */
     var showScanner by mutableStateOf(false)
         private set
@@ -103,7 +115,8 @@ class ImportXpubScreenState(
     /**
      * Whether the user refused the CAMERA permission.
      *
-     * Kept so the screen can say why the button did nothing and offer a retry.
+     * Kept so the screen can say why there is no scanner and offer a retry —
+     * the "Try again" button is the only scanner control this screen has.
      * There is no paste fallback to fall back to: the QR is the only way in.
      */
     var cameraDenied by mutableStateOf(false)
@@ -135,13 +148,47 @@ class ImportXpubScreenState(
     }
 
     /**
-     * Dismisses the panel (Cancel, or the caller hiding it after a scan).
+     * Closes the panel after it has produced a result.
      *
-     * Whatever the last scan produced is left exactly as it was: cancelling a
-     * scan is not the same as scanning a bad one.
+     * A live camera is only wanted while there is something to read, so the
+     * screen takes the panel down as soon as a scan has landed — valid or not.
+     * Whatever the scan produced is left exactly as it was: hiding the panel is
+     * not the same as a bad scan, which clears the fields before it records its
+     * message.
      */
     fun onScannerDismissed() {
         showScanner = false
+    }
+
+    /**
+     * **Rescan** — the user is not keeping what the last scan produced.
+     *
+     * [clearScan] throws away the last result, its metadata and any complaint
+     * about it, and the panel comes back up on that empty slate, so the
+     * confirmation below can only ever describe the key that is there now.
+     *
+     * The caller checks the CAMERA permission before this, exactly as it does on
+     * entry: [onRescanRequested] is only ever reached with the permission in
+     * hand, which is also why it clears any earlier denial.
+     */
+    fun onRescanRequested() {
+        clearScan()
+        cameraDenied = false
+        showScanner = true
+    }
+
+    /**
+     * Drops everything the last scan left behind: the parsed key, the scanned
+     * text, its version label, its fingerprint and path, and the message a bad
+     * scan recorded.
+     */
+    private fun clearScan() {
+        scannedKey = null
+        scannedXpub = null
+        recognisedVersion = null
+        masterFingerprint = null
+        derivationPath = null
+        scanError = null
     }
 
     /**
@@ -170,11 +217,7 @@ class ImportXpubScreenState(
             }
 
             is XpubImport.Invalid -> {
-                scannedKey = null
-                scannedXpub = null
-                recognisedVersion = null
-                masterFingerprint = null
-                derivationPath = null
+                clearScan()
                 scanError = validation.message
             }
         }
@@ -247,6 +290,24 @@ fun rememberImportXpubScreenState(
  * opens inline in this column, in portrait. Nothing here launches the scanner
  * library's full-screen activity.
  *
+ * **The scanner is up from the moment the screen opens, and it is the only way
+ * in.** Entering the screen asks for the camera once ([LaunchedEffect] below,
+ * through the same request the denial recovery uses): already-granted opens the
+ * panel immediately, otherwise the one system permission dialog runs. There is
+ * no button to press first. Once the panel is up there is no cancel and no way
+ * to put it away — the ways out are a scan that produces a result, or leaving
+ * the screen.
+ *
+ * A scan does put the panel away: a live camera after the key is captured is not
+ * wanted, so the confirmation below is what the user is left looking at.
+ * **Rescan** (shown once there is a result to throw away) is the way back — it
+ * clears the last scan and its complaint and reopens the panel through the same
+ * permission check as entry.
+ *
+ * A denied permission is the one state with no scanner at all: the screen says
+ * what is missing and offers "Try again", which is the only scanner control it
+ * renders besides Rescan.
+ *
  * The name validates inline and the save is refused until the name is set and a
  * key has been scanned and parsed.
  */
@@ -258,30 +319,46 @@ fun ImportXpubScreen(
 ) {
     val context = LocalContext.current
 
+    // What to open once CAMERA is in hand. Both ways the panel comes up — entry
+    // into the screen and Rescan — go through this one system request, and the
+    // launcher's answer continues with whichever action was asked for: open the
+    // panel on a clean slate, or open it on the rescan's cleared one.
+    var pendingOpen by remember { mutableStateOf<(() -> Unit)?>(null) }
+
     // CAMERA is asked for by this app, not by the scanner library: the panel is
-    // our own composable and it can only work with the permission in hand. A
-    // granted request opens the panel; a refusal is remembered so the screen can
-    // explain itself.
+    // our own composable and it can only work with the permission in hand. The
+    // answer completes whatever request was in flight — requestCamera always
+    // arms one before it launches — and a refusal is the one thing the screen has
+    // to report.
     val scanPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        if (granted) state.onCameraPermissionGranted() else state.onCameraPermissionDenied()
+        val open = pendingOpen
+        pendingOpen = null
+        if (granted) open?.invoke() else state.onCameraPermissionDenied()
     }
 
-    // "Scan QR" and "Try again" do the same thing: with the permission already
-    // held, open the panel at once (no pointless dialog); otherwise ask for it.
-    // The request is pending only for as long as the system dialog is up — its
-    // answer arrives in the launcher callback above — so no flag has to outlive
-    // it.
-    val pendingScanRequest: () -> Unit = {
+    // The one way the panel is opened: with the permission already held the
+    // action runs at once (no pointless dialog); otherwise the request goes out
+    // and its answer completes the same action. "Try again" and Rescan both
+    // call this, so the screen has exactly one permission path.
+    val requestCamera: (() -> Unit) -> Unit = { action ->
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
         ) {
-            state.onCameraPermissionGranted()
+            action()
         } else {
+            pendingOpen = action
             scanPermissionLauncher.launch(Manifest.permission.CAMERA)
         }
     }
+
+    // The screen's entry point *is* the scanner: opening the screen opens the
+    // panel (or fires the one permission request it needs), exactly as the send
+    // flow does. Keyed on Unit, so it happens once per visit rather than on
+    // every recomposition — a re-entry into the screen asks again, which is what
+    // a user who left and came back expects.
+    LaunchedEffect(Unit) { requestCamera { state.onCameraPermissionGranted() } }
 
     Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
         Column(
@@ -324,13 +401,6 @@ fun ImportXpubScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            OutlinedButton(
-                onClick = pendingScanRequest,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Scan QR")
-            }
-
             if (state.cameraDenied) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
@@ -339,22 +409,29 @@ fun ImportXpubScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                TextButton(onClick = pendingScanRequest) { Text("Try again") }
+                TextButton(onClick = { requestCamera { state.onCameraPermissionGranted() } }) {
+                    Text("Try again")
+                }
             }
 
             Spacer(modifier = Modifier.height(12.dp))
 
             // The scanner is a panel inside this column, portrait, scrolled with
-            // the rest of the screen. A scan is routed by XpubScanRoute and
-            // validated by the same seam a keyboard entry would have used, so the
-            // camera can never accept a key typing would refuse.
+            // the rest of the screen — and it is the screen's entry point: the
+            // LaunchedEffect above opened it as soon as the screen appeared.
+            // `showCancel = false` says there is no way out of it except the scan
+            // itself, and a scan is what takes it down: a live camera is wanted
+            // only while the QR is being read, and Rescan below is the way back.
             if (state.showScanner) {
                 XpubQrScannerPanel(
                     onResult = { payload ->
                         state.onScanResult(payload)
                         state.onScannerDismissed()
                     },
-                    onCancel = state::onScannerDismissed,
+                    // Never invoked: this panel draws no cancel (showCancel is
+                    // false).
+                    onCancel = {},
+                    showCancel = false,
                     modifier = Modifier.fillMaxWidth(),
                 )
 
@@ -378,6 +455,24 @@ fun ImportXpubScreen(
                     derivationPath = state.derivationPath,
                 )
                 Spacer(modifier = Modifier.height(20.dp))
+            }
+
+            // Once a scan has produced something — a key to keep, or a reason it
+            // could not be read — the panel is gone and this is the way back to
+            // it. It clears whatever the last scan left behind first, so the
+            // confirmation below can only ever describe the key that is there
+            // now. Tonal rather than the vibrant filled style of "Add wallet"
+            // beside it: it is the secondary action, and the two must not read as
+            // competing.
+            if (state.scannedXpub != null || state.scanError != null) {
+                FilledTonalButton(
+                    onClick = { requestCamera { state.onRescanRequested() } },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Rescan")
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
             }
 
             Button(

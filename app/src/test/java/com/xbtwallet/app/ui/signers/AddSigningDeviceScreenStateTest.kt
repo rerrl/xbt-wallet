@@ -21,9 +21,10 @@ import org.junit.Test
  * and here it is a rule with an extra axis the text path does not have, because a
  * scan is an assembly of frames rather than one QR code. So these tests drive the
  * state frame by frame: the panel stays open while the export is incomplete,
- * progress moves, out-of-order frames still complete, a cancelled or timed-out
- * scan leaves the screen usable, and the record that lands in the store is the
- * *same* one the watch-only path writes.
+ * progress moves, out-of-order frames still complete, a completed export, a
+ * refusal or a stall takes the panel down, a rescan opens it again on a clean
+ * slate, and the record that lands in the store is the *same* one the watch-only
+ * path writes.
  */
 class AddSigningDeviceScreenStateTest {
 
@@ -68,7 +69,7 @@ class AddSigningDeviceScreenStateTest {
     @Test
     fun `the embedded panel is closed and nothing is denied at first`() {
         val state = state()
-        assertFalse("the scanner must not open by itself", state.showScanner)
+        assertFalse("the state never opens the panel itself — the screen asks on entry", state.showScanner)
         assertFalse("no denial has happened yet", state.cameraDenied)
         assertEquals("nothing has been assembled yet", 0, state.scanProgress)
         assertNull(state.scannedXpub)
@@ -182,37 +183,67 @@ class AddSigningDeviceScreenStateTest {
         assertTrue(state.scanError != null)
     }
 
-    // --- cancel and timeout leave the screen usable ------------------------
+    // --- rescan, after a scan that ended -----------------------------------
 
     @Test
-    fun `cancelling the panel leaves a completed export untouched`() {
+    fun `a rescan clears the completed export and reopens the panel`() {
         val state = stateAfterAnimatedScan()
-        state.onCameraPermissionGranted()
-        state.onScannerDismissed()
+        assertFalse("a completed export takes the panel down", state.showScanner)
+        assertEquals(UrTestVectors.bcrZpub, state.scannedXpub)
 
-        assertFalse("cancel closes the panel", state.showScanner)
-        assertEquals("cancel must not rewrite what was decoded", UrTestVectors.bcrZpub, state.scannedXpub)
-        assertEquals("84'/0'/0'", state.derivationPath)
+        state.onRescanRequested()
+
+        assertTrue("rescan brings the panel back", state.showScanner)
+        assertNull("and the export the user is rescanning is gone", state.scannedXpub)
+        assertNull(state.masterFingerprint)
+        assertNull(state.derivationPath)
+        assertNull(state.recognisedVersion)
+        assertTrue("the warnings about it go too", state.warnings.isEmpty())
+        assertNull(state.scanError)
+        assertEquals("the next export starts from nothing", 0, state.scanProgress)
+
+        // Usable: the same animation in front of the camera assembles again,
+        // from nothing rather than onto a finished assembly.
+        frames().forEach(state::onScanFrame)
+        assertEquals(UrTestVectors.bcrZpub, state.scannedXpub)
+        assertFalse("and that scan takes the panel down again", state.showScanner)
     }
 
     @Test
-    fun `cancelling a half-assembled export throws the frames away`() {
+    fun `a rescan throws a half-assembled export away`() {
         val state = state()
         state.onCameraPermissionGranted()
         state.onScanFrame(frames()[0])
         state.onScanFrame(frames()[1])
         assertTrue(state.scanProgress > 0)
 
-        state.onScannerDismissed()
-
-        assertFalse(state.showScanner)
-        assertEquals("the next scan starts from nothing", 0, state.scanProgress)
+        state.onRescanRequested()
+        assertTrue("the panel is up again", state.showScanner)
+        assertEquals("the half-assembled frames are gone", 0, state.scanProgress)
 
         // A fresh scan of the *same* frames must still assemble: a stale partial
         // assembly must not be spliced onto the new one.
-        state.onCameraPermissionGranted()
         frames().forEach(state::onScanFrame)
         assertEquals(UrTestVectors.bcrZpub, state.scannedXpub)
+    }
+
+    @Test
+    fun `a rescan after a refusal clears the message and reopens the panel`() {
+        val state = state()
+        state.onCameraPermissionGranted()
+        state.onScanFrame("nonsense")
+
+        assertFalse("a refused code takes the panel down so the reason is visible", state.showScanner)
+        assertTrue("the refusal said why", state.scanError != null)
+
+        state.onRescanRequested()
+
+        assertTrue(state.showScanner)
+        assertNull("the last complaint is not carried into the new scan", state.scanError)
+
+        frames().forEach(state::onScanFrame)
+        assertEquals(UrTestVectors.bcrZpub, state.scannedXpub)
+        assertFalse(state.showScanner)
     }
 
     @Test
@@ -224,16 +255,34 @@ class AddSigningDeviceScreenStateTest {
         state.onScanTimedOut()
 
         assertFalse("a stalled scan must not leave the camera up forever", state.showScanner)
-        assertEquals(0, state.scanProgress)
+        assertEquals("the stalled assembly is thrown away", 0, state.scanProgress)
         assertEquals(AddSigningDeviceScreenState.SCAN_TIMED_OUT_MESSAGE, state.scanError)
 
-        // Usable: the scan button opens a clean panel again, and a real scan works.
-        state.onCameraPermissionGranted()
+        // Usable: a rescan opens a clean panel again — the timeout message goes
+        // with it — and a real scan then works.
+        state.onRescanRequested()
         assertTrue(state.showScanner)
+        assertNull("the timeout message does not survive the rescan", state.scanError)
         assertEquals("the new scan starts from nothing", 0, state.scanProgress)
         frames().forEach(state::onScanFrame)
         assertEquals(UrTestVectors.bcrZpub, state.scannedXpub)
-        assertNull("a good scan clears the earlier timeout", state.scanError)
+        assertFalse("a completed export clears the panel as always", state.showScanner)
+    }
+
+    @Test
+    fun `the timeout message is cleared by a later completed export`() {
+        val state = state()
+        state.onCameraPermissionGranted()
+        state.onScanTimedOut()
+        assertEquals(AddSigningDeviceScreenState.SCAN_TIMED_OUT_MESSAGE, state.scanError)
+
+        // The panel is closed on a timeout, so the export that clears the message
+        // arrives through a rescan.
+        state.onRescanRequested()
+        frames().forEach(state::onScanFrame)
+
+        assertNull("finishing an export clears the earlier timeout", state.scanError)
+        assertEquals(UrTestVectors.bcrZpub, state.scannedXpub)
     }
 
     // --- import ------------------------------------------------------------

@@ -17,8 +17,10 @@ import org.junit.Test
  * The camera itself is not testable on the JVM and the panel is verified by
  * `assembleDebug`, but *what a scan does to the state* is a rule, not a view:
  * import is QR-only, a valid scan populates the key and its metadata, a bad scan
- * clears everything before it records its error, and the save is refused until
- * both a name and a parsed key are present. That is what these tests pin.
+ * clears everything before it records its error, the panel comes down as soon as
+ * a scan has produced a result, a rescan throws the last result away and opens a
+ * clean panel, and the save is refused until both a name and a parsed key are
+ * present. That is what these tests pin.
  */
 class ImportXpubScreenStateTest {
 
@@ -44,7 +46,7 @@ class ImportXpubScreenStateTest {
     @Test
     fun `the embedded panel is closed and nothing is denied at first`() {
         val state = state()
-        assertFalse("the scanner must not open by itself", state.showScanner)
+        assertFalse("the state never opens the panel itself — the screen asks on entry", state.showScanner)
         assertFalse("no denial has happened yet", state.cameraDenied)
         assertNull(state.scannedXpub)
         assertNull(state.scanError)
@@ -151,14 +153,71 @@ class ImportXpubScreenStateTest {
     }
 
     @Test
-    fun `cancelling the panel leaves the scan untouched`() {
+    fun `hiding the panel after a scan keeps what was read`() {
         val state = state()
         state.onScanResult(zpub)
         state.onCameraPermissionGranted()
         state.onScannerDismissed()
 
-        assertFalse("cancel closes the panel", state.showScanner)
-        assertEquals("cancel must not rewrite what was scanned", zpub, state.scannedXpub)
+        assertFalse("the panel comes down once a scan has landed", state.showScanner)
+        assertEquals("and hiding it must not rewrite what was scanned", zpub, state.scannedXpub)
+    }
+
+    // --- rescan ------------------------------------------------------------
+
+    @Test
+    fun `a rescan clears the last scan and reopens the panel`() {
+        val state = state()
+        state.onNameChange("Cold storage")
+        state.onCameraPermissionGranted()
+        state.onScanResult("[ab12cd34/84'/0'/0']$zpub")
+        state.onScannerDismissed()
+
+        state.onRescanRequested()
+
+        assertTrue("rescan brings the panel back", state.showScanner)
+        assertNull("and the key the user is rescanning is gone", state.scannedXpub)
+        assertNull(state.masterFingerprint)
+        assertNull(state.derivationPath)
+        assertNull(state.recognisedVersion)
+        assertNull(state.scanError)
+
+        // Nothing is importable from the discarded scan: the parsed key went with
+        // the fields the confirmation was drawn from.
+        state.import()
+        assertNull("a discarded scan cannot be saved", saved)
+        assertTrue("the save is refused, as it is before any scan", state.scanError != null)
+    }
+
+    @Test
+    fun `a rescan after a bad scan clears the message and opens a clean panel`() {
+        val state = state()
+        state.onCameraPermissionGranted()
+        state.onScanResult("nonsense")
+        state.onScannerDismissed()
+        assertTrue("the bad scan said why", state.scanError != null)
+
+        state.onRescanRequested()
+
+        assertTrue(state.showScanner)
+        assertNull("the last complaint is not carried into the new scan", state.scanError)
+
+        state.onScanResult(zpub)
+        assertEquals("the fresh scan reads normally", zpub, state.scannedXpub)
+        assertNull(state.scanError)
+    }
+
+    @Test
+    fun `a rescan clears an earlier camera denial`() {
+        val state = state()
+        state.onCameraPermissionDenied()
+
+        // Reached only with the permission in hand — the screen checks first —
+        // and a panel that is up must not sit behind a stale denial hint.
+        state.onRescanRequested()
+
+        assertTrue("the panel is up", state.showScanner)
+        assertFalse("the denial hint is gone", state.cameraDenied)
     }
 
     // --- import ------------------------------------------------------------

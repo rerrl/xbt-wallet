@@ -8,9 +8,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -101,7 +100,7 @@ fun HotWalletImportScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            Button(
+            FilledTonalButton(
                 onClick = { onChooseWords(12) },
                 modifier = Modifier.fillMaxWidth(),
             ) {
@@ -110,7 +109,7 @@ fun HotWalletImportScreen(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            OutlinedButton(
+            FilledTonalButton(
                 onClick = { onChooseWords(24) },
                 modifier = Modifier.fillMaxWidth(),
             ) {
