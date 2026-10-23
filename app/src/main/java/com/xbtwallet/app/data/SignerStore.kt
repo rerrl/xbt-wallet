@@ -48,7 +48,7 @@ sealed interface SignerType {
  * *other* signing device's export the same way ([SIGNING_DEVICE_UR]) — and the
  * one place that matters today is the tag the UI shows.
  *
- * The three paths are also the three rows of the Add-wallet chooser, which is
+ * The three paths are also the three choices of the Add-wallet flow, which is
  * what makes the origin *declared* rather than inferred from the payload: the
  * user says which device they are holding, and that answer is what is recorded.
  *

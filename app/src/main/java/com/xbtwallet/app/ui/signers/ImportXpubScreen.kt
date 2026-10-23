@@ -231,8 +231,8 @@ fun rememberImportXpubScreenState(
 }
 
 /**
- * Add a wallet by scanning its account xpub — the row of the Add-wallet flow
- * reached from [AddSignerScreen]'s **Watch-only xpub** button.
+ * Add a wallet by scanning its account xpub — the screen of the Add-wallet flow
+ * reached from [AddSignerScreen]'s **Watch only** card.
  *
  * Import is **QR-only**. The QR is the air-gapped channel between the signer and
  * this phone, and it is the only channel that can carry the account's metadata

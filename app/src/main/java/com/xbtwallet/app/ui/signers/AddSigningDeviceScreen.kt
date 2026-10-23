@@ -306,8 +306,8 @@ fun rememberAddSigningDeviceScreenState(
 
 /**
  * Add a wallet by scanning its **signing device's own export** — the sibling of
- * [ImportXpubScreen], reached from [AddSignerScreen]'s **SeedSigner** and
- * **Other signing device** rows.
+ * [ImportXpubScreen], reached from [SigningDeviceChoiceScreen], the two options
+ * behind [AddSignerScreen]'s external-signer card.
  *
  * The two screens are near-identical on purpose: a name, a scan, a save, and the
  * same signer record at the end. What differs is the QR they expect. The

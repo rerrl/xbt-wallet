@@ -27,6 +27,11 @@ import com.xbtwallet.app.data.SnapshotStore
 import com.xbtwallet.app.ui.about.AboutScreen
 import com.xbtwallet.app.ui.home.HomeScreen
 import com.xbtwallet.app.ui.home.rememberHomeScreenState
+import com.xbtwallet.app.ui.hotwallet.HotWalletCreateScreen
+import com.xbtwallet.app.ui.hotwallet.HotWalletDiceScreen
+import com.xbtwallet.app.ui.hotwallet.HotWalletImportScreen
+import com.xbtwallet.app.ui.hotwallet.HotWalletImportWordsScreen
+import com.xbtwallet.app.ui.hotwallet.hotWalletWordCount
 import com.xbtwallet.app.ui.server.ServerScreen
 import com.xbtwallet.app.ui.server.rememberServerScreenState
 import com.xbtwallet.app.ui.settings.SettingsScreen
@@ -39,6 +44,7 @@ import com.xbtwallet.app.ui.signers.ImportXpubScreen
 import com.xbtwallet.app.ui.signers.SignerChainStateStore
 import com.xbtwallet.app.ui.signers.SignerDetailScreen
 import com.xbtwallet.app.ui.signers.SendScreen
+import com.xbtwallet.app.ui.signers.SigningDeviceChoiceScreen
 import com.xbtwallet.app.ui.signers.UtxosScreen
 import com.xbtwallet.app.ui.signers.rememberAddSigningDeviceScreenState
 import com.xbtwallet.app.ui.signers.rememberImportXpubScreenState
@@ -60,7 +66,7 @@ import kotlinx.coroutines.launch
  * name, not a route); it rides in the [Route] that carries this screen onto the
  * back stack, so each level remembers its own argument. See [NavStack].
  */
-enum class Screen { HOME, SERVER, SETTINGS, ABOUT, ADD_SIGNER, IMPORT_XPUB, ADD_SIGNING_DEVICE, SIGNER_DETAIL, SIGNER_UTXOS, SIGNER_ADDRESSES, RECEIVE, SEND }
+enum class Screen { HOME, SERVER, SETTINGS, ABOUT, ADD_SIGNER, SIGNING_DEVICE_CHOICE, IMPORT_XPUB, ADD_SIGNING_DEVICE, HOT_WALLET_CREATE, HOT_WALLET_DICE, HOT_WALLET_IMPORT, HOT_WALLET_IMPORT_WORDS, SIGNER_DETAIL, SIGNER_UTXOS, SIGNER_ADDRESSES, RECEIVE, SEND }
 
 /**
  * The app's navigation and its shared stores.
@@ -102,16 +108,28 @@ enum class Screen { HOME, SERVER, SETTINGS, ABOUT, ADD_SIGNER, IMPORT_XPUB, ADD_
  * ([NavStack.Saver]); each entry then carries its own signer id, so a rotation
  * cannot land the user on a different signer's screen.
  *
- * **The add-wallet walk.** [Screen.ADD_SIGNER] is the chooser and its three rows
- * push a form: **SeedSigner** and **Other signing device** both push
- * [Screen.ADD_SIGNING_DEVICE] (declaring `SEEDSIGNER_UR` and
- * `SIGNING_DEVICE_UR` respectively — the origin rides on the route), and
- * **Watch-only xpub** pushes [Screen.IMPORT_XPUB]. So back from any form returns
- * to the chooser that sent you there. All three save into the same store through
- * the same call. Saving resets the stack to HOME rather than pushing on top of
- * the form: the wallet list lives on Home now, so the new wallet is immediately
- * visible where the add most often starts, and a back press from there leaves the
- * app rather than reopening a form that has already been submitted.
+ * **The add-wallet walk.** [Screen.ADD_SIGNER] is the chooser, drawn as three
+ * cards:
+ *
+ * - **SeedSigner / External signer** pushes [Screen.SIGNING_DEVICE_CHOICE],
+ *   whose two options both push [Screen.ADD_SIGNING_DEVICE] (declaring
+ *   `SEEDSIGNER_UR` and `SIGNING_DEVICE_UR` respectively — the origin rides on
+ *   the route through `routeFor`).
+ * - **Hot wallet** pushes [Screen.HOT_WALLET_CREATE] (dice rolls) or
+ *   [Screen.HOT_WALLET_IMPORT] (an existing seed), each of which asks for a word
+ *   count and then opens [Screen.HOT_WALLET_DICE] or
+ *   [Screen.HOT_WALLET_IMPORT_WORDS] with that count on the route's free-form
+ *   `address` slot. **These four screens are UI scaffolding for the ratified
+ *   hot-wallet phase: they create, import and store no key material, and their
+ *   terminal buttons are disabled.**
+ * - **Watch only** pushes [Screen.IMPORT_XPUB].
+ *
+ * So back from any form returns to the screen that sent you there. The add paths
+ * that import a key save into the same store through the same call, and saving
+ * resets the stack to HOME rather than pushing on top of the form: the wallet list
+ * lives on Home now, so the new wallet is immediately visible where the add most
+ * often starts, and a back press from there leaves the app rather than reopening a
+ * form that has already been submitted.
  */
 @Composable
 fun XbtWalletApp() {
@@ -303,13 +321,68 @@ fun XbtWalletApp() {
         Screen.ABOUT -> AboutScreen(onBack = { nav.pop() })
 
         Screen.ADD_SIGNER -> AddSignerScreen(
-            // One handler for the three rows. What a row opens — destination *and*
-            // the origin its form will record — is [routeFor], so the two animated
-            // rows, which share a screen, cannot be wired to the same origin by
-            // accident, and a JVM test pins the mapping.
+            // The three cards, each with its own way out. Card 1 asks its
+            // follow-up question on a screen of its own, so the two animated
+            // origins stay distinguishable; its answers are mapped by
+            // [routeFor], pinned by a JVM test.
+            onOpenSigningDeviceChoice = { nav.push(Route(Screen.SIGNING_DEVICE_CHOICE)) },
+            onOpenHotWalletCreate = { nav.push(Route(Screen.HOT_WALLET_CREATE)) },
+            onOpenHotWalletImport = { nav.push(Route(Screen.HOT_WALLET_IMPORT)) },
+            // Watch only is the unchanged text path: no chooser, because there
+            // is one watch-only import form.
+            onOpenWatchOnly = { nav.push(Route(Screen.IMPORT_XPUB, origin = SignerOrigin.TEXT_QR)) },
+            onBack = { nav.pop() },
+        )
+
+        // The follow-up question behind the first card: which external signer.
+        // Both answers push the *same* destination with different origins — the
+        // downstream flow is untouched, so what the user tapped still decides the
+        // tag on the saved wallet.
+        Screen.SIGNING_DEVICE_CHOICE -> SigningDeviceChoiceScreen(
             onChoose = { row -> nav.push(routeFor(row)) },
             onBack = { nav.pop() },
         )
+
+        // --- The hot-wallet walk: UI scaffolding, no key material ------------
+        //
+        // The word count rides the route's free-form `address` slot as "12" or
+        // "24" — the same segment Send uses for its selected outpoints — so no
+        // codec change was needed. A route that arrives without one of those two
+        // values (a saved stack from a build that had no such screen, say) restarts
+        // at Home rather than rendering a dice screen with no idea how long the
+        // seed should be.
+
+        Screen.HOT_WALLET_CREATE -> HotWalletCreateScreen(
+            onDiceRoll = { words ->
+                nav.push(Route(Screen.HOT_WALLET_DICE, address = words.toString()))
+            },
+            onBack = { nav.pop() },
+        )
+
+        Screen.HOT_WALLET_DICE -> {
+            val wordCount = hotWalletWordCount(route.address)
+            if (wordCount == null) {
+                LaunchedEffect(route) { nav.reset() }
+            } else {
+                HotWalletDiceScreen(wordCount = wordCount, onBack = { nav.pop() })
+            }
+        }
+
+        Screen.HOT_WALLET_IMPORT -> HotWalletImportScreen(
+            onChooseWords = { words ->
+                nav.push(Route(Screen.HOT_WALLET_IMPORT_WORDS, address = words.toString()))
+            },
+            onBack = { nav.pop() },
+        )
+
+        Screen.HOT_WALLET_IMPORT_WORDS -> {
+            val wordCount = hotWalletWordCount(route.address)
+            if (wordCount == null) {
+                LaunchedEffect(route) { nav.reset() }
+            } else {
+                HotWalletImportWordsScreen(wordCount = wordCount, onBack = { nav.pop() })
+            }
+        }
 
         Screen.IMPORT_XPUB -> {
             val state = rememberImportXpubScreenState(signerStore) { _: Signer ->
