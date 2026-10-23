@@ -12,21 +12,27 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -41,6 +47,7 @@ import com.xbtwallet.app.electrum.ElectrumServer
 import com.xbtwallet.app.electrum.TorGateway
 import com.xbtwallet.app.electrum.TorPhase
 import com.xbtwallet.app.electrum.TorStatus
+import com.xbtwallet.app.ui.signers.SignerRow
 import com.xbtwallet.app.ui.theme.XbtSuccessDark
 import com.xbtwallet.app.ui.theme.XbtWalletTheme
 import kotlinx.coroutines.CancellationException
@@ -496,8 +503,8 @@ class HomeScreenState(
  * Remembers a [HomeScreenState] for the app's lifetime.
  *
  * Held at the navigation level rather than inside [HomeScreen] so it survives
- * leaving and returning to the screen — and so the Signers screen reads the same
- * list the home screen counts.
+ * leaving and returning to the screen — and so the wallet list rendered on Home
+ * and the count above it read the same snapshot.
  */
 @Composable
 fun rememberHomeScreenState(
@@ -508,151 +515,229 @@ fun rememberHomeScreenState(
 }
 
 /**
- * Home screen — the app's hub, and its statement of what the app is: a
+ * Home screen — the app's landing page, and its statement of what the app is: a
  * coordinator holding xpubs, not a wallet holding keys.
  *
- * Top to bottom: **Server** (private Electrum endpoint) with its live status
- * line, then the two things you do with wallets — **Add wallet** and
- * **Wallets** — then a small **Preferences** section (see below). The old
- * standalone "Import xpub", "Select active xpub" and
- * "Addresses" buttons are gone: xpubs are wallets now, they live in a list
- * rather than behind an "active" selection, and everything that works on one
- * wallet (addresses included) is reached by opening that wallet. **Add wallet**
- * opens the three-row chooser (SeedSigner / other signing device / watch-only
- * xpub) and **Wallets** the list of what is saved; a wallet's own detail screen
- * is where the rest lives.
+ * This screen is the app's home, and it reads top to bottom in the order the
+ * user meets the app:
  *
- * Under the Server button the screen shows the live connection status: the
- * "connect your own server" hint until an endpoint is saved, then a dot with
- * *Connected* / *Connected via Tor* / *Server disconnected* — fed by the
- * heartbeat the navigation layer runs while this screen is on display (see
- * `XbtWalletApp`). **No host is ever rendered**, in any state: which server the
- * user chose is theirs, not something to put in a screenshot. While an onion
- * server's Tor is coming up the line reads *Tor starting… N%* instead of
- * guessing at a connection it cannot make yet.
+ *  1. **About**, a text button at the very top, opening the app's own
+ *     explanation;
+ *  2. the app's name — *XBT Wallet*, in the largest bold type on the screen —
+ *     with its tagline under it;
+ *  3. a divider, closing the identity block;
+ *  4. the live **server status** with a **Settings** button beside it — the way
+ *     into the app-level preferences and the Server endpoint, both of which moved
+ *     to Settings;
+ *  5. the **Wallets** section: the heading, the count, and then the wallet list
+ *     itself, inline;
+ *  6. **Add wallet**, full-width and pinned to the bottom edge, in both the empty
+ *     and the populated state.
  *
- * The screen owns no state: it renders [state] and forwards taps.
+ * **The standalone Wallets page is gone.** The list lives here now: a wallet row
+ * opens that wallet's own screen, and removing one lives on the row's ⋮ overflow
+ * menu — *Remove wallet*, then a two-step confirm — because a watch-only xpub is
+ * the only record of an account on this phone, so a stray tap must not be able
+ * to lose it. The old Home elements (the Preferences switch, the Server button,
+ * the Wallets button and the footer tagline) are gone with it; the Preferences
+ * switch and the Server entry point are on Settings now.
  *
- * **Preferences.** Below the signer buttons sits a small *Preferences* section
- * with the app-level flags — today just *Keep screen on while app is open*, which
- * holds the display on the whole time the app is in the foreground, so the
- * screen never sleeps out from under a scan or out from under the user reading a
- * balance (see the screen-on effect in `XbtWalletApp`).
- * It is about the app, not about one signer, which is why it lives here rather
- * than on a signer's screen; the value is owned by the navigation layer and
- * persisted the moment the switch is flipped.
+ * Under the status row the screen shows the live connection status: the "connect
+ * your own server" hint until an endpoint is saved, then a dot with *Connected*
+ * / *Connected via Tor* / *Server disconnected* — fed by the heartbeat the
+ * navigation layer runs while this screen is on display (see `XbtWalletApp`).
+ * **No host is ever rendered**, in any state: which server the user chose is
+ * theirs, not something to put in a screenshot. While an onion server's Tor is
+ * coming up the line reads *Tor starting… N%* instead of guessing at a connection
+ * it cannot make yet.
  *
- * @param keepScreenOn the current value of the keep-screen-on preference.
- * @param onKeepScreenOnChange called with the new value when the switch is
- *   flipped; the caller persists it.
+ * The screen owns no state beyond the two bits of local interaction state below:
+ * it renders [state] and forwards taps. The value of the keep-screen-on
+ * preference is owned by the navigation layer, and persisted the moment the
+ * switch is flipped on Settings.
+ *
+ * @param onOpenAbout called when the About button at the top is tapped.
+ * @param onOpenSettings called when the Settings button beside the server status
+ *   is tapped.
+ * @param onOpenSigner called with the wallet a row was tapped on; opens that
+ *   wallet's own screen.
+ * @param onAddSigner called when the Add wallet button is tapped.
+ * @param onDeleteSigner called with the wallet confirmed for removal; the caller
+ *   owns the store.
  */
 @Composable
 fun HomeScreen(
     state: HomeScreenState,
-    keepScreenOn: Boolean,
-    onKeepScreenOnChange: (Boolean) -> Unit,
-    onOpenServer: () -> Unit,
+    onOpenAbout: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onOpenSigner: (Signer) -> Unit,
     onAddSigner: () -> Unit,
-    onOpenSigners: () -> Unit,
+    onDeleteSigner: (Signer) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // Which row's "⋮" menu is open, by signer id — one at a time. Local to the
+    // interaction and never touching storage: removing a wallet is
+    // [onDeleteSigner]'s job, on the screen that owns the store.
+    var menuForId by remember { mutableStateOf<String?>(null) }
+
+    // Which signer is awaiting confirmation, by signer id. Saved across
+    // configuration changes so a rotation does not silently drop the question.
+    var confirmingDeleteId by rememberSaveable { mutableStateOf<String?>(null) }
+
     Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 24.dp, vertical = 32.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
+                .padding(start = 24.dp, end = 24.dp, top = 12.dp, bottom = 32.dp),
+            horizontalAlignment = Alignment.Start,
         ) {
-            // 1. Server first: it is the one setup step that has nothing to do
-            //    with keys, so the screen reads as "configure, then wallets".
-            OutlinedButton(
-                onClick = onOpenServer,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Server")
+            // 1. About at the very top, in the same header row the other screens
+            //    use for "← Back": the same 12.dp top padding, the same row shape.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onOpenAbout) { Text("About") }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-            // Live server status: the facts (configured? reachable?) are the
-            // state's, this only renders them.
-            ServerStatusLine(status = state.serverStatus, torProgressPercent = state.torProgressPercent)
+            // 2. The app's name, and the statement under it.
+            Text(
+                text = "XBT Wallet",
+                style = MaterialTheme.typography.headlineLarge,
+                fontWeight = FontWeight.Bold,
+            )
 
-            Spacer(modifier = Modifier.height(28.dp))
+            Spacer(modifier = Modifier.height(4.dp))
 
-            // 2. Add a wallet — the one way in.
+            Text(
+                text = "Simple, sovereign, for the people.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // 3. The divider that closes the identity block.
+            HorizontalDivider()
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // 4. Server status on the left, the way into Settings on the right.
+            //    Live server status: the facts (configured? reachable?) are the
+            //    state's, this only renders them.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(modifier = Modifier.weight(1f)) {
+                    ServerStatusLine(
+                        status = state.serverStatus,
+                        torProgressPercent = state.torProgressPercent,
+                    )
+                }
+                OutlinedButton(onClick = onOpenSettings) { Text("Settings") }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // 5. Wallets: the heading and the count, then the list itself.
+            Text("Wallets", style = MaterialTheme.typography.titleLarge)
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            Text(
+                text = when (state.signers.size) {
+                    0 -> "No wallets yet."
+                    1 -> "1 wallet"
+                    else -> "${state.signers.size} wallets"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            if (state.signers.isEmpty()) {
+                // The empty state does the explaining; the way out of itself is
+                // the Add wallet button pinned to the bottom edge, so an empty
+                // list is never a dead end.
+                Text(
+                    text = "Add a wallet to watch an account: scan the account xpub " +
+                        "from your air-gapped signer and this phone can see it without " +
+                        "ever holding its keys.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                // Flexible space, so the Add wallet button below still lands on
+                // the bottom edge of the screen.
+                Spacer(modifier = Modifier.weight(1f))
+            } else {
+                // The list starts right here and takes every remaining pixel, so
+                // the first wallet renders directly under the count and the list
+                // scrolls down from there.
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    items(state.signers, key = { it.id }) { signer ->
+                        SignerRow(
+                            signer = signer,
+                            onClick = { onOpenSigner(signer) },
+                            menuOpen = menuForId == signer.id,
+                            onMenuOpenChange = { open -> menuForId = if (open) signer.id else null },
+                            onRemoveClick = {
+                                menuForId = null
+                                confirmingDeleteId = signer.id
+                            },
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // 6. The primary action, and the last thing on the screen:
+            //    full-width and pinned to the bottom edge in both states, where a
+            //    thumb naturally lands.
             Button(
                 onClick = onAddSigner,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("Add wallet")
             }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // 3. The saved wallets. Always tappable: the list screen is where an
-            //    empty list explains itself.
-            Button(
-                onClick = onOpenSigners,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Wallets")
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = when (state.signers.size) {
-                    0 -> "No wallet yet — add one to begin."
-                    1 -> "1 wallet."
-                    else -> "${state.signers.size} wallets."
-                },
-                style = MaterialTheme.typography.bodySmall,
-                textAlign = TextAlign.Center,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            Spacer(modifier = Modifier.height(32.dp))
-
-            // 4. Preferences — app-level behaviour, not per-signer setup. One
-            //    switch today: holding the screen on the whole time the app is
-            //    open in the foreground, so it cannot sleep mid-scan or mid-read.
-            //    Flipping it writes straight through to the store (the caller owns
-            //    that).
-            Text(
-                text = "Preferences",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = "Keep screen on while app is open",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                Spacer(modifier = Modifier.weight(1f))
-                Switch(
-                    checked = keepScreenOn,
-                    onCheckedChange = onKeepScreenOnChange,
-                )
-            }
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            Text(
-                text = "XBT / SeedSigner coordinator — watch-only",
-                style = MaterialTheme.typography.bodySmall,
-                textAlign = TextAlign.Center,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
+    }
+
+    // Resolve the pending id against the current list at render time: if the
+    // signer went away underneath us, there is nothing to confirm and the dialog
+    // simply is not shown.
+    val pendingDelete = confirmingDeleteId?.let { id -> state.signers.firstOrNull { it.id == id } }
+    if (pendingDelete != null) {
+        AlertDialog(
+            onDismissRequest = { confirmingDeleteId = null },
+            title = { Text("Remove wallet?") },
+            text = {
+                Text(
+                    "\u201c${pendingDelete.name}\u201d will be removed from this phone. " +
+                        "Only the public key is stored here, so nothing is deleted on " +
+                        "the signer itself \u2014 you can add it back any time.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmingDeleteId = null
+                        onDeleteSigner(pendingDelete)
+                    },
+                ) {
+                    Text("Remove")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmingDeleteId = null }) { Text("Cancel") }
+            },
+        )
     }
 }
 
@@ -744,11 +829,11 @@ private fun HomeScreenPreview() {
     XbtWalletTheme {
         HomeScreen(
             state = previewState,
-            keepScreenOn = true,
-            onKeepScreenOnChange = {},
-            onOpenServer = {},
+            onOpenAbout = {},
+            onOpenSettings = {},
+            onOpenSigner = {},
             onAddSigner = {},
-            onOpenSigners = {},
+            onDeleteSigner = {},
         )
     }
 }
@@ -763,11 +848,11 @@ private fun HomeScreenEmptyPreview() {
     XbtWalletTheme {
         HomeScreen(
             state = previewState,
-            keepScreenOn = true,
-            onKeepScreenOnChange = {},
-            onOpenServer = {},
+            onOpenAbout = {},
+            onOpenSettings = {},
+            onOpenSigner = {},
             onAddSigner = {},
-            onOpenSigners = {},
+            onDeleteSigner = {},
         )
     }
 }

@@ -54,12 +54,20 @@ import kotlinx.coroutines.delay
  * disposes this composable and pauses the camera). The payload is passed on
  * verbatim — routing and validation are [XpubScanRoute]'s and
  * [com.xbtwallet.app.crypto.validateXpubInput]'s job, not this file's.
+ *
+ * [showCancel] defaults to true, so the callers that can dismiss the panel keep
+ * their Cancel; a screen where the scanner is the only way in passes false and
+ * hides the panel by itself (on the scan it wanted) instead.
+ *
+ * @param showCancel whether the panel draws its Cancel button. False on a screen
+ *   where the scanner cannot be dismissed.
  */
 @Composable
 fun XpubQrScannerPanel(
     onResult: (String) -> Unit,
     onCancel: () -> Unit,
     modifier: Modifier = Modifier,
+    showCancel: Boolean = true,
 ) {
     val context = LocalContext.current
 
@@ -78,9 +86,9 @@ fun XpubQrScannerPanel(
         }
     }
 
-    // The import screen stays composed underneath the panel, so there is no
-    // "screen was stopped" signal to react to: the camera lives exactly as long
-    // as this composable does. Resume on enter, pause on dispose.
+    // The screen underneath stays composed, so there is no "screen was stopped"
+    // signal to react to: the camera lives exactly as long as this composable
+    // does. Resume on enter, pause on dispose.
     DisposableEffect(barcodeView) {
         barcodeView.resume()
         onDispose { barcodeView.pause() }
@@ -105,11 +113,13 @@ fun XpubQrScannerPanel(
                     .height(280.dp),
             )
 
-            TextButton(
-                onClick = onCancel,
-                modifier = Modifier.align(Alignment.End),
-            ) {
-                Text("Cancel")
+            if (showCancel) {
+                TextButton(
+                    onClick = onCancel,
+                    modifier = Modifier.align(Alignment.End),
+                ) {
+                    Text("Cancel")
+                }
             }
         }
     }
@@ -122,8 +132,9 @@ fun XpubQrScannerPanel(
  * this long", not "the whole scan took this long". A signer's animation delivers
  * a full export in a few seconds; a minute of no new part means the camera is
  * not seeing the signer (or is seeing only some of its frames), and saying so is
- * more useful than spinning forever. Timing out closes the panel and leaves the
- * screen exactly as usable as cancelling does.
+ * more useful than spinning forever. What a timeout *does* is the caller's
+ * decision: this panel only reports it, and the caller either resets its
+ * assembly and keeps the panel up or takes the panel down.
  */
 private const val ANIMATED_SCAN_TIMEOUT_MILLIS = 60_000L
 
@@ -150,6 +161,11 @@ private const val ANIMATED_SCAN_TIMEOUT_MILLIS = 60_000L
  *
  * The payload is passed on verbatim. Routing and decoding are
  * [com.xbtwallet.app.crypto.UrAccountAssembler]'s job, not this file's.
+ *
+ * [showCancel] defaults to true so the callers that can dismiss the panel keep
+ * their Cancel; a screen where the scanner is the only way in passes false.
+ *
+ * @param showCancel whether the panel draws its Cancel button.
  */
 @Composable
 fun UrQrScannerPanel(
@@ -158,6 +174,7 @@ fun UrQrScannerPanel(
     onCancel: () -> Unit,
     onTimeout: () -> Unit,
     modifier: Modifier = Modifier,
+    showCancel: Boolean = true,
 ) {
     val context = LocalContext.current
 
@@ -226,11 +243,13 @@ fun UrQrScannerPanel(
                 modifier = Modifier.padding(top = 6.dp),
             )
 
-            TextButton(
-                onClick = onCancel,
-                modifier = Modifier.align(Alignment.End),
-            ) {
-                Text("Cancel")
+            if (showCancel) {
+                TextButton(
+                    onClick = onCancel,
+                    modifier = Modifier.align(Alignment.End),
+                ) {
+                    Text("Cancel")
+                }
             }
         }
     }
@@ -255,6 +274,11 @@ fun UrQrScannerPanel(
  *   them, and "point it at the export" would be the wrong instruction.
  *
  * The payload is passed on verbatim, exactly as the other two panels pass it.
+ *
+ * [showCancel] defaults to true so the send flow keeps the Cancel it has always
+ * had.
+ *
+ * @param showCancel whether the panel draws its Cancel button.
  */
 @Composable
 fun AnimatedUrScannerPanel(
@@ -264,6 +288,7 @@ fun AnimatedUrScannerPanel(
     onCancel: () -> Unit,
     onTimeout: () -> Unit,
     modifier: Modifier = Modifier,
+    showCancel: Boolean = true,
 ) {
     val context = LocalContext.current
 
@@ -335,11 +360,13 @@ fun AnimatedUrScannerPanel(
                 )
             }
 
-            TextButton(
-                onClick = onCancel,
-                modifier = Modifier.align(Alignment.End),
-            ) {
-                Text("Cancel")
+            if (showCancel) {
+                TextButton(
+                    onClick = onCancel,
+                    modifier = Modifier.align(Alignment.End),
+                ) {
+                    Text("Cancel")
+                }
             }
         }
     }

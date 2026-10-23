@@ -16,9 +16,13 @@ import org.junit.Test
  *
  * The camera itself is not testable on the JVM and the panel is verified by
  * `assembleDebug`, but *what a scan does to the state* is a rule, not a view:
- * import is QR-only, a valid scan populates the key and its metadata, a bad scan
- * clears everything before it records its error, and the save is refused until
- * both a name and a parsed key are present. That is what these tests pin.
+ * import is QR-only, a valid scan populates the key, a bad scan clears
+ * everything before it records its error, the panel comes down as soon as
+ * a scan has produced a result, a rescan throws the last result away and opens a
+ * clean panel, and the save is refused until both a name and a parsed key are
+ * present. A key-expression QR is still accepted, but the fingerprint and path it
+ * carries are deliberately dropped — this is the watch-only path, and a text
+ * import must never become signing-ready. That is what these tests pin.
  */
 class ImportXpubScreenStateTest {
 
@@ -44,7 +48,7 @@ class ImportXpubScreenStateTest {
     @Test
     fun `the embedded panel is closed and nothing is denied at first`() {
         val state = state()
-        assertFalse("the scanner must not open by itself", state.showScanner)
+        assertFalse("the state never opens the panel itself — the screen asks on entry", state.showScanner)
         assertFalse("no denial has happened yet", state.cameraDenied)
         assertNull(state.scannedXpub)
         assertNull(state.scanError)
@@ -87,29 +91,30 @@ class ImportXpubScreenStateTest {
         assertEquals("the routed key lands in the state", zpub, state.scannedXpub)
         assertEquals("and is validated exactly as any key would be", "zpub", state.recognisedVersion)
         assertNull("a valid scan shows no error", state.scanError)
-        assertNull("a bare URI carries no fingerprint", state.masterFingerprint)
-        assertNull("a bare URI carries no path", state.derivationPath)
         assertFalse(state.showScanner)
     }
 
     @Test
-    fun `a key-expression scan captures the fingerprint and path`() {
+    fun `a key-expression scan keeps the key but drops its metadata`() {
+        // A key expression stays a valid import — routed and validated exactly as
+        // before — but this is the watch-only text-QR path, so whatever
+        // fingerprint and path the QR carried are deliberately discarded.
         val state = state()
         state.onScanResult("[ab12cd34/84'/0'/0']$zpub")
 
         assertEquals(zpub, state.scannedXpub)
-        assertEquals("ab12cd34", state.masterFingerprint)
-        assertEquals("84'/0'/0'", state.derivationPath)
+        assertEquals("zpub", state.recognisedVersion)
         assertNull(state.scanError)
     }
 
     @Test
-    fun `a fingerprint-only scan captures the fingerprint and no path`() {
+    fun `a fingerprint-only key expression is accepted and its fingerprint is dropped`() {
         val state = state()
         state.onScanResult("[ab12cd34]$zpub")
 
-        assertEquals("ab12cd34", state.masterFingerprint)
-        assertNull(state.derivationPath)
+        assertEquals(zpub, state.scannedXpub)
+        assertEquals("zpub", state.recognisedVersion)
+        assertNull(state.scanError)
     }
 
     @Test
@@ -119,8 +124,6 @@ class ImportXpubScreenStateTest {
 
         assertNull("a bad scan leaves no key behind", state.scannedXpub)
         assertNull(state.recognisedVersion)
-        assertNull(state.masterFingerprint)
-        assertNull(state.derivationPath)
         assertTrue("the validator's reason is surfaced", state.scanError != null)
     }
 
@@ -133,8 +136,6 @@ class ImportXpubScreenStateTest {
         state.onScanResult("nonsense")
 
         assertNull("the earlier key must not linger looking imported", state.scannedXpub)
-        assertNull(state.masterFingerprint)
-        assertNull(state.derivationPath)
         assertTrue(state.scanError != null)
     }
 
@@ -145,26 +146,82 @@ class ImportXpubScreenStateTest {
         state.onScanResult("bitcoin:$zpub?amount=2")
 
         assertEquals(zpub, state.scannedXpub)
-        assertNull("the second, bare-key scan drops the earlier metadata", state.masterFingerprint)
-        assertNull(state.derivationPath)
         assertNull(state.scanError)
     }
 
     @Test
-    fun `cancelling the panel leaves the scan untouched`() {
+    fun `hiding the panel after a scan keeps what was read`() {
         val state = state()
         state.onScanResult(zpub)
         state.onCameraPermissionGranted()
         state.onScannerDismissed()
 
-        assertFalse("cancel closes the panel", state.showScanner)
-        assertEquals("cancel must not rewrite what was scanned", zpub, state.scannedXpub)
+        assertFalse("the panel comes down once a scan has landed", state.showScanner)
+        assertEquals("and hiding it must not rewrite what was scanned", zpub, state.scannedXpub)
+    }
+
+    // --- rescan ------------------------------------------------------------
+
+    @Test
+    fun `a rescan clears the last scan and reopens the panel`() {
+        val state = state()
+        state.onNameChange("Cold storage")
+        state.onCameraPermissionGranted()
+        state.onScanResult("[ab12cd34/84'/0'/0']$zpub")
+        state.onScannerDismissed()
+
+        state.onRescanRequested()
+
+        assertTrue("rescan brings the panel back", state.showScanner)
+        assertNull("and the key the user is rescanning is gone", state.scannedXpub)
+        assertNull(state.recognisedVersion)
+        assertNull(state.scanError)
+
+        // Nothing is importable from the discarded scan: the parsed key went with
+        // the fields the confirmation was drawn from.
+        state.import()
+        assertNull("a discarded scan cannot be saved", saved)
+        assertTrue("the save is refused, as it is before any scan", state.scanError != null)
+    }
+
+    @Test
+    fun `a rescan after a bad scan clears the message and opens a clean panel`() {
+        val state = state()
+        state.onCameraPermissionGranted()
+        state.onScanResult("nonsense")
+        state.onScannerDismissed()
+        assertTrue("the bad scan said why", state.scanError != null)
+
+        state.onRescanRequested()
+
+        assertTrue(state.showScanner)
+        assertNull("the last complaint is not carried into the new scan", state.scanError)
+
+        state.onScanResult(zpub)
+        assertEquals("the fresh scan reads normally", zpub, state.scannedXpub)
+        assertNull(state.scanError)
+    }
+
+    @Test
+    fun `a rescan clears an earlier camera denial`() {
+        val state = state()
+        state.onCameraPermissionDenied()
+
+        // Reached only with the permission in hand — the screen checks first —
+        // and a panel that is up must not sit behind a stale denial hint.
+        state.onRescanRequested()
+
+        assertTrue("the panel is up", state.showScanner)
+        assertFalse("the denial hint is gone", state.cameraDenied)
     }
 
     // --- import ------------------------------------------------------------
 
     @Test
-    fun `import saves the signer with its captured metadata`() {
+    fun `import of a key-expression scan saves a bare watch-only key`() {
+        // The key expression is accepted, but what reaches the store is watch-only:
+        // no fingerprint, no derivation path, and so not signing-ready. That is the
+        // ruling this whole path exists to enforce.
         val state = state()
         state.onNameChange("Cold storage")
         state.onScanResult("[ab12cd34/84'/0'/0']$zpub")
@@ -174,10 +231,8 @@ class ImportXpubScreenStateTest {
         val signer = saved
         assertTrue("the signer was saved", signer != null)
         assertEquals("Cold storage", signer!!.name)
-        assertEquals(
-            SignerType.WatchOnlyXpub(zpub, masterFingerprint = "ab12cd34", derivationPath = "84'/0'/0'"),
-            signer.type,
-        )
+        assertEquals(SignerType.WatchOnlyXpub(zpub), signer.type)
+        assertFalse("a text-qr import is never signing-ready", signer.signingReady)
     }
 
     @Test

@@ -14,13 +14,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,11 +41,18 @@ import com.xbtwallet.app.crypto.validateXpubInput
 import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerOrigin
 import com.xbtwallet.app.data.SignerStore
+import com.xbtwallet.app.ui.OrangeOutlineButton
 
 /**
  * State behind the watch-only xpub import screen: the signer's name, the key
- * captured by the last scan (plus whatever metadata rode with it), and the save
- * action.
+ * captured by the last scan, and the save action.
+ *
+ * **This screen is watch-only, and it stays that way.** [XpubScanRoute] still
+ * routes the payload and [validateXpubInput] still validates the key — a
+ * key-expression QR (`[ab12cd34/84'/0'/0']zpub…`) remains an accepted import —
+ * but any fingerprint and derivation path it carried are deliberately discarded
+ * at this call site. Signing metadata belongs to a signing-device (BC-UR)
+ * import alone, so a key that arrived as text can never become signing-ready.
  *
  * Kept out of the composable for two reasons. First, it is plain Kotlin and can
  * be exercised without a UI test — and without a camera. Second, the screen is
@@ -57,6 +64,14 @@ import com.xbtwallet.app.data.SignerStore
  * have we got" is exactly "what did the last scan produce". A bad scan clears
  * every scanned field before it records its error, so a stale earlier key can
  * never look like the one that was just scanned.
+ *
+ * The panel is not a screen of its own: the screen opens it on entry (asking the
+ * one camera permission it needs), and it comes down again as soon as a scan has
+ * produced a result — a live camera after the key is captured is not wanted.
+ * What brings it back is **Rescan**, and that starts from a clean slate: it
+ * forgets the last result and its complaint before the panel reappears, so
+ * nothing on screen can belong to a key the user just threw away. There is no
+ * cancel while the panel is up: the ways out are a scan, or leaving the screen.
  */
 @Stable
 class ImportXpubScreenState(
@@ -74,14 +89,6 @@ class ImportXpubScreenState(
     var scannedXpub by mutableStateOf<String?>(null)
         private set
 
-    /** Master fingerprint carried by the scanned key expression, when there was one. */
-    var masterFingerprint by mutableStateOf<String?>(null)
-        private set
-
-    /** Derivation path (no leading `m/`) carried by the scanned key expression, when there was one. */
-    var derivationPath by mutableStateOf<String?>(null)
-        private set
-
     /** Set to "zpub"/"xpub"/"ypub" once a scan parses, null otherwise. */
     var recognisedVersion by mutableStateOf<String?>(null)
         private set
@@ -95,7 +102,9 @@ class ImportXpubScreenState(
      *
      * The panel is part of this screen, not a separate activity, so "is the
      * scanner up" is screen state like any other — and, being plain state, it is
-     * testable without a camera.
+     * testable without a camera. It is opened by the screen on entry (or by
+     * [onRescanRequested]) and closed by a scan that produced a result; no
+     * control on the screen puts it away, because the QR is the only way in.
      */
     var showScanner by mutableStateOf(false)
         private set
@@ -103,7 +112,8 @@ class ImportXpubScreenState(
     /**
      * Whether the user refused the CAMERA permission.
      *
-     * Kept so the screen can say why the button did nothing and offer a retry.
+     * Kept so the screen can say why there is no scanner and offer a retry —
+     * the "Try again" button is the only scanner control this screen has.
      * There is no paste fallback to fall back to: the QR is the only way in.
      */
     var cameraDenied by mutableStateOf(false)
@@ -135,27 +145,63 @@ class ImportXpubScreenState(
     }
 
     /**
-     * Dismisses the panel (Cancel, or the caller hiding it after a scan).
+     * Closes the panel after it has produced a result.
      *
-     * Whatever the last scan produced is left exactly as it was: cancelling a
-     * scan is not the same as scanning a bad one.
+     * A live camera is only wanted while there is something to read, so the
+     * screen takes the panel down as soon as a scan has landed — valid or not.
+     * Whatever the scan produced is left exactly as it was: hiding the panel is
+     * not the same as a bad scan, which clears the fields before it records its
+     * message.
      */
     fun onScannerDismissed() {
         showScanner = false
     }
 
     /**
+     * **Rescan** — the user is not keeping what the last scan produced.
+     *
+     * [clearScan] throws away the last result and any complaint about it, and the
+     * panel comes back up on that empty slate, so the confirmation below can only
+     * ever describe the key that is there now.
+     *
+     * The caller checks the CAMERA permission before this, exactly as it does on
+     * entry: [onRescanRequested] is only ever reached with the permission in
+     * hand, which is also why it clears any earlier denial.
+     */
+    fun onRescanRequested() {
+        clearScan()
+        cameraDenied = false
+        showScanner = true
+    }
+
+    /**
+     * Drops everything the last scan left behind: the parsed key, the scanned
+     * text, its version label, and the message a bad scan recorded.
+     */
+    private fun clearScan() {
+        scannedKey = null
+        scannedXpub = null
+        recognisedVersion = null
+        scanError = null
+    }
+
+    /**
      * Routes and validates one scanned QR payload.
      *
-     * [XpubScanRoute] decides what part of the payload is the key and what
-     * metadata came with it; [validateXpubInput] then decides whether that key is
-     * any good — the same validator a keyboard entry would have gone through, so
-     * the camera can never accept what typing would have refused.
+     * [XpubScanRoute] decides what part of the payload is the key;
+     * [validateXpubInput] then decides whether that key is any good — the same
+     * validator a keyboard entry would have gone through, so the camera can never
+     * accept what typing would have refused.
      *
-     * A valid scan populates the key and its metadata and clears any error. An
-     * invalid scan **clears** the scanned fields before recording the message:
-     * leaving a previous good key on screen after a bad scan would present the
-     * wrong key as imported. Scanning again replaces everything either way.
+     * Whatever metadata the route pulled out of a key expression is deliberately
+     * **not** kept here: this is the watch-only text-QR path, and a fingerprint
+     * and path reach this phone from a signing device or not at all. The key
+     * itself is still accepted and validated exactly as before.
+     *
+     * A valid scan populates the key and clears any error. An invalid scan
+     * **clears** the scanned fields before recording the message: leaving a
+     * previous good key on screen after a bad scan would present the wrong key as
+     * imported. Scanning again replaces everything either way.
      */
     fun onScanResult(payload: String) {
         val result = XpubScanRoute.extract(payload)
@@ -164,23 +210,24 @@ class ImportXpubScreenState(
                 scannedKey = validation
                 scannedXpub = result.keyText
                 recognisedVersion = validation.versionLabel
-                masterFingerprint = result.masterFingerprint
-                derivationPath = result.derivationPath
                 scanError = null
             }
 
             is XpubImport.Invalid -> {
-                scannedKey = null
-                scannedXpub = null
-                recognisedVersion = null
-                masterFingerprint = null
-                derivationPath = null
+                clearScan()
                 scanError = validation.message
             }
         }
     }
 
-    /** Validates and, when everything checks out, stores a new watch-only wallet. */
+    /**
+     * Validates and, when everything checks out, stores a new watch-only wallet.
+     *
+     * The key is saved with **no** fingerprint and **no** derivation path: this
+     * is the text-QR path, it records [SignerOrigin.TEXT_QR] and nothing else, and
+     * that is precisely what keeps it watch-only. Signing metadata is a
+     * signing-device concern, and this path never has any to record.
+     */
     fun import() {
         nameError = if (name.isBlank()) "Give this wallet a name." else null
 
@@ -196,17 +243,15 @@ class ImportXpubScreenState(
         if (nameError != null) return
 
         val xpub = scannedXpub ?: return
-        // The metadata is stored as scanned (fingerprint lowercased, path
-        // normalized by XpubScanRoute); `key` proves the xpub parsed. The origin
-        // is spelled out as the text-QR default: this key came in as a plain
-        // xpub QR, not off a signing device, and that is what keeps it wearing
-        // the grey "watch-only" tag rather than the orange "seedsigner" one.
+        // No fingerprint and no derivation path, by design: this key came in as a
+        // plain text QR, not off a signing device, so it is saved watch-only and
+        // stays that way. `key` proves the xpub parsed. The origin is spelled out
+        // as the text-QR default, which is also what keeps it wearing the grey
+        // "watch-only" tag rather than the orange "seedsigner" one.
         onSaved(
             signerStore.add(
                 name = name,
                 xpub = xpub,
-                masterFingerprint = masterFingerprint,
-                derivationPath = derivationPath,
                 importedVia = SignerOrigin.TEXT_QR,
             ),
         )
@@ -231,21 +276,41 @@ fun rememberImportXpubScreenState(
 }
 
 /**
- * Add a wallet by scanning its account xpub — the row of the Add-wallet flow
- * reached from [AddSignerScreen]'s **Watch-only xpub** button.
+ * Add a wallet by scanning its account xpub — the screen of the Add-wallet flow
+ * reached from [AddSignerScreen]'s **Watch only** card.
  *
- * Import is **QR-only**. The QR is the air-gapped channel between the signer and
- * this phone, and it is the only channel that can carry the account's metadata
- * (the master fingerprint and derivation path a BIP-32 key-expression QR holds).
- * A paste field would have been a second way in that silently drops that
- * metadata and invites fat-fingered keys, so it is gone: every key that reaches
- * the store came off a QR, was routed by [XpubScanRoute], and was then validated
- * by the shared [com.xbtwallet.app.crypto.validateXpubInput] — the same gate a
- * keyboard entry would have had to pass.
+ * Import is **QR-only**, and it is strictly watch-only. The QR is the air-gapped
+ * channel between the signer and this phone. A key-expression QR
+ * (`[ab12cd34/84'/0'/0']zpub…`) is still accepted — [XpubScanRoute] routes it and
+ * the shared [com.xbtwallet.app.crypto.validateXpubInput] validates the key — but
+ * the fingerprint and derivation path it carries are deliberately thrown away:
+ * signing metadata reaches this app only through a signing-device (BC-UR)
+ * import, so a text import can never become signing-ready. A paste field would
+ * have been a second way in that invites fat-fingered keys, so it is gone: every
+ * key that reaches the store came off a QR, was routed by [XpubScanRoute], and
+ * was then validated by the same gate a keyboard entry would have had to pass.
  *
  * Scanning is an embedded panel, not a screen of its own: [XpubQrScannerPanel]
  * opens inline in this column, in portrait. Nothing here launches the scanner
  * library's full-screen activity.
+ *
+ * **The scanner is up from the moment the screen opens, and it is the only way
+ * in.** Entering the screen asks for the camera once ([LaunchedEffect] below,
+ * through the same request the denial recovery uses): already-granted opens the
+ * panel immediately, otherwise the one system permission dialog runs. There is
+ * no button to press first. Once the panel is up there is no cancel and no way
+ * to put it away — the ways out are a scan that produces a result, or leaving
+ * the screen.
+ *
+ * A scan does put the panel away: a live camera after the key is captured is not
+ * wanted, so the confirmation below is what the user is left looking at.
+ * **Rescan** (shown once there is a result to throw away) is the way back — it
+ * clears the last scan and its complaint and reopens the panel through the same
+ * permission check as entry.
+ *
+ * A denied permission is the one state with no scanner at all: the screen says
+ * what is missing and offers "Try again", which is the only scanner control it
+ * renders besides Rescan.
  *
  * The name validates inline and the save is refused until the name is set and a
  * key has been scanned and parsed.
@@ -258,38 +323,53 @@ fun ImportXpubScreen(
 ) {
     val context = LocalContext.current
 
+    // What to open once CAMERA is in hand. Both ways the panel comes up — entry
+    // into the screen and Rescan — go through this one system request, and the
+    // launcher's answer continues with whichever action was asked for: open the
+    // panel on a clean slate, or open it on the rescan's cleared one.
+    var pendingOpen by remember { mutableStateOf<(() -> Unit)?>(null) }
+
     // CAMERA is asked for by this app, not by the scanner library: the panel is
-    // our own composable and it can only work with the permission in hand. A
-    // granted request opens the panel; a refusal is remembered so the screen can
-    // explain itself.
+    // our own composable and it can only work with the permission in hand. The
+    // answer completes whatever request was in flight — requestCamera always
+    // arms one before it launches — and a refusal is the one thing the screen has
+    // to report.
     val scanPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        if (granted) state.onCameraPermissionGranted() else state.onCameraPermissionDenied()
+        val open = pendingOpen
+        pendingOpen = null
+        if (granted) open?.invoke() else state.onCameraPermissionDenied()
     }
 
-    // "Scan QR" and "Try again" do the same thing: with the permission already
-    // held, open the panel at once (no pointless dialog); otherwise ask for it.
-    // The request is pending only for as long as the system dialog is up — its
-    // answer arrives in the launcher callback above — so no flag has to outlive
-    // it.
-    val pendingScanRequest: () -> Unit = {
+    // The one way the panel is opened: with the permission already held the
+    // action runs at once (no pointless dialog); otherwise the request goes out
+    // and its answer completes the same action. "Try again" and Rescan both
+    // call this, so the screen has exactly one permission path.
+    val requestCamera: (() -> Unit) -> Unit = { action ->
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
         ) {
-            state.onCameraPermissionGranted()
+            action()
         } else {
+            pendingOpen = action
             scanPermissionLauncher.launch(Manifest.permission.CAMERA)
         }
     }
+
+    // The screen's entry point *is* the scanner: opening the screen opens the
+    // panel (or fires the one permission request it needs), exactly as the send
+    // flow does. Keyed on Unit, so it happens once per visit rather than on
+    // every recomposition — a re-entry into the screen asks again, which is what
+    // a user who left and came back expects.
+    LaunchedEffect(Unit) { requestCamera { state.onCameraPermissionGranted() } }
 
     Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 20.dp, vertical = 12.dp)
-                .verticalScroll(rememberScrollState()),
+                .padding(horizontal = 20.dp, vertical = 12.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onBack) { Text("\u2190 Back") }
@@ -324,62 +404,94 @@ fun ImportXpubScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            OutlinedButton(
-                onClick = pendingScanRequest,
-                modifier = Modifier.fillMaxWidth(),
+            // The one region that is allowed to flex. Everything above it (the
+            // header, the hint, the name field) and the save button below it are
+            // pinned, so the scanner panel coming and going — which it does on
+            // entry and on every scan — cannot push a single pixel of them
+            // around. It takes the leftover height whether the panel is up or
+            // not and scrolls on the inside when the panel plus the confirmation
+            // are taller than the space left over.
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
             ) {
-                Text("Scan QR")
-            }
-
-            if (state.cameraDenied) {
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "Camera permission is required \u2014 wallets are imported by " +
-                        "scanning the signer's QR.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                TextButton(onClick = pendingScanRequest) { Text("Try again") }
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // The scanner is a panel inside this column, portrait, scrolled with
-            // the rest of the screen. A scan is routed by XpubScanRoute and
-            // validated by the same seam a keyboard entry would have used, so the
-            // camera can never accept a key typing would refuse.
-            if (state.showScanner) {
-                XpubQrScannerPanel(
-                    onResult = { payload ->
-                        state.onScanResult(payload)
-                        state.onScannerDismissed()
-                    },
-                    onCancel = state::onScannerDismissed,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                if (state.cameraDenied) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Camera permission is required \u2014 wallets are imported by " +
+                            "scanning the signer's QR.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    TextButton(onClick = { requestCamera { state.onCameraPermissionGranted() } }) {
+                        Text("Try again")
+                    }
+                }
 
                 Spacer(modifier = Modifier.height(12.dp))
+
+                // The scanner is a panel inside this region, portrait — and it is
+                // the screen's entry point: the LaunchedEffect above opened it as
+                // soon as the screen appeared. `showCancel = false` says there is
+                // no way out of it except the scan itself, and a scan is what
+                // takes it down: a live camera is wanted only while the QR is
+                // being read, and Rescan below is the way back.
+                if (state.showScanner) {
+                    XpubQrScannerPanel(
+                        onResult = { payload ->
+                            state.onScanResult(payload)
+                            state.onScannerDismissed()
+                        },
+                        // Never invoked: this panel draws no cancel (showCancel is
+                        // false).
+                        onCancel = {},
+                        showCancel = false,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
+
+                state.scanError?.let { error ->
+                    Text(
+                        text = error,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
+
+                state.scannedXpub?.let { xpub ->
+                    ScannedKeyConfirmation(
+                        xpub = xpub,
+                        version = state.recognisedVersion,
+                    )
+                    Spacer(modifier = Modifier.height(20.dp))
+                }
+
+                // Once a scan has produced something — a key to keep, or a reason
+                // it could not be read — the panel is gone and this is the way
+                // back to it. It clears whatever the last scan left behind first,
+                // so the confirmation above can only ever describe the key that
+                // is there now. The half-orange outline rather than the vibrant
+                // filled style of "Add wallet" below it: it is the secondary
+                // action, and the two must not read as competing.
+                if (state.scannedXpub != null || state.scanError != null) {
+                    OrangeOutlineButton(
+                        onClick = { requestCamera { state.onRescanRequested() } },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Rescan")
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
             }
 
-            state.scanError?.let { error ->
-                Text(
-                    text = error,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-            }
-
-            state.scannedXpub?.let { xpub ->
-                ScannedKeyConfirmation(
-                    xpub = xpub,
-                    version = state.recognisedVersion,
-                    masterFingerprint = state.masterFingerprint,
-                    derivationPath = state.derivationPath,
-                )
-                Spacer(modifier = Modifier.height(20.dp))
-            }
-
+            // Pinned: the last element of the fixed column, after the region that
+            // flexes, so opening or closing the scanner panel never moves it.
             Button(
                 onClick = state::import,
                 modifier = Modifier.fillMaxWidth(),
@@ -393,22 +505,19 @@ fun ImportXpubScreen(
 }
 
 /**
- * What was just scanned, echoed back before it is saved: the key in monospace,
- * the version line the screen has always shown, and — when the QR was a BIP-32
- * key expression — the master fingerprint and derivation path that came with it.
+ * What was just scanned, echoed back before it is saved: the key in monospace
+ * and the version line the screen has always shown. Nothing else — this is the
+ * text-QR watch-only path, so there is no fingerprint and no derivation path to
+ * show, and none is pretended to be missing.
  *
  * The key is middle-elided rather than shown whole: a 111-character zpub would
  * dominate the screen, and the point of this block is confirmation that *a* key
- * was read, not a second place to copy it from. When the QR carried no metadata,
- * a quiet line says so — it is not an error, but it is worth knowing before the
- * signing flow asks for a richer QR later.
+ * was read, not a second place to copy it from.
  */
 @Composable
 private fun ScannedKeyConfirmation(
     xpub: String,
     version: String?,
-    masterFingerprint: String?,
-    derivationPath: String?,
 ) {
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -428,34 +537,6 @@ private fun ScannedKeyConfirmation(
                     text = "Recognised $it \u2014 treated as native segwit (bc1q\u2026 addresses).",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary,
-                )
-            }
-
-            masterFingerprint?.let {
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "Master fingerprint: $it",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                )
-            }
-
-            derivationPath?.let {
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "Derivation: m/$it",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                )
-            }
-
-            if (masterFingerprint == null && derivationPath == null) {
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "This QR carries no fingerprint or derivation path \u2014 fine for " +
-                        "watching; the signing flow may ask for a richer QR later.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }

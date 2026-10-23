@@ -1,5 +1,6 @@
 package com.xbtwallet.app.ui.signers
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -10,10 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -21,63 +19,65 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.xbtwallet.app.data.SignerOrigin
+import com.xbtwallet.app.ui.OrangeOutlineButton
 import com.xbtwallet.app.ui.Route
 import com.xbtwallet.app.ui.Screen
+import com.xbtwallet.app.ui.theme.XbtPrimary
 import com.xbtwallet.app.ui.theme.XbtWalletTheme
 
 /**
- * **Add wallet** — the one way a wallet enters the app.
+ * **Add wallet** — the one way a wallet enters the app, as three cards.
  *
- * Three rows, one wallet. The difference between them is only the QR they can
- * read and the origin they declare, never the record they write: all three end up
- * calling `SignerStore.add` with a watch-only xpub plus whatever fingerprint and
- * derivation path the QR carried. There is no second wallet type, and no second
- * kind of key.
+ * Each card is a *kind of wallet*, and each carries its own copy and its own
+ * buttons — no intro paragraph above them and no footer below, because the card
+ * is now the unit: a title, a sentence saying who it is for, and the buttons
+ * that start that path.
  *
- *  1. **SeedSigner** (filled) → [AddSigningDeviceScreen], declaring
- *     [SignerOrigin.SEEDSIGNER_UR]. The SeedSigner *Export Xpub → single-sig →
- *     native segwit → Animated* path: the account key wrapped in the
- *     fountain-coded BC-UR format a SeedSigner speaks.
- *  2. **Other signing device** (tonal) → the same [AddSigningDeviceScreen],
- *     declaring [SignerOrigin.SIGNING_DEVICE_UR]. Keystone, Jade — the same
- *     animated BC-UR wrapper, a different device.
- *  3. **Watch-only xpub** (outlined) → [ImportXpubScreen], declaring
- *     [SignerOrigin.TEXT_QR]. A bare `xpub`/`ypub`/`zpub`, a `bitcoin:` URI, or a
- *     BIP-32 key expression (`[ab12cd34/84'/0'/0']zpub…`). This is the path for
- *     a coordinator's export, for a Coldcard's text/JSON export, and for anything
- *     that puts the key itself in the code — Coldcard is deliberately *not*
- *     promised on the signing-device rows, because its classic exports are not
- *     BC-UR.
+ *  1. **SeedSigner / External signer** — one `Select`, which opens
+ *     [SigningDeviceChoiceScreen] and asks the follow-up question there
+ *     (SeedSigner vs some other device). Keeping that question on its own screen
+ *     is what preserves the two origins the app already stamps: only the
+ *     SeedSigner tap earns the orange *seedsigner* tag.
+ *  2. **Hot wallet** — two buttons, *Create* and *Import*, both of which land in
+ *     the `ui.hotwallet` screens. **This is UI scaffolding for the ratified
+ *     hot-wallet phase and nothing more: no seed material is generated,
+ *     imported, or stored anywhere yet, and the hot-wallet screens' terminal
+ *     buttons are disabled.** The card is here so the shape of the flow can be
+ *     seen and judged before any of the cryptography behind it exists.
+ *  3. **Watch only** — one `Select`, the unchanged [ImportXpubScreen] text path.
+ *     A bare `xpub`/`ypub`/`zpub`, a `bitcoin:` URI, or a BIP-32 key expression
+ *     (`[ab12cd34/84'/0'/0']zpub…`) from any coordinator.
  *
- * Three rows rather than one clever scanner because the formats want different
- * things from the user: the animated path needs the camera held on a moving code
- * until the export is whole, and saying so up front is friendlier than a generic
- * scanner that guesses. Splitting the two animated rows is not about the QR —
- * both read the same BC-UR payload — but about what the app is allowed to claim
- * afterwards: only the SeedSigner row earns the orange *seedsigner* tag. Splitting
- * them also keeps the text path exactly as it was — a regression there would be
- * invisible until someone's export stopped importing.
+ * The two animated-BC-UR rows that used to live here moved to
+ * [SigningDeviceChoiceScreen] with [AddWalletRow] and [routeFor] unchanged —
+ * they are the *answer* to card 1's question, not a thing this screen offers.
  *
- * The hot-wallet path was removed rather than deferred. Generating a seed on
- * this phone is no longer a "not yet" — keeping the seed off the phone is a
- * stated product stance, and a watch-only app that offers to create a hot
- * wallet invites exactly the behaviour the product exists to prevent. Spending
- * stays a QR round-trip to the signer.
- *
- * The screen owns no state; it renders the copy and forwards the taps — one
- * [onChoose] carrying *which row* was tapped, because that is exactly the fact
- * the two animated rows cannot otherwise tell apart. What a row opens is
- * [routeFor], a pure function, so the mapping from "the user tapped SeedSigner"
- * to "the record will say SeedSigner" is pinned by a JVM test rather than living
- * only in this composable's wiring.
- *
- * The copy lives in the constants below, free of Compose imports, so
- * [AddSignerCopyTest] can pin it as Kotlin rather than a rendering detail a JVM
- * test cannot reach.
+ * The screen owns no state; it renders the copy and forwards the taps. The copy
+ * lives in the constants below, free of Compose imports, so [AddSignerCopyTest]
+ * can pin it as Kotlin rather than a rendering detail a JVM test cannot reach.
  */
+
+/**
+ * The border worn by a card, per wallet kind. Each card is a way in, and the
+ * hairline colour is the only thing that tells the three apart at a glance: the
+ * orange the app already uses for a SeedSigner-signing path, an orange-red for
+ * the keys-on-this-phone path, and a soft half-strength blue for the path that
+ * can never spend. The fill is transparent, so the border is the whole cue.
+ */
+
+/** Card 1's border: the wallet's own bitcoin orange. */
+private val AddWalletExternalBorder = XbtPrimary
+
+/** Card 2's border: orange-red, hotter than the SeedSigner orange. */
+private val AddWalletHotBorder = Color(0xFFFF5722)
+
+/** Card 3's border: a soft, half-transparent blue — public keys only. */
+private val AddWalletWatchBorder = Color(0xFF3D7BD9).copy(alpha = 0.6f)
 
 /** The header's back affordance, unchanged. */
 internal const val ADD_SIGNER_BACK_LABEL = "\u2190 Back"
@@ -85,69 +85,94 @@ internal const val ADD_SIGNER_BACK_LABEL = "\u2190 Back"
 /** The screen title, in the app's user-facing word for the unit: a wallet. */
 internal const val ADD_SIGNER_TITLE = "Add wallet"
 
-/**
- * The one intro above the three rows — it says what a wallet *is* on this phone
- * before offering the ways to add one.
- */
-internal const val ADD_SIGNER_INTRO =
-    "Add a wallet to watch. The phone holds public keys only \u2014 it can check " +
-        "balances and prepare transactions, but it can never spend. Keys never " +
-        "leave your signer."
+/** The label every card's single-option button shares. */
+internal const val ADD_SIGNER_SELECT_BUTTON = "Select"
 
-/** The first row's label: the SeedSigner's own animated BC-UR export. */
+/** The Hot wallet card's first button: start a dice-roll creation. */
+internal const val ADD_SIGNER_CREATE_BUTTON = "Create"
+
+/** The Hot wallet card's second button: import an existing seed. */
+internal const val ADD_SIGNER_IMPORT_BUTTON = "Import"
+
+/** Card 1's title — the external-signer family, SeedSigner first among them. */
+internal const val ADD_SIGNER_EXTERNAL_TITLE = "SeedSigner / External signer"
+
+/** Card 1's copy: who this card is for. */
+internal const val ADD_SIGNER_EXTERNAL_COPY =
+    "Select this if your wallet supports QR-based transaction signing."
+
+/** Card 2's title. */
+internal const val ADD_SIGNER_HOT_TITLE = "Hot wallet"
+
+/** Card 2's copy: keys on this phone, and the two ways to put them there. */
+internal const val ADD_SIGNER_HOT_COPY =
+    "Private keys live on this device. Create a new wallet with dice rolls, or " +
+        "import an existing seed."
+
+/** Card 3's title. */
+internal const val ADD_SIGNER_WATCH_TITLE = "Watch only"
+
+/**
+ * Card 3's copy: what watch-only can and cannot do.
+ *
+ * A watch-only wallet holds public keys only, so it can **look** but never
+ * sign: balances, UTXOs, receive/change addresses and the transaction list are
+ * all it does. Spending *and* preparing the transaction to spend are both out —
+ * those need keys this phone does not have — so the copy names what is left
+ * rather than promising transaction preparation it cannot deliver.
+ */
+internal const val ADD_SIGNER_WATCH_COPY =
+    "The phone holds public keys only. Check balances, view UTXOs and receive/change " +
+        "addresses, and share a receive address \u2014 but never spend or prepare a " +
+        "transaction. Scan an xpub QR from any coordinator."
+
+/** The SeedSigner option's label, as drawn on [SigningDeviceChoiceScreen]. */
 internal const val ADD_SEEDSIGNER_BUTTON = "SeedSigner"
 
-/** The caption under the first row, walking the user through the SeedSigner's menu. */
+/** The SeedSigner option's caption, walking the user through its menu. */
 internal const val ADD_SEEDSIGNER_CAPTION =
     "Export Xpub \u2192 single-sig \u2192 native segwit \u2192 Animated QR on your " +
         "SeedSigner, then scan it here."
 
-/** The second row's label: any other signing device's animated BC-UR export. */
+/** The other-device option's label. */
 internal const val ADD_SIGNING_DEVICE_BUTTON = "Other signing device"
 
-/** The caption under the second row, naming the devices it covers. */
+/** The other-device option's caption, naming the devices it covers. */
 internal const val ADD_SIGNING_DEVICE_CAPTION =
     "Keystone, Jade \u2014 scan the device's animated BC-UR export QR."
 
-/** The third row's label: a plain text xpub from any coordinator. */
-internal const val ADD_WATCH_ONLY_BUTTON = "Watch-only xpub"
-
-/** The caption under the third row, carrying the Coldcard case. */
-internal const val ADD_WATCH_ONLY_CAPTION =
-    "Scan a plain xpub QR from any coordinator \u2014 a bare xpub, a bitcoin: URI, " +
-        "or a [fingerprint/path]xpub expression. Coldcard's text export lives here."
-
-/** The footer panel, closing on why watching is enough. */
-internal const val ADD_SIGNER_FOOTER =
-    "Watching is enough to receive and check balances. Spending stays a QR " +
-        "round-trip to your signer \u2014 which is how your keys stay off this phone."
-
 /**
- * The three rows of the chooser, in the order they are shown.
+ * The two options of the signing-device chooser, in the order they are shown.
  *
- * The order is the declaration order, because it is the product order: the
- * SeedSigner is what this app is built around, "some other device" is the honest
- * fallback for everyone else, and the plain text xpub is last. Each entry carries
- * the words the row is drawn with, so the row list and its copy cannot drift.
+ * Both rows open the *same* screen ([Screen.ADD_SIGNING_DEVICE]); what they
+ * cannot otherwise tell apart is which origin the saved wallet should declare,
+ * and that is [routeFor].
  *
  * Not `internal` like the copy constants beside it, because it is the argument
- * the public [AddSignerScreen] takes — the one thing the screen has to be told,
+ * [SigningDeviceChoiceScreen] takes — the one thing that screen has to be told,
  * since it cannot know which physical device is in the user's hand.
+ *
+ * There is no watch-only row any more: the watch-only path is card 3 of
+ * [AddSignerScreen] now, and it needs no chooser because there is only one
+ * watch-only import form.
  */
 enum class AddWalletRow(val label: String, val caption: String) {
     SEEDSIGNER(ADD_SEEDSIGNER_BUTTON, ADD_SEEDSIGNER_CAPTION),
     OTHER_SIGNING_DEVICE(ADD_SIGNING_DEVICE_BUTTON, ADD_SIGNING_DEVICE_CAPTION),
-    WATCH_ONLY_XPUB(ADD_WATCH_ONLY_BUTTON, ADD_WATCH_ONLY_CAPTION),
 }
 
 /**
- * What a row opens: the destination, plus the [SignerOrigin] the form behind it
- * will stamp on the wallet it saves.
+ * What a choice opens: the destination, plus the [SignerOrigin] the form behind
+ * it will stamp on the wallet it saves.
  *
- * This is the whole point of the three-row chooser — the two animated rows open
- * the *same* screen, and only this mapping says which one the user meant — so it
- * is a pure function, testable on the JVM, and the wiring in `XbtWalletApp` is a
- * one-line `nav.push(routeFor(row))` that cannot quietly disagree with it.
+ * This is the whole point of the chooser — the two rows open the *same* screen,
+ * and only this mapping says which one the user meant — so it is a pure
+ * function, testable on the JVM, and the wiring in `XbtWalletApp` is a one-line
+ * `nav.push(routeFor(row))` that cannot quietly disagree with it.
+ *
+ * A route that arrives with no origin at all reads as the SeedSigner path in
+ * `XbtWalletApp`, which is what the store's own migration does to the records an
+ * older build wrote; the two agree.
  */
 internal fun routeFor(row: AddWalletRow): Route = when (row) {
     AddWalletRow.SEEDSIGNER ->
@@ -155,14 +180,78 @@ internal fun routeFor(row: AddWalletRow): Route = when (row) {
 
     AddWalletRow.OTHER_SIGNING_DEVICE ->
         Route(Screen.ADD_SIGNING_DEVICE, origin = SignerOrigin.SIGNING_DEVICE_UR)
+}
 
-    AddWalletRow.WATCH_ONLY_XPUB ->
-        Route(Screen.IMPORT_XPUB, origin = SignerOrigin.TEXT_QR)
+/**
+ * The `← Back` + title header every add-wallet screen wears, so the three
+ * screens of the walk cannot drift apart on something as small as a spacer.
+ */
+@Composable
+internal fun SignerScreenHeader(title: String, onBack: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        TextButton(onClick = onBack) { Text(ADD_SIGNER_BACK_LABEL) }
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(text = title, style = MaterialTheme.typography.titleLarge)
+    }
+}
+
+/**
+ * One card: a bold title, a sentence of copy, and the card's buttons.
+ *
+ * Shared by [AddSignerScreen] and [SigningDeviceChoiceScreen] so the two screens
+ * are visibly the same thing — a list of choices — rather than two hand-built
+ * layouts that happen to resemble each other.
+ *
+ * The card is an *outline*, not a panel: a transparent fill behind a 1.dp
+ * coloured border, so a list of cards reads as a set of equally-weighty choices
+ * and the border colour carries the only distinction between them.
+ *
+ * @param borderColor the card's 1.dp outline colour. Required, with no default:
+ *   every card must say which kind of wallet it opens, and a silent fallback
+ *   would let one card drift back to looking like the others.
+ * @param copy the card's sentence, given the paragraph treatment
+ *   (`bodySmall`/`onSurfaceVariant`) because it is supporting text under the
+ *   title, not a heading.
+ * @param buttons the card's button row, drawn after the copy.
+ */
+@Composable
+internal fun AddWalletCard(
+    title: String,
+    copy: String,
+    borderColor: Color,
+    buttons: @Composable () -> Unit,
+) {
+    Surface(
+        shape = MaterialTheme.shapes.medium,
+        color = Color.Transparent,
+        tonalElevation = 0.dp,
+        border = BorderStroke(1.dp, borderColor),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = copy,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            buttons()
+        }
+    }
 }
 
 @Composable
 fun AddSignerScreen(
-    onChoose: (AddWalletRow) -> Unit,
+    onOpenSigningDeviceChoice: () -> Unit,
+    onOpenHotWalletCreate: () -> Unit,
+    onOpenHotWalletImport: () -> Unit,
+    onOpenWatchOnly: () -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -174,88 +263,63 @@ fun AddSignerScreen(
                 .padding(horizontal = 20.dp, vertical = 12.dp)
                 .verticalScroll(rememberScrollState()),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onBack) { Text(ADD_SIGNER_BACK_LABEL) }
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(text = ADD_SIGNER_TITLE, style = MaterialTheme.typography.titleLarge)
+            SignerScreenHeader(title = ADD_SIGNER_TITLE, onBack = onBack)
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // --- 1. The external signer: one button, one follow-up question. --
+            AddWalletCard(
+                title = ADD_SIGNER_EXTERNAL_TITLE,
+                copy = ADD_SIGNER_EXTERNAL_COPY,
+                borderColor = AddWalletExternalBorder,
+            ) {
+                OrangeOutlineButton(
+                    onClick = onOpenSigningDeviceChoice,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(ADD_SIGNER_SELECT_BUTTON)
+                }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-            // The screen's one message, above the three rows.
-            Text(
-                text = ADD_SIGNER_INTRO,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            // --- 1. The SeedSigner path: filled, the screen's default. -------
-            Button(
-                onClick = { onChoose(AddWalletRow.SEEDSIGNER) },
-                modifier = Modifier.fillMaxWidth(),
+            // --- 2. The hot wallet: two ways in, both still UI-only. ----------
+            AddWalletCard(
+                title = ADD_SIGNER_HOT_TITLE,
+                copy = ADD_SIGNER_HOT_COPY,
+                borderColor = AddWalletHotBorder,
             ) {
-                Text(AddWalletRow.SEEDSIGNER.label)
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    OrangeOutlineButton(
+                        onClick = onOpenHotWalletCreate,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(ADD_SIGNER_CREATE_BUTTON)
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    OrangeOutlineButton(
+                        onClick = onOpenHotWalletImport,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(ADD_SIGNER_IMPORT_BUTTON)
+                    }
+                }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-            Text(
-                text = AddWalletRow.SEEDSIGNER.caption,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            // --- 2. Any other signing device: tonal, one step quieter. ------
-            FilledTonalButton(
-                onClick = { onChoose(AddWalletRow.OTHER_SIGNING_DEVICE) },
-                modifier = Modifier.fillMaxWidth(),
+            // --- 3. Watch only: the unchanged text-xpub path. ----------------
+            AddWalletCard(
+                title = ADD_SIGNER_WATCH_TITLE,
+                copy = ADD_SIGNER_WATCH_COPY,
+                borderColor = AddWalletWatchBorder,
             ) {
-                Text(AddWalletRow.OTHER_SIGNING_DEVICE.label)
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = AddWalletRow.OTHER_SIGNING_DEVICE.caption,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            // --- 3. The watch-only path: the key itself, in a text QR. ------
-            OutlinedButton(
-                onClick = { onChoose(AddWalletRow.WATCH_ONLY_XPUB) },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(AddWalletRow.WATCH_ONLY_XPUB.label)
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = AddWalletRow.WATCH_ONLY_XPUB.caption,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            Spacer(modifier = Modifier.height(28.dp))
-
-            Surface(
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                shape = MaterialTheme.shapes.small,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(
-                    text = ADD_SIGNER_FOOTER,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(12.dp),
-                )
+                OrangeOutlineButton(
+                    onClick = onOpenWatchOnly,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(ADD_SIGNER_SELECT_BUTTON)
+                }
             }
 
             Spacer(modifier = Modifier.height(24.dp))
@@ -267,6 +331,12 @@ fun AddSignerScreen(
 @Composable
 private fun AddSignerScreenPreview() {
     XbtWalletTheme {
-        AddSignerScreen(onChoose = {}, onBack = {})
+        AddSignerScreen(
+            onOpenSigningDeviceChoice = {},
+            onOpenHotWalletCreate = {},
+            onOpenHotWalletImport = {},
+            onOpenWatchOnly = {},
+            onBack = {},
+        )
     }
 }

@@ -264,6 +264,20 @@ class ReconnectingSubscriptionTest {
             assertEquals("the sum over the used addresses, the scan's own rule", 1_400L, manager.snapshot.balance.totalSatoshis)
             assertEquals(400L, manager.snapshot.balance.unconfirmedSatoshis)
             assertEquals("the unused lookahead is never fetched", 0, second.count("history:$SH_A1"))
+            // Two things have to be true before this can be asserted, and they
+            // settle independently:
+            //   * the AddressChanged carrying the new status is emitted by the
+            //     manager's worker, but only reaches this collector when the
+            //     reconnect loop re-enters its collect — it can arrive after the
+            //     store write, or before it;
+            //   * the status is persisted by the *targeted refresh* that the
+            //     catch-up enqueues (the catch-up records the mismatch and persists
+            //     the pre-refresh map), so `store.persisted` can still read the old
+            //     status even while the new event is already in flight.
+            // Awaiting only one of them races with the other, so await both.
+            awaitUntil("the new status event") {
+                events.filterIsInstance<ChainEvent.AddressChanged>().size == 2
+            }
             awaitUntil("the new status to be committed") { store.persisted[SH_A0] == "h2" }
             assertEquals(
                 "the loop turns a loss into a reconnect, not into something the caller has to see",
@@ -338,6 +352,7 @@ class ReconnectingSubscriptionTest {
             val second = paidWhileDownSession("h1")
             val attempts = CopyOnWriteArrayList<Int>()
             val delays = CopyOnWriteArrayList<Long>()
+            val sessions = CopyOnWriteArrayList<ChainSubscriptionSession>()
             val clock = longArrayOf(1_000_000L)
             var dials = 0
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -356,6 +371,7 @@ class ReconnectingSubscriptionTest {
                         },
                         policy = policy(maxAttempts = 2, stableSessionMillis = 60_000L),
                         backoff = { delays += it },
+                        onSession = { sessions += it },
                         now = { clock[0] },
                     ).run(first, fundedSnapshot()),
                 )
@@ -363,7 +379,13 @@ class ReconnectingSubscriptionTest {
 
             awaitUntil("the first connection to subscribe") { first.count("subscribe-headers") == 1 }
             first.die(IOException("the circuit dropped"))
-            awaitUntil("the successful reconnect") { second.count("subscribe:$SH_A0") == 1 }
+            // Wait until the loop has *settled* the replacement, not merely
+            // subscribed it: the subscribe lands inside engine.start, but the loop
+            // stamps connectedAtMillis and reports the session only after it
+            // returns. Advancing the clock before that stamp would make the new
+            // connection look brand-new and swallow the budget restore this test is
+            // about (the session hand-off is the observable that order guarantees).
+            awaitUntil("the successful reconnect to be running") { sessions.contains(second) }
 
             // That connection then works for a while — and that is a new episode,
             // not a flap: a device that slept for an hour must not be left with a

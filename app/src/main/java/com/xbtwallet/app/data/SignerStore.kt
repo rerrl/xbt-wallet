@@ -23,12 +23,14 @@ sealed interface SignerType {
      * The xpub is stored exactly as the user entered it (trimmed); the
      * derivation code re-reads the version bytes on every use.
      *
-     * [masterFingerprint] and [derivationPath] are optional metadata captured
-     * from a BIP-32 key-expression QR (`[ab12cd34/84'/0'/0']zpub…`) — the master
-     * fingerprint cannot be derived from the xpub, so it has to come off the QR,
-     * and the later PSBT signing flow will want both to name the signer. A bare
-     * key or a `bitcoin:` URI leaves them null, which is the common case; the
-     * defaults keep every pre-metadata record (and call site) valid.
+     * [masterFingerprint] and [derivationPath] are optional metadata that arrives
+     * **only** from a signing-device import. The master fingerprint cannot be
+     * derived from the xpub, so it has to come off the device's BC-UR export, and
+     * the later PSBT signing flow will want both to name the signer. A watch-only
+     * text-QR import deliberately discards any such metadata it saw — a text
+     * import must never become signing-ready — and a bare key or a `bitcoin:` URI
+     * leaves them null; the defaults keep every pre-metadata record (and call
+     * site) valid.
      */
     data class WatchOnlyXpub(
         val xpub: String,
@@ -48,7 +50,7 @@ sealed interface SignerType {
  * *other* signing device's export the same way ([SIGNING_DEVICE_UR]) — and the
  * one place that matters today is the tag the UI shows.
  *
- * The three paths are also the three rows of the Add-wallet chooser, which is
+ * The three paths are also the three choices of the Add-wallet flow, which is
  * what makes the origin *declared* rather than inferred from the payload: the
  * user says which device they are holding, and that answer is what is recorded.
  *
@@ -150,24 +152,27 @@ data class Signer(
      * True when this signer can actually produce signatures — not merely watch the
      * account.
      *
-     * Signing-readiness is **computed from the record, never stored**: the two
-     * things it needs ([SignerType.WatchOnlyXpub.masterFingerprint] and
-     * [SignerType.WatchOnlyXpub.derivationPath]) are exactly the fields a PSBT's
-     * BIP32 derivation records require, and neither can be derived from the xpub
-     * after the fact. They arrive only when the import QR carried a BIP-32
-     * key-expression (`[ab12cd34/84'/0'/0']zpub…`) or a signing device exported
-     * them, so a bare-key watch-only import is genuinely watch-only.
+     * Signing-readiness is **computed from the record, never stored**, and it
+     * takes two things. The record must be a [SignerType.WatchOnlyXpub] carrying
+     * both [SignerType.WatchOnlyXpub.masterFingerprint] and
+     * [SignerType.WatchOnlyXpub.derivationPath] — exactly the fields a PSBT's
+     * BIP32 derivation records require, neither of which can be derived from the
+     * xpub after the fact. And the signer must have come off a **signing device**
+     * ([SignerOrigin.SEEDSIGNER_UR] / [SignerOrigin.SIGNING_DEVICE_UR]).
      *
-     * **Origin ≠ capability.** This deliberately reads the *type*, not
-     * [importedVia]: an xpub with a fingerprint and a path is equally
-     * signing-ready no matter which row of the Add-wallet chooser brought it in,
-     * and a text-QR import that happens to carry both is just as ready as one off
-     * a hardware screen. A future signer kind that is not a [SignerType.WatchOnlyXpub]
-     * is not signing-ready by this rule.
+     * **A text-QR import is never signing-ready.** Metadata reaches this app only
+     * through a signing-device (BC-UR) import; a text-QR record loads with both
+     * fields already dropped (see [SignerStore.toSigner]), and this rule refuses
+     * its origin outright on top of that, so a key that arrived as text can never
+     * grow into a signing one. A future signer kind that is not a
+     * [SignerType.WatchOnlyXpub] is not signing-ready by this rule either.
      */
     val signingReady: Boolean
-        get() = (type as? SignerType.WatchOnlyXpub)
-            ?.let { it.masterFingerprint != null && it.derivationPath != null } ?: false
+        get() {
+            if (importedVia == SignerOrigin.TEXT_QR) return false
+            val watchOnly = type as? SignerType.WatchOnlyXpub ?: return false
+            return watchOnly.masterFingerprint != null && watchOnly.derivationPath != null
+        }
 
     companion object {
         /** Badge for [SignerType.WatchOnlyXpub] — the only signer kind that exists. */
@@ -225,8 +230,10 @@ class SignerStore(
      * [importedVia] records *which path* the user took to get the key here — see
      * [SignerOrigin]. It defaults to [SignerOrigin.TEXT_QR], the original
      * scan/paste path, so existing callers keep compiling and keep meaning what
-     * they meant. It changes no key material: the same xpub, fingerprint and
-     * derivation path are stored either way. Only the tag the UI shows reads it.
+     * they meant. The origin is not just a tag: a [SignerOrigin.TEXT_QR] record is
+     * read back with its fingerprint and path dropped (see [toSigner]), so a text
+     * import is never signing-ready whatever is passed here. A signing-device
+     * origin keeps the metadata it was given.
      */
     fun add(
         name: String,
@@ -375,16 +382,24 @@ class SignerStore(
                 // has no [IMPORTED_VIA_KEY], and [SignerOrigin.fromStorage]
                 // reads that — and anything unrecognised — as the text-QR
                 // default, so an old signer loads exactly as it always did.
+                val importedVia = SignerOrigin.fromStorage(map[IMPORTED_VIA_KEY] as? String)
+                // A text-QR import is watch-only by ruling, so its fingerprint and
+                // path are dropped here — in memory, on every read — whatever the
+                // blob happens to hold (an install that imported a key-expression
+                // QR before this rule therefore becomes truly watch-only on its
+                // next read). The stored blob is never rewritten: only a
+                // signing-device (BC-UR) import keeps its metadata.
+                val keepMetadata = importedVia != SignerOrigin.TEXT_QR
                 Signer(
                     id,
                     name,
                     SignerType.WatchOnlyXpub(
                         xpub = xpub,
-                        masterFingerprint = map["masterFingerprint"] as? String,
-                        derivationPath = map["derivationPath"] as? String,
+                        masterFingerprint = if (keepMetadata) map["masterFingerprint"] as? String else null,
+                        derivationPath = if (keepMetadata) map["derivationPath"] as? String else null,
                     ),
                     createdAt,
-                    importedVia = SignerOrigin.fromStorage(map[IMPORTED_VIA_KEY] as? String),
+                    importedVia = importedVia,
                 )
             }
             else -> null

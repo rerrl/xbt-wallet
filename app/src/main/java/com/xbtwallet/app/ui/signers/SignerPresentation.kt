@@ -34,9 +34,9 @@ internal const val SHORTENED_TAIL_CHARS = 6
 /**
  * The word on the tag a signer wears when its key came off a **SeedSigner**.
  *
- * This is deliberately the device family's own name. It is the word the first
- * row of the Add-wallet chooser promises, and this is the one place the wording
- * lives, so a later rename is a one-line change.
+ * This is deliberately the device family's own name. It is the word the
+ * SeedSigner option of the Add-wallet flow promises, and this is the one place
+ * the wording lives, so a later rename is a one-line change.
  */
 internal const val SEEDSIGNER_TAG_LABEL = "seedsigner"
 
