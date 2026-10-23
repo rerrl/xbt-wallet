@@ -116,10 +116,11 @@ enum class Screen { HOME, SERVER, SETTINGS, ABOUT, ADD_SIGNER, SIGNING_DEVICE_CH
  *   `SEEDSIGNER_UR` and `SIGNING_DEVICE_UR` respectively — the origin rides on
  *   the route through `routeFor`).
  * - **Hot wallet** pushes [Screen.HOT_WALLET_CREATE] (dice rolls) or
- *   [Screen.HOT_WALLET_IMPORT] (an existing seed), each of which asks for a word
- *   count and then opens [Screen.HOT_WALLET_DICE] or
- *   [Screen.HOT_WALLET_IMPORT_WORDS] with that count on the route's free-form
- *   `address` slot. **These four screens are UI scaffolding for the ratified
+ *   [Screen.HOT_WALLET_IMPORT] (an existing seed). The dice path then opens
+ *   [Screen.HOT_WALLET_DICE], which carries no argument: it asks for its own
+ *   12/24 word count. The import path asks for the word count first and then
+ *   opens [Screen.HOT_WALLET_IMPORT_WORDS] with it on the route's free-form
+ *   `address` slot. **These screens are UI scaffolding for the ratified
  *   hot-wallet phase: they create, import and store no key material, and their
  *   terminal buttons are disabled.**
  * - **Watch only** pushes [Screen.IMPORT_XPUB].
@@ -345,28 +346,22 @@ fun XbtWalletApp() {
 
         // --- The hot-wallet walk: UI scaffolding, no key material ------------
         //
-        // The word count rides the route's free-form `address` slot as "12" or
-        // "24" — the same segment Send uses for its selected outpoints — so no
-        // codec change was needed. A route that arrives without one of those two
-        // values (a saved stack from a build that had no such screen, say) restarts
-        // at Home rather than rendering a dice screen with no idea how long the
-        // seed should be.
+        // The dice path carries no argument at all: the dice screen owns the
+        // 12/24 word-count choice, so the create screen's one button pushes a
+        // bare route. The import path still asks for the word count first, and
+        // it rides the route's free-form `address` slot as "12" or "24" — the
+        // same segment Send uses for its selected outpoints — so no codec change
+        // was needed. A route that arrives without one of those two values (a
+        // saved stack from a build that had no such screen, say) restarts at
+        // Home rather than rendering a word-entry screen with no idea how many
+        // words to expect.
 
         Screen.HOT_WALLET_CREATE -> HotWalletCreateScreen(
-            onDiceRoll = { words ->
-                nav.push(Route(Screen.HOT_WALLET_DICE, address = words.toString()))
-            },
+            onDiceRoll = { nav.push(Route(Screen.HOT_WALLET_DICE)) },
             onBack = { nav.pop() },
         )
 
-        Screen.HOT_WALLET_DICE -> {
-            val wordCount = hotWalletWordCount(route.address)
-            if (wordCount == null) {
-                LaunchedEffect(route) { nav.reset() }
-            } else {
-                HotWalletDiceScreen(wordCount = wordCount, onBack = { nav.pop() })
-            }
-        }
+        Screen.HOT_WALLET_DICE -> HotWalletDiceScreen(onBack = { nav.pop() })
 
         Screen.HOT_WALLET_IMPORT -> HotWalletImportScreen(
             onChooseWords = { words ->

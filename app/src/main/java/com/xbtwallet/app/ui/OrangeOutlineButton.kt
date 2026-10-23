@@ -23,17 +23,21 @@ import com.xbtwallet.app.ui.theme.XbtPrimary
  * copies that can drift.
  *
  * The label and the rest of the button's styling are [OutlinedButton]'s own
- * defaults; only the border is overridden.
+ * defaults; only the border is overridden. `enabled` is passed straight through
+ * so a secondary action that is not available yet — the dice screen's *Undo*
+ * with nothing rolled — keeps this exact border while reading as unavailable.
  */
 @Composable
 internal fun OrangeOutlineButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
     content: @Composable () -> Unit,
 ) {
     OutlinedButton(
         onClick = onClick,
         modifier = modifier,
+        enabled = enabled,
         border = BorderStroke(1.dp, XbtPrimary.copy(alpha = 0.5f)),
     ) {
         content()

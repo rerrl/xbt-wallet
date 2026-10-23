@@ -25,15 +25,17 @@ import com.xbtwallet.app.ui.theme.XbtWalletTheme
 /**
  * **Create hot wallet** — the first step of the dice-roll path.
  *
- * The screen offers exactly one way to create a hot wallet: dice rolls, at
- * either word count. That is the ratified decision, not a gap — the entropy comes
- * from the user's own hand on a physical die, so the screen deliberately has no
- * "generate for me" option, no password field and no passphrase shortcut. Twelve
- * or twenty-four words is the only choice on offer.
+ * The screen offers exactly one way to create a hot wallet: dice rolls. That is
+ * the ratified decision, not a gap — the entropy comes from the user's own hand
+ * on a physical die, so the screen deliberately has no "generate for me" option,
+ * no password field and no passphrase shortcut. It offers one action, *Dice
+ * roll*, and no second question: how long the seed should be (12 or 24 words) is
+ * asked on the dice screen itself, where the choice sits beside the count of
+ * rolls it implies.
  *
  * **UI scaffolding only.** Nothing on this screen creates, derives or stores key
  * material; the steps after it are the dice input screen and, eventually, the
- * hot-wallet phase itself. The buttons here navigate, and that is all they do.
+ * hot-wallet phase itself. The button here navigates, and that is all it does.
  */
 
 /** The screen title. */
@@ -45,22 +47,13 @@ internal const val HOT_WALLET_CREATE_COPY =
         "result, so the entropy comes from your hands \u2014 not from this phone " +
         "and not from anyone else."
 
-/** The twelve-word dice-roll option; it is also the dice screen's title. */
-internal const val HOT_WALLET_DICE_ROLL_12 = "Dice roll \u2014 12 words"
-
-/** The twenty-four-word dice-roll option; it is also the dice screen's title. */
-internal const val HOT_WALLET_DICE_ROLL_24 = "Dice roll \u2014 24 words"
-
 /**
- * The dice-roll option (and dice screen title) for a word count.
+ * The screen's single action: the dice-roll path.
  *
- * Only 12 and 24 reach this — the navigation guard admits nothing else — and 24
- * is tested first so an unexpected value falls to the twelve-word label rather
- * than to a twenty-four-word one that would promise more entropy than the user
- * entered.
+ * No word count in the label, because this screen does not ask for one — the
+ * dice screen's own toggle carries the count.
  */
-internal fun diceRollLabel(wordCount: Int): String =
-    if (wordCount == 24) HOT_WALLET_DICE_ROLL_24 else HOT_WALLET_DICE_ROLL_12
+internal const val HOT_WALLET_DICE_BUTTON = "Dice roll"
 
 /**
  * The word count a hot-wallet route carries, or null when it carries none.
@@ -70,9 +63,12 @@ internal fun diceRollLabel(wordCount: Int): String =
  * nothing here parses a route codec of its own. Only those two values are
  * accepted: anything else (an empty slot, a stack saved by a build that had no
  * such screens) is `null`, and the caller restarts at Home rather than opening a
- * dice screen that does not know how long the seed should be.
+ * word-entry screen that does not know how many words to expect.
  *
- * A pure function so a JVM test can pin the accepted values without an activity.
+ * One route uses it today, the import walk's word-entry screen
+ * ([com.xbtwallet.app.ui.Screen.HOT_WALLET_IMPORT_WORDS]); the dice screen picks
+ * its count in place and needs no route argument. A pure function so a JVM test
+ * can pin the accepted values without an activity.
  */
 internal fun hotWalletWordCount(address: String?): Int? =
     address?.toIntOrNull()?.takeIf { it == 12 || it == 24 }
@@ -95,7 +91,7 @@ internal const val HOT_WALLET_BACK_LABEL = "\u2190 Back"
 
 @Composable
 fun HotWalletCreateScreen(
-    onDiceRoll: (wordCount: Int) -> Unit,
+    onDiceRoll: () -> Unit,
     onBack: () -> Unit,
 ) {
     Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
@@ -119,19 +115,10 @@ fun HotWalletCreateScreen(
             Spacer(modifier = Modifier.height(24.dp))
 
             OrangeOutlineButton(
-                onClick = { onDiceRoll(12) },
+                onClick = onDiceRoll,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(HOT_WALLET_DICE_ROLL_12)
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            OrangeOutlineButton(
-                onClick = { onDiceRoll(24) },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(HOT_WALLET_DICE_ROLL_24)
+                Text(HOT_WALLET_DICE_BUTTON)
             }
 
             Spacer(modifier = Modifier.height(24.dp))
