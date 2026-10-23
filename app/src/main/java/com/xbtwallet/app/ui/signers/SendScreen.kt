@@ -431,8 +431,10 @@ private fun SendFlow(
 
             if (!state.signer.signingReady) {
                 Text(
-                    text = "Signing needs a signing-ready wallet \u2014 re-import with a " +
-                        "key-expression QR ([fingerprint/path]xpub) to enable.",
+                    // The same shared hint the UTXO list shows: a watch-only
+                    // wallet cannot spend, so the way forward is a signing
+                    // device, not a re-import of the same public key.
+                    text = WATCH_ONLY_CANNOT_SPEND_HINT,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

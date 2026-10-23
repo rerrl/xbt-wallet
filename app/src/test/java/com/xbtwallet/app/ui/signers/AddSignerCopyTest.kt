@@ -55,9 +55,38 @@ class AddSignerCopyTest {
     fun `card three is watch only, and says what it cannot do`() {
         assertEquals("Watch only", ADD_SIGNER_WATCH_TITLE)
         assertEquals(
-            "The phone holds public keys only \u2014 it can check balances and prepare " +
-                "transactions, but it can never spend. Scan an xpub QR from any coordinator.",
+            "The phone holds public keys only. Check balances, view UTXOs and receive/change " +
+                "addresses, and share a receive address \u2014 but never spend or prepare a " +
+                "transaction. Scan an xpub QR from any coordinator.",
             ADD_SIGNER_WATCH_COPY,
+        )
+    }
+
+    /**
+     * A watch-only wallet can neither spend nor prepare a transaction, and the
+     * disabled-send hint on the UTXO list (and the stale one still wired into
+     * the Send form) must say exactly that, from one shared constant, so the two
+     * screens cannot drift apart or fall back to the retired "signing-ready"
+     * wording.
+     */
+    @Test
+    fun `the disabled-send hint says a watch-only wallet cannot spend`() {
+        assertEquals(
+            "A watch-only wallet holds public keys only \u2014 it cannot spend. To send " +
+                "from this account, add it as a signing device instead.",
+            WATCH_ONLY_CANNOT_SPEND_HINT,
+        )
+    }
+
+    @Test
+    fun `watch copy no longer claims it can prepare transactions`() {
+        assertTrue(
+            "the watch card no longer offers transaction preparation",
+            !ADD_SIGNER_WATCH_COPY.contains("prepare transactions"),
+        )
+        assertTrue(
+            "and the hint no longer sends the user looking for a key-expression QR",
+            !WATCH_ONLY_CANNOT_SPEND_HINT.contains("key-expression"),
         )
     }
 

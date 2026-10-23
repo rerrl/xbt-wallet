@@ -112,10 +112,19 @@ internal const val ADD_SIGNER_HOT_COPY =
 /** Card 3's title. */
 internal const val ADD_SIGNER_WATCH_TITLE = "Watch only"
 
-/** Card 3's copy: what watch-only can and cannot do. */
+/**
+ * Card 3's copy: what watch-only can and cannot do.
+ *
+ * A watch-only wallet holds public keys only, so it can **look** but never
+ * sign: balances, UTXOs, receive/change addresses and the transaction list are
+ * all it does. Spending *and* preparing the transaction to spend are both out —
+ * those need keys this phone does not have — so the copy names what is left
+ * rather than promising transaction preparation it cannot deliver.
+ */
 internal const val ADD_SIGNER_WATCH_COPY =
-    "The phone holds public keys only \u2014 it can check balances and prepare " +
-        "transactions, but it can never spend. Scan an xpub QR from any coordinator."
+    "The phone holds public keys only. Check balances, view UTXOs and receive/change " +
+        "addresses, and share a receive address \u2014 but never spend or prepare a " +
+        "transaction. Scan an xpub QR from any coordinator."
 
 /** The SeedSigner option's label, as drawn on [SigningDeviceChoiceScreen]. */
 internal const val ADD_SEEDSIGNER_BUTTON = "SeedSigner"

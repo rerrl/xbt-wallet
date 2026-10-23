@@ -33,6 +33,23 @@ import com.xbtwallet.app.chain.AccountSnapshot
 import com.xbtwallet.app.chain.ScannedUtxo
 
 /**
+ * The one hint shown wherever a watch-only wallet's send path is disabled.
+ *
+ * A watch-only wallet holds public keys only, so it can neither spend nor
+ * prepare the transaction that would spend: there is nothing on this phone that
+ * could sign for it, and a `[fingerprint/path]xpub` re-import would not change
+ * that (it is the same watch-only key). The only way to spend from this account
+ * is to add it to a device that *does* hold the keys — a signing device — so the
+ * hint says exactly that instead of pointing at a flag the user cannot flip.
+ *
+ * Shared by [UtxosScreen]'s selection bar and the Send form's terminal control,
+ * and pinned by `AddSignerCopyTest`, so the two screens cannot drift apart.
+ */
+internal const val WATCH_ONLY_CANNOT_SPEND_HINT =
+    "A watch-only wallet holds public keys only \u2014 it cannot spend. To send " +
+        "from this account, add it as a signing device instead."
+
+/**
  * The UTXO list for one signer: what `blockchain.scripthash.listunspent` said
  * about each used address, flattened into one plain scrollable list the user
  * selects coins from.
@@ -46,9 +63,11 @@ import com.xbtwallet.app.chain.ScannedUtxo
  * **This is where a send starts.** With a non-empty selection a bottom bar
  * appears carrying the count and sum and a "Send selected" button; tapping it
  * hands the selected outpoints (in list order) up through [onSendSelected]. The
- * button is enabled only for a **signing-ready** wallet — a pure watch-only
- * signer gets it disabled with a hint, because there is nothing on this phone
- * that could sign for it. No transaction is built here; coin *control* (freezing,
+ * button is enabled only for a **signing-ready** wallet; a watch-only wallet has
+ * no keys on this phone to sign with, so it stays disabled under
+ * [WATCH_ONLY_CANNOT_SPEND_HINT], which points the user at a signing device
+ * rather than at a re-import that would change nothing. No transaction is built
+ * here; coin *control* (freezing,
  * labels, ordering) is still a later stage.
  *
  * **A resync prunes the selection.** An output another spender has consumed
@@ -141,8 +160,8 @@ fun UtxosScreen(
  * outpoints that the snapshot actually holds (the same set the list shows),
  * labels the button with that count and sum, and — only for a signing-ready
  * wallet — hands the outpoints up, in list order. A watch-only wallet keeps the
- * button visible but disabled, with a hint saying why, so the capability is
- * discoverable without ever pretending to be available.
+ * button visible but disabled, under [WATCH_ONLY_CANNOT_SPEND_HINT], so the
+ * capability is discoverable without ever pretending to be available.
  */
 @Composable
 private fun SendSelectedBar(
@@ -175,8 +194,7 @@ private fun SendSelectedBar(
     if (!signingReady) {
         Spacer(modifier = Modifier.height(4.dp))
         Text(
-            text = "Sending needs a signing-ready wallet \u2014 re-import with a " +
-                "key-expression QR ([fingerprint/path]xpub) to enable.",
+            text = WATCH_ONLY_CANNOT_SPEND_HINT,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
