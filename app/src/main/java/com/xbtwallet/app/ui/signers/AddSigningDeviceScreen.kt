@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -44,6 +43,7 @@ import com.xbtwallet.app.crypto.validateXpubInput
 import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerOrigin
 import com.xbtwallet.app.data.SignerStore
+import com.xbtwallet.app.ui.OrangeOutlineButton
 import com.xbtwallet.app.ui.theme.XbtSuccessDark
 import com.xbtwallet.app.ui.theme.XbtWalletTheme
 import com.xbtwallet.app.ui.theme.XbtWarningDark
@@ -407,8 +407,7 @@ fun AddSigningDeviceScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 20.dp, vertical = 12.dp)
-                .verticalScroll(rememberScrollState()),
+                .padding(horizontal = 20.dp, vertical = 12.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onBack) { Text("\u2190 Back") }
@@ -444,81 +443,97 @@ fun AddSigningDeviceScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            if (state.cameraDenied) {
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "Camera permission is required \u2014 wallets are imported by " +
-                        "scanning the signer's QR.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                TextButton(onClick = { requestCamera { state.onCameraPermissionGranted() } }) {
-                    Text("Try again")
-                }
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // The scanner is a panel inside this column, portrait. It decodes
-            // continuously: the export is a fountain-coded animation, so every
-            // frame is offered to the assembly and the panel stays up until the
-            // state says the export is whole (or it refuses the code, or the
-            // animation stalls). `showCancel = false`: there is nothing to cancel
-            // here — the panel is the only way in, and Rescan is the way back to
-            // it once a scan has ended.
-            if (state.showScanner) {
-                UrQrScannerPanel(
-                    progress = state.scanProgress,
-                    onFrame = state::onScanFrame,
-                    // Never invoked: this panel draws no cancel (showCancel is
-                    // false).
-                    onCancel = {},
-                    onTimeout = state::onScanTimedOut,
-                    showCancel = false,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-
-                Spacer(modifier = Modifier.height(12.dp))
-            }
-
-            state.scanError?.let { error ->
-                Text(
-                    text = error,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-            }
-
-            state.scannedXpub?.let { xpub ->
-                DecodedAccountConfirmation(
-                    xpub = xpub,
-                    version = state.recognisedVersion,
-                    masterFingerprint = state.masterFingerprint,
-                    derivationPath = state.derivationPath,
-                    warnings = state.warnings,
-                )
-                Spacer(modifier = Modifier.height(20.dp))
-            }
-
-            // Once a scan has ended — a decoded account, a refusal, or a stall —
-            // the panel is gone and this is the way back to it. It clears the
-            // last export's confirmation and complaint and resets the assembly
-            // first, so nothing on screen can belong to an export the user just
-            // threw away. Tonal rather than the vibrant filled style of "Add
-            // wallet" beside it: it is the secondary action, and the two must not
-            // read as competing.
-            if (state.scannedXpub != null || state.scanError != null) {
-                FilledTonalButton(
-                    onClick = { requestCamera { state.onRescanRequested() } },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text("Rescan")
+            // The one region that is allowed to flex. Everything above it (the
+            // header, the hint, the name field) and the save button below it are
+            // pinned, so the scanner panel coming and going — which it does on
+            // entry and on every scan that ends — cannot push a single pixel of
+            // them around. It takes the leftover height whether the panel is up
+            // or not and scrolls on the inside when the panel plus the decoded
+            // summary are taller than the space left over.
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                if (state.cameraDenied) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Camera permission is required \u2014 wallets are imported by " +
+                            "scanning the signer's QR.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    TextButton(onClick = { requestCamera { state.onCameraPermissionGranted() } }) {
+                        Text("Try again")
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
+
+                // The scanner is a panel inside this region, portrait. It decodes
+                // continuously: the export is a fountain-coded animation, so every
+                // frame is offered to the assembly and the panel stays up until
+                // the state says the export is whole (or it refuses the code, or
+                // the animation stalls). `showCancel = false`: there is nothing to
+                // cancel here — the panel is the only way in, and Rescan is the
+                // way back to it once a scan has ended.
+                if (state.showScanner) {
+                    UrQrScannerPanel(
+                        progress = state.scanProgress,
+                        onFrame = state::onScanFrame,
+                        // Never invoked: this panel draws no cancel (showCancel is
+                        // false).
+                        onCancel = {},
+                        onTimeout = state::onScanTimedOut,
+                        showCancel = false,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
+
+                state.scanError?.let { error ->
+                    Text(
+                        text = error,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
+
+                state.scannedXpub?.let { xpub ->
+                    DecodedAccountConfirmation(
+                        xpub = xpub,
+                        version = state.recognisedVersion,
+                        masterFingerprint = state.masterFingerprint,
+                        derivationPath = state.derivationPath,
+                        warnings = state.warnings,
+                    )
+                    Spacer(modifier = Modifier.height(20.dp))
+                }
+
+                // Once a scan has ended — a decoded account, a refusal, or a
+                // stall — the panel is gone and this is the way back to it. It
+                // clears the last export's confirmation and complaint and resets
+                // the assembly first, so nothing above can belong to an export
+                // the user just threw away. The half-orange outline rather than
+                // the vibrant filled style of "Add wallet" below it: it is the
+                // secondary action, and the two must not read as competing.
+                if (state.scannedXpub != null || state.scanError != null) {
+                    OrangeOutlineButton(
+                        onClick = { requestCamera { state.onRescanRequested() } },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Rescan")
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
             }
 
+            // Pinned: the last element of the fixed column, after the region that
+            // flexes, so opening or closing the scanner panel never moves it.
             Button(
                 onClick = state::import,
                 modifier = Modifier.fillMaxWidth(),

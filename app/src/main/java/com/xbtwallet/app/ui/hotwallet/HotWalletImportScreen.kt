@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -16,6 +15,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.xbtwallet.app.ui.OrangeOutlineButton
 import com.xbtwallet.app.ui.theme.XbtWalletTheme
 
 /**
@@ -100,7 +100,7 @@ fun HotWalletImportScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            FilledTonalButton(
+            OrangeOutlineButton(
                 onClick = { onChooseWords(12) },
                 modifier = Modifier.fillMaxWidth(),
             ) {
@@ -109,7 +109,7 @@ fun HotWalletImportScreen(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            FilledTonalButton(
+            OrangeOutlineButton(
                 onClick = { onChooseWords(24) },
                 modifier = Modifier.fillMaxWidth(),
             ) {

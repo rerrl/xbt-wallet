@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -42,6 +41,7 @@ import com.xbtwallet.app.crypto.validateXpubInput
 import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerOrigin
 import com.xbtwallet.app.data.SignerStore
+import com.xbtwallet.app.ui.OrangeOutlineButton
 
 /**
  * State behind the watch-only xpub import screen: the signer's name, the key
@@ -365,8 +365,7 @@ fun ImportXpubScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 20.dp, vertical = 12.dp)
-                .verticalScroll(rememberScrollState()),
+                .padding(horizontal = 20.dp, vertical = 12.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onBack) { Text("\u2190 Back") }
@@ -401,80 +400,96 @@ fun ImportXpubScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            if (state.cameraDenied) {
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "Camera permission is required \u2014 wallets are imported by " +
-                        "scanning the signer's QR.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                TextButton(onClick = { requestCamera { state.onCameraPermissionGranted() } }) {
-                    Text("Try again")
-                }
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // The scanner is a panel inside this column, portrait, scrolled with
-            // the rest of the screen — and it is the screen's entry point: the
-            // LaunchedEffect above opened it as soon as the screen appeared.
-            // `showCancel = false` says there is no way out of it except the scan
-            // itself, and a scan is what takes it down: a live camera is wanted
-            // only while the QR is being read, and Rescan below is the way back.
-            if (state.showScanner) {
-                XpubQrScannerPanel(
-                    onResult = { payload ->
-                        state.onScanResult(payload)
-                        state.onScannerDismissed()
-                    },
-                    // Never invoked: this panel draws no cancel (showCancel is
-                    // false).
-                    onCancel = {},
-                    showCancel = false,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-
-                Spacer(modifier = Modifier.height(12.dp))
-            }
-
-            state.scanError?.let { error ->
-                Text(
-                    text = error,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-            }
-
-            state.scannedXpub?.let { xpub ->
-                ScannedKeyConfirmation(
-                    xpub = xpub,
-                    version = state.recognisedVersion,
-                    masterFingerprint = state.masterFingerprint,
-                    derivationPath = state.derivationPath,
-                )
-                Spacer(modifier = Modifier.height(20.dp))
-            }
-
-            // Once a scan has produced something — a key to keep, or a reason it
-            // could not be read — the panel is gone and this is the way back to
-            // it. It clears whatever the last scan left behind first, so the
-            // confirmation below can only ever describe the key that is there
-            // now. Tonal rather than the vibrant filled style of "Add wallet"
-            // beside it: it is the secondary action, and the two must not read as
-            // competing.
-            if (state.scannedXpub != null || state.scanError != null) {
-                FilledTonalButton(
-                    onClick = { requestCamera { state.onRescanRequested() } },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text("Rescan")
+            // The one region that is allowed to flex. Everything above it (the
+            // header, the hint, the name field) and the save button below it are
+            // pinned, so the scanner panel coming and going — which it does on
+            // entry and on every scan — cannot push a single pixel of them
+            // around. It takes the leftover height whether the panel is up or
+            // not and scrolls on the inside when the panel plus the confirmation
+            // are taller than the space left over.
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                if (state.cameraDenied) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Camera permission is required \u2014 wallets are imported by " +
+                            "scanning the signer's QR.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    TextButton(onClick = { requestCamera { state.onCameraPermissionGranted() } }) {
+                        Text("Try again")
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
+
+                // The scanner is a panel inside this region, portrait — and it is
+                // the screen's entry point: the LaunchedEffect above opened it as
+                // soon as the screen appeared. `showCancel = false` says there is
+                // no way out of it except the scan itself, and a scan is what
+                // takes it down: a live camera is wanted only while the QR is
+                // being read, and Rescan below is the way back.
+                if (state.showScanner) {
+                    XpubQrScannerPanel(
+                        onResult = { payload ->
+                            state.onScanResult(payload)
+                            state.onScannerDismissed()
+                        },
+                        // Never invoked: this panel draws no cancel (showCancel is
+                        // false).
+                        onCancel = {},
+                        showCancel = false,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
+
+                state.scanError?.let { error ->
+                    Text(
+                        text = error,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
+
+                state.scannedXpub?.let { xpub ->
+                    ScannedKeyConfirmation(
+                        xpub = xpub,
+                        version = state.recognisedVersion,
+                        masterFingerprint = state.masterFingerprint,
+                        derivationPath = state.derivationPath,
+                    )
+                    Spacer(modifier = Modifier.height(20.dp))
+                }
+
+                // Once a scan has produced something — a key to keep, or a reason
+                // it could not be read — the panel is gone and this is the way
+                // back to it. It clears whatever the last scan left behind first,
+                // so the confirmation above can only ever describe the key that
+                // is there now. The half-orange outline rather than the vibrant
+                // filled style of "Add wallet" below it: it is the secondary
+                // action, and the two must not read as competing.
+                if (state.scannedXpub != null || state.scanError != null) {
+                    OrangeOutlineButton(
+                        onClick = { requestCamera { state.onRescanRequested() } },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Rescan")
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
             }
 
+            // Pinned: the last element of the fixed column, after the region that
+            // flexes, so opening or closing the scanner panel never moves it.
             Button(
                 onClick = state::import,
                 modifier = Modifier.fillMaxWidth(),

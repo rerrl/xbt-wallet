@@ -8,13 +8,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.xbtwallet.app.ui.OrangeOutlineButton
 import com.xbtwallet.app.ui.theme.XbtWalletTheme
 
 /**
@@ -64,7 +64,7 @@ fun SigningDeviceChoiceScreen(
                 title = AddWalletRow.SEEDSIGNER.label,
                 copy = AddWalletRow.SEEDSIGNER.caption,
             ) {
-                FilledTonalButton(
+                OrangeOutlineButton(
                     onClick = { onChoose(AddWalletRow.SEEDSIGNER) },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
@@ -79,7 +79,7 @@ fun SigningDeviceChoiceScreen(
                 title = AddWalletRow.OTHER_SIGNING_DEVICE.label,
                 copy = AddWalletRow.OTHER_SIGNING_DEVICE.caption,
             ) {
-                FilledTonalButton(
+                OrangeOutlineButton(
                     onClick = { onChoose(AddWalletRow.OTHER_SIGNING_DEVICE) },
                     modifier = Modifier.fillMaxWidth(),
                 ) {

@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -23,6 +22,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.xbtwallet.app.data.SignerOrigin
+import com.xbtwallet.app.ui.OrangeOutlineButton
 import com.xbtwallet.app.ui.Route
 import com.xbtwallet.app.ui.Screen
 import com.xbtwallet.app.ui.theme.XbtWalletTheme
@@ -230,7 +230,7 @@ fun AddSignerScreen(
 
             // --- 1. The external signer: one button, one follow-up question. --
             AddWalletCard(title = ADD_SIGNER_EXTERNAL_TITLE, copy = ADD_SIGNER_EXTERNAL_COPY) {
-                FilledTonalButton(
+                OrangeOutlineButton(
                     onClick = onOpenSigningDeviceChoice,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
@@ -243,14 +243,14 @@ fun AddSignerScreen(
             // --- 2. The hot wallet: two ways in, both still UI-only. ----------
             AddWalletCard(title = ADD_SIGNER_HOT_TITLE, copy = ADD_SIGNER_HOT_COPY) {
                 Row(modifier = Modifier.fillMaxWidth()) {
-                    FilledTonalButton(
+                    OrangeOutlineButton(
                         onClick = onOpenHotWalletCreate,
                         modifier = Modifier.weight(1f),
                     ) {
                         Text(ADD_SIGNER_CREATE_BUTTON)
                     }
                     Spacer(modifier = Modifier.width(8.dp))
-                    FilledTonalButton(
+                    OrangeOutlineButton(
                         onClick = onOpenHotWalletImport,
                         modifier = Modifier.weight(1f),
                     ) {
@@ -263,7 +263,7 @@ fun AddSignerScreen(
 
             // --- 3. Watch only: the unchanged text-xpub path. ----------------
             AddWalletCard(title = ADD_SIGNER_WATCH_TITLE, copy = ADD_SIGNER_WATCH_COPY) {
-                FilledTonalButton(
+                OrangeOutlineButton(
                     onClick = onOpenWatchOnly,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
