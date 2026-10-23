@@ -45,8 +45,14 @@ import com.xbtwallet.app.ui.OrangeOutlineButton
 
 /**
  * State behind the watch-only xpub import screen: the signer's name, the key
- * captured by the last scan (plus whatever metadata rode with it), and the save
- * action.
+ * captured by the last scan, and the save action.
+ *
+ * **This screen is watch-only, and it stays that way.** [XpubScanRoute] still
+ * routes the payload and [validateXpubInput] still validates the key — a
+ * key-expression QR (`[ab12cd34/84'/0'/0']zpub…`) remains an accepted import —
+ * but any fingerprint and derivation path it carried are deliberately discarded
+ * at this call site. Signing metadata belongs to a signing-device (BC-UR)
+ * import alone, so a key that arrived as text can never become signing-ready.
  *
  * Kept out of the composable for two reasons. First, it is plain Kotlin and can
  * be exercised without a UI test — and without a camera. Second, the screen is
@@ -63,10 +69,9 @@ import com.xbtwallet.app.ui.OrangeOutlineButton
  * one camera permission it needs), and it comes down again as soon as a scan has
  * produced a result — a live camera after the key is captured is not wanted.
  * What brings it back is **Rescan**, and that starts from a clean slate: it
- * forgets the last result, its metadata and its complaint before the panel
- * reappears, so nothing on screen can belong to a key the user just threw away.
- * There is no cancel while the panel is up: the ways out are a scan, or leaving
- * the screen.
+ * forgets the last result and its complaint before the panel reappears, so
+ * nothing on screen can belong to a key the user just threw away. There is no
+ * cancel while the panel is up: the ways out are a scan, or leaving the screen.
  */
 @Stable
 class ImportXpubScreenState(
@@ -82,14 +87,6 @@ class ImportXpubScreenState(
 
     /** The key text of the last successful scan, null until one lands. */
     var scannedXpub by mutableStateOf<String?>(null)
-        private set
-
-    /** Master fingerprint carried by the scanned key expression, when there was one. */
-    var masterFingerprint by mutableStateOf<String?>(null)
-        private set
-
-    /** Derivation path (no leading `m/`) carried by the scanned key expression, when there was one. */
-    var derivationPath by mutableStateOf<String?>(null)
         private set
 
     /** Set to "zpub"/"xpub"/"ypub" once a scan parses, null otherwise. */
@@ -163,9 +160,9 @@ class ImportXpubScreenState(
     /**
      * **Rescan** — the user is not keeping what the last scan produced.
      *
-     * [clearScan] throws away the last result, its metadata and any complaint
-     * about it, and the panel comes back up on that empty slate, so the
-     * confirmation below can only ever describe the key that is there now.
+     * [clearScan] throws away the last result and any complaint about it, and the
+     * panel comes back up on that empty slate, so the confirmation below can only
+     * ever describe the key that is there now.
      *
      * The caller checks the CAMERA permission before this, exactly as it does on
      * entry: [onRescanRequested] is only ever reached with the permission in
@@ -179,30 +176,32 @@ class ImportXpubScreenState(
 
     /**
      * Drops everything the last scan left behind: the parsed key, the scanned
-     * text, its version label, its fingerprint and path, and the message a bad
-     * scan recorded.
+     * text, its version label, and the message a bad scan recorded.
      */
     private fun clearScan() {
         scannedKey = null
         scannedXpub = null
         recognisedVersion = null
-        masterFingerprint = null
-        derivationPath = null
         scanError = null
     }
 
     /**
      * Routes and validates one scanned QR payload.
      *
-     * [XpubScanRoute] decides what part of the payload is the key and what
-     * metadata came with it; [validateXpubInput] then decides whether that key is
-     * any good — the same validator a keyboard entry would have gone through, so
-     * the camera can never accept what typing would have refused.
+     * [XpubScanRoute] decides what part of the payload is the key;
+     * [validateXpubInput] then decides whether that key is any good — the same
+     * validator a keyboard entry would have gone through, so the camera can never
+     * accept what typing would have refused.
      *
-     * A valid scan populates the key and its metadata and clears any error. An
-     * invalid scan **clears** the scanned fields before recording the message:
-     * leaving a previous good key on screen after a bad scan would present the
-     * wrong key as imported. Scanning again replaces everything either way.
+     * Whatever metadata the route pulled out of a key expression is deliberately
+     * **not** kept here: this is the watch-only text-QR path, and a fingerprint
+     * and path reach this phone from a signing device or not at all. The key
+     * itself is still accepted and validated exactly as before.
+     *
+     * A valid scan populates the key and clears any error. An invalid scan
+     * **clears** the scanned fields before recording the message: leaving a
+     * previous good key on screen after a bad scan would present the wrong key as
+     * imported. Scanning again replaces everything either way.
      */
     fun onScanResult(payload: String) {
         val result = XpubScanRoute.extract(payload)
@@ -211,8 +210,6 @@ class ImportXpubScreenState(
                 scannedKey = validation
                 scannedXpub = result.keyText
                 recognisedVersion = validation.versionLabel
-                masterFingerprint = result.masterFingerprint
-                derivationPath = result.derivationPath
                 scanError = null
             }
 
@@ -223,7 +220,14 @@ class ImportXpubScreenState(
         }
     }
 
-    /** Validates and, when everything checks out, stores a new watch-only wallet. */
+    /**
+     * Validates and, when everything checks out, stores a new watch-only wallet.
+     *
+     * The key is saved with **no** fingerprint and **no** derivation path: this
+     * is the text-QR path, it records [SignerOrigin.TEXT_QR] and nothing else, and
+     * that is precisely what keeps it watch-only. Signing metadata is a
+     * signing-device concern, and this path never has any to record.
+     */
     fun import() {
         nameError = if (name.isBlank()) "Give this wallet a name." else null
 
@@ -239,17 +243,15 @@ class ImportXpubScreenState(
         if (nameError != null) return
 
         val xpub = scannedXpub ?: return
-        // The metadata is stored as scanned (fingerprint lowercased, path
-        // normalized by XpubScanRoute); `key` proves the xpub parsed. The origin
-        // is spelled out as the text-QR default: this key came in as a plain
-        // xpub QR, not off a signing device, and that is what keeps it wearing
-        // the grey "watch-only" tag rather than the orange "seedsigner" one.
+        // No fingerprint and no derivation path, by design: this key came in as a
+        // plain text QR, not off a signing device, so it is saved watch-only and
+        // stays that way. `key` proves the xpub parsed. The origin is spelled out
+        // as the text-QR default, which is also what keeps it wearing the grey
+        // "watch-only" tag rather than the orange "seedsigner" one.
         onSaved(
             signerStore.add(
                 name = name,
                 xpub = xpub,
-                masterFingerprint = masterFingerprint,
-                derivationPath = derivationPath,
                 importedVia = SignerOrigin.TEXT_QR,
             ),
         )
@@ -277,14 +279,16 @@ fun rememberImportXpubScreenState(
  * Add a wallet by scanning its account xpub — the screen of the Add-wallet flow
  * reached from [AddSignerScreen]'s **Watch only** card.
  *
- * Import is **QR-only**. The QR is the air-gapped channel between the signer and
- * this phone, and it is the only channel that can carry the account's metadata
- * (the master fingerprint and derivation path a BIP-32 key-expression QR holds).
- * A paste field would have been a second way in that silently drops that
- * metadata and invites fat-fingered keys, so it is gone: every key that reaches
- * the store came off a QR, was routed by [XpubScanRoute], and was then validated
- * by the shared [com.xbtwallet.app.crypto.validateXpubInput] — the same gate a
- * keyboard entry would have had to pass.
+ * Import is **QR-only**, and it is strictly watch-only. The QR is the air-gapped
+ * channel between the signer and this phone. A key-expression QR
+ * (`[ab12cd34/84'/0'/0']zpub…`) is still accepted — [XpubScanRoute] routes it and
+ * the shared [com.xbtwallet.app.crypto.validateXpubInput] validates the key — but
+ * the fingerprint and derivation path it carries are deliberately thrown away:
+ * signing metadata reaches this app only through a signing-device (BC-UR)
+ * import, so a text import can never become signing-ready. A paste field would
+ * have been a second way in that invites fat-fingered keys, so it is gone: every
+ * key that reaches the store came off a QR, was routed by [XpubScanRoute], and
+ * was then validated by the same gate a keyboard entry would have had to pass.
  *
  * Scanning is an embedded panel, not a screen of its own: [XpubQrScannerPanel]
  * opens inline in this column, in portrait. Nothing here launches the scanner
@@ -463,8 +467,6 @@ fun ImportXpubScreen(
                     ScannedKeyConfirmation(
                         xpub = xpub,
                         version = state.recognisedVersion,
-                        masterFingerprint = state.masterFingerprint,
-                        derivationPath = state.derivationPath,
                     )
                     Spacer(modifier = Modifier.height(20.dp))
                 }
@@ -503,22 +505,19 @@ fun ImportXpubScreen(
 }
 
 /**
- * What was just scanned, echoed back before it is saved: the key in monospace,
- * the version line the screen has always shown, and — when the QR was a BIP-32
- * key expression — the master fingerprint and derivation path that came with it.
+ * What was just scanned, echoed back before it is saved: the key in monospace
+ * and the version line the screen has always shown. Nothing else — this is the
+ * text-QR watch-only path, so there is no fingerprint and no derivation path to
+ * show, and none is pretended to be missing.
  *
  * The key is middle-elided rather than shown whole: a 111-character zpub would
  * dominate the screen, and the point of this block is confirmation that *a* key
- * was read, not a second place to copy it from. When the QR carried no metadata,
- * a quiet line says so — it is not an error, but it is worth knowing before the
- * signing flow asks for a richer QR later.
+ * was read, not a second place to copy it from.
  */
 @Composable
 private fun ScannedKeyConfirmation(
     xpub: String,
     version: String?,
-    masterFingerprint: String?,
-    derivationPath: String?,
 ) {
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -538,34 +537,6 @@ private fun ScannedKeyConfirmation(
                     text = "Recognised $it \u2014 treated as native segwit (bc1q\u2026 addresses).",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary,
-                )
-            }
-
-            masterFingerprint?.let {
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "Master fingerprint: $it",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                )
-            }
-
-            derivationPath?.let {
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "Derivation: m/$it",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                )
-            }
-
-            if (masterFingerprint == null && derivationPath == null) {
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "This QR carries no fingerprint or derivation path \u2014 fine for " +
-                        "watching; the signing flow may ask for a richer QR later.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }

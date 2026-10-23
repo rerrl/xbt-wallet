@@ -261,11 +261,12 @@ fun SignerDetailScreen(
  * The account key, shown on demand: the full xpub in monospace, selectable so a
  * user can copy it by hand, with a Copy button that puts it on the clipboard.
  *
- * When the signer was imported from a BIP-32 key-expression QR, the master
- * fingerprint and derivation path that came with it are shown underneath the
- * key — they are what the later PSBT signing flow needs to name the signer's
- * device, and this dialog is the only place the user can check them. A signer
- * imported from a bare key has neither, and then nothing is added.
+ * When the signer was imported from a signing device, the master fingerprint and
+ * derivation path that came with that BC-UR export are shown underneath the key
+ * — they are what the later PSBT signing flow needs to name the signer's device,
+ * and this dialog is the only place the user can check them. A watch-only text-QR
+ * import carries no such metadata (it is discarded on import and on read), and
+ * then nothing is added.
  *
  * Dismissal follows the platform default — [onDismissRequest] fires for an
  * outside tap and for Back, and both simply close the dialog. Nothing here

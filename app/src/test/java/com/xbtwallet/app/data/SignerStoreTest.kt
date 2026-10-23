@@ -265,10 +265,11 @@ class SignerStoreTest {
 
     // --- captured metadata: master fingerprint + derivation path -----------
     //
-    // A BIP-32 key-expression QR carries a master fingerprint and a derivation
-    // path that a bare key does not. They are additive: written only when
-    // present, so a bare-key blob keeps its exact old shape and every blob an
-    // earlier build wrote still loads.
+    // Metadata is a signing-device concern now. It is written only when present,
+    // so a bare-key blob keeps its exact old shape and every blob an earlier build
+    // wrote still loads — but a text-QR record is read back with its fingerprint
+    // and path dropped, so a watch-only import can never carry signing metadata,
+    // whatever an older blob on disk happens to hold.
 
     @Test
     fun `add stores the captured fingerprint and derivation path`() {
@@ -279,6 +280,7 @@ class SignerStoreTest {
             xpub = "zpub6xyz",
             masterFingerprint = "ab12cd34",
             derivationPath = "84'/0'/0'",
+            importedVia = SignerOrigin.SIGNING_DEVICE_UR,
         )
 
         assertEquals(
@@ -288,19 +290,51 @@ class SignerStoreTest {
     }
 
     @Test
-    fun `fingerprint and path survive a round-trip through storage`() {
+    fun `a signing-device import keeps its fingerprint and path through storage`() {
         val backing = InMemoryStore()
         newStore(backing).add(
             "Cold",
             "zpub6xyz",
             masterFingerprint = "ab12cd34",
             derivationPath = "84'/0'/0'",
+            importedVia = SignerOrigin.SEEDSIGNER_UR,
         )
 
         val reloaded = SignerStore(backing).list().single()
         val type = reloaded.type as SignerType.WatchOnlyXpub
         assertEquals("ab12cd34", type.masterFingerprint)
         assertEquals("84'/0'/0'", type.derivationPath)
+        assertTrue("a device import with both fields is signing-ready", reloaded.signingReady)
+    }
+
+    /**
+     * The ruling at the store seam: a text-QR record is watch-only no matter what
+     * the blob holds. An install that imported a key-expression QR before this rule
+     * has its fingerprint and path dropped the first time the record is read — in
+     * memory, without rewriting the blob — so it can never be signing-ready.
+     */
+    @Test
+    fun `a text-qr blob that holds metadata reads back with both fields dropped`() {
+        val backing = InMemoryStore()
+        backing.putString(
+            SignerStore.STORAGE_KEY,
+            "{\"signers\":[{\"id\":\"a\",\"name\":\"Cold\",\"type\":\"watch-only\",\"xpub\":\"zpub6x\"," +
+                "\"masterFingerprint\":\"ab12cd34\",\"derivationPath\":\"84'/0'/0'\",\"createdAt\":7}]}",
+        )
+
+        // The origin key is absent, so [SignerOrigin.fromStorage] reads this as the
+        // TEXT_QR default — exactly the shape an old text import has.
+        val signer = SignerStore(backing).list().single()
+        val type = signer.type as SignerType.WatchOnlyXpub
+        assertEquals("zpub6x", type.xpub)
+        assertNull("a text import keeps no fingerprint", type.masterFingerprint)
+        assertNull("a text import keeps no path", type.derivationPath)
+        assertFalse("a text-qr import is never signing-ready", signer.signingReady)
+
+        // And the drop is read-only: the stored blob is left exactly as it was.
+        val stored = backing.map[SignerStore.STORAGE_KEY].orEmpty()
+        assertTrue("the blob is not rewritten", stored.contains("\"masterFingerprint\":\"ab12cd34\""))
+        assertTrue("the blob is not rewritten", stored.contains("\"derivationPath\":\"84'/0'/0'\""))
     }
 
     @Test
@@ -318,23 +352,52 @@ class SignerStoreTest {
     }
 
     @Test
-    fun `a fingerprint-only signer round-trips with a null path`() {
+    fun `a text-qr record drops even a lone fingerprint on read`() {
         val backing = InMemoryStore()
         newStore(backing).add("Cold", "zpub6xyz", masterFingerprint = "ab12cd34")
 
-        val type = SignerStore(backing).list().single().type as SignerType.WatchOnlyXpub
-        assertEquals("ab12cd34", type.masterFingerprint)
+        val signer = SignerStore(backing).list().single()
+        val type = signer.type as SignerType.WatchOnlyXpub
+        assertNull("a text import keeps no fingerprint", type.masterFingerprint)
         assertNull(type.derivationPath)
+        assertFalse(signer.signingReady)
+    }
+
+    /**
+     * The other half of the ruling: a signing-device import keeps what it exported,
+     * and both BC-UR origins stay signing-ready.
+     */
+    @Test
+    fun `a signing-device blob keeps its metadata and stays signing-ready`() {
+        SignerOrigin.entries
+            .filter { it != SignerOrigin.TEXT_QR }
+            .forEach { origin ->
+                val backing = InMemoryStore()
+                backing.putString(
+                    SignerStore.STORAGE_KEY,
+                    "{\"signers\":[{\"id\":\"a\",\"name\":\"Device\",\"type\":\"watch-only\"," +
+                        "\"xpub\":\"zpub6x\",\"masterFingerprint\":\"ab12cd34\"," +
+                        "\"derivationPath\":\"84'/0'/0'\",\"importedVia\":\"${origin.storageValue}\"," +
+                        "\"createdAt\":7}]}",
+                )
+
+                val signer = SignerStore(backing).list().single()
+                val type = signer.type as SignerType.WatchOnlyXpub
+                assertEquals(origin.name, "ab12cd34", type.masterFingerprint)
+                assertEquals(origin.name, "84'/0'/0'", type.derivationPath)
+                assertTrue("${origin.name} must stay signing-ready", signer.signingReady)
+            }
     }
 
     // --- signing readiness --------------------------------------------------
     //
-    // signingReady is computed from the record (fingerprint AND path present),
-    // never stored: it is what the Send action gates on, and it must read the
-    // type rather than the import origin (origin ≠ capability).
+    // signingReady is computed from the record, never stored, and it is what the
+    // Send action gates on. It needs a fingerprint AND a path AND a signing-device
+    // origin: a text-QR import is never signing-ready, no matter what metadata a
+    // stale blob happens to hold.
 
     @Test
-    fun `a signer with a fingerprint and a path is signing-ready`() {
+    fun `a signing-device signer with a fingerprint and a path is signing-ready`() {
         val signer = Signer(
             id = "a",
             name = "Cold",
@@ -344,9 +407,13 @@ class SignerStoreTest {
                 derivationPath = "84'/0'/0'",
             ),
             createdAtEpochSeconds = 0L,
+            importedVia = SignerOrigin.SEEDSIGNER_UR,
         )
         assertTrue(signer.signingReady)
     }
+
+    // These three keep the origin out of the way — a signing device — so they pin
+    // the metadata half of the rule rather than the origin gate.
 
     @Test
     fun `a fingerprint without a path is not signing-ready`() {
@@ -355,6 +422,7 @@ class SignerStoreTest {
             name = "Cold",
             type = SignerType.WatchOnlyXpub("zpub6xyz", masterFingerprint = "ab12cd34"),
             createdAtEpochSeconds = 0L,
+            importedVia = SignerOrigin.SIGNING_DEVICE_UR,
         )
         assertFalse(signer.signingReady)
     }
@@ -366,6 +434,7 @@ class SignerStoreTest {
             name = "Cold",
             type = SignerType.WatchOnlyXpub("zpub6xyz", derivationPath = "84'/0'/0'"),
             createdAtEpochSeconds = 0L,
+            importedVia = SignerOrigin.SIGNING_DEVICE_UR,
         )
         assertFalse(signer.signingReady)
     }
@@ -377,14 +446,16 @@ class SignerStoreTest {
             name = "Cold",
             type = SignerType.WatchOnlyXpub("zpub6xyz"),
             createdAtEpochSeconds = 0L,
+            importedVia = SignerOrigin.SEEDSIGNER_UR,
         )
         assertFalse(signer.signingReady)
     }
 
     @Test
-    fun `signing-ready reads the type, not the import origin`() {
-        // A text-QR import that carried a key-expression is just as ready as one
-        // off a hardware screen: origin is provenance, not capability.
+    fun `a text-qr import is never signing-ready, even when it holds metadata`() {
+        // The two records differ only in their origin — same key, same fingerprint,
+        // same path — and origin is now the deciding half of the rule: metadata may
+        // only sign when it came off a signing device.
         val textImport = Signer(
             id = "a",
             name = "Cold",
@@ -397,8 +468,8 @@ class SignerStoreTest {
             importedVia = SignerOrigin.TEXT_QR,
         )
         val deviceImport = textImport.copy(importedVia = SignerOrigin.SEEDSIGNER_UR)
-        assertTrue(textImport.signingReady)
-        assertTrue(deviceImport.signingReady)
+        assertFalse("a text-qr import must never become signing-ready", textImport.signingReady)
+        assertTrue("the same record off a signing device is signing-ready", deviceImport.signingReady)
     }
 
     /** The exact blob an earlier build wrote: no metadata keys at all. */
