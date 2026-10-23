@@ -72,8 +72,8 @@ class AddSignerCopyTest {
     @Test
     fun `the disabled-send hint says a watch-only wallet cannot spend`() {
         assertEquals(
-            "A watch-only wallet holds public keys only \u2014 it cannot spend. To send " +
-                "from this account, add it as a signing device instead.",
+            "A watch-only wallet holds public keys only -- it cannot spend. To send " +
+                "from this account, add it as a signing device or hot wallet instead.",
             WATCH_ONLY_CANNOT_SPEND_HINT,
         )
     }

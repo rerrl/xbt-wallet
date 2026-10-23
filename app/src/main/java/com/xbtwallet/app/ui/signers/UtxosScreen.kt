@@ -46,8 +46,8 @@ import com.xbtwallet.app.chain.ScannedUtxo
  * and pinned by `AddSignerCopyTest`, so the two screens cannot drift apart.
  */
 internal const val WATCH_ONLY_CANNOT_SPEND_HINT =
-    "A watch-only wallet holds public keys only \u2014 it cannot spend. To send " +
-        "from this account, add it as a signing device instead."
+    "A watch-only wallet holds public keys only -- it cannot spend. To send " +
+        "from this account, add it as a signing device or hot wallet instead."
 
 /**
  * The UTXO list for one signer: what `blockchain.scripthash.listunspent` said
