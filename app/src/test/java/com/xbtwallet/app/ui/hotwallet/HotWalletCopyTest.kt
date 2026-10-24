@@ -1,6 +1,5 @@
 package com.xbtwallet.app.ui.hotwallet
 
-import com.xbtwallet.app.ui.signers.HOT_WALLET_CANNOT_SPEND_HINT
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -229,22 +228,23 @@ class HotWalletCopyTest {
         assertEquals(HOT_WALLET_DICE_CREATE_BUTTON, HOT_WALLET_FINISH_CREATE)
     }
 
-    // --- the hot wallet's send hint ------------------------------------------
+    // --- the hot wallet's send -----------------------------------------------
 
     /**
-     * The sentence under the UTXOs screen's disabled "Send selected" bar for a
-     * hot wallet, verbatim.
-     *
-     * A hot wallet *can* sign — its seed is on this phone — but not through the
-     * air-gapped QR dance that screen starts, so the hint has to say what is
-     * coming rather than what is missing. Pinned as a literal so a wording edit
-     * fails a test instead of shipping.
+     * The hot wallet's send hint is gone as a *symbol*, not merely unreferenced:
+     * a hot wallet's send is live now (its seed is on this phone, so it signs and
+     * broadcasts in-app), so there is no disabled-send sentence left to pin.
+     * Reflection on the compiled file class is how a deleted `const val` can be
+     * asserted absent at all.
      */
     @Test
-    fun `the hot wallet's disabled send names the internal signing flow`() {
-        assertEquals(
-            "Sending from a hot wallet comes with the internal signing flow \u2014 coming soon.",
-            HOT_WALLET_CANNOT_SPEND_HINT,
+    fun `the hot wallet's disabled-send hint is gone`() {
+        val utxosFields = Class.forName("com.xbtwallet.app.ui.signers.UtxosScreenKt")
+            .declaredFields.map { it.name }
+
+        assertFalse(
+            "a hot wallet can send now, so no hint says otherwise: $utxosFields",
+            utxosFields.contains("HOT_WALLET_CANNOT_SPEND_HINT"),
         )
     }
 

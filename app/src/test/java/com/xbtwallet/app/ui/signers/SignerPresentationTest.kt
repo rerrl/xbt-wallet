@@ -233,19 +233,11 @@ class SignerPresentationTest {
     }
 
     @Test
-    fun `a hot wallet is disabled under its own hint, signing-ready or not`() {
+    fun `a hot wallet may send from the bar now, and shows no hint`() {
         val hot = hotSigner()
 
         assertTrue("a hot wallet is signing-ready by construction", hot.signingReady)
-        assertFalse("…but this screen's QR dance is not its send", sendSelectedEnabled(hot))
-        assertEquals(
-            "Sending from a hot wallet comes with the internal signing flow \u2014 coming soon.",
-            sendSelectedHint(hot),
-        )
-        assertEquals(HOT_WALLET_CANNOT_SPEND_HINT, sendSelectedHint(hot))
-        assertTrue(
-            "the hot hint is not the watch-only one",
-            HOT_WALLET_CANNOT_SPEND_HINT != WATCH_ONLY_CANNOT_SPEND_HINT,
-        )
+        assertTrue("…and its own sign-and-broadcast flow is live", sendSelectedEnabled(hot))
+        assertNull("a live bar carries no hint", sendSelectedHint(hot))
     }
 }

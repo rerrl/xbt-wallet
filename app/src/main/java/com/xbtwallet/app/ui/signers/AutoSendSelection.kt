@@ -6,8 +6,6 @@ import com.xbtwallet.app.chain.ScannedUtxo
 import com.xbtwallet.app.chain.SelectableUtxo
 import com.xbtwallet.app.chain.selectCoins
 import com.xbtwallet.app.chain.selectMax
-import com.xbtwallet.app.data.Signer
-import com.xbtwallet.app.data.SignerType
 
 /**
  * The automatic send: what the selector chose for the amount and fee rate on the
@@ -122,17 +120,11 @@ internal fun autoIsExact(outcome: AutoSendOutcome?): Boolean =
 
 /**
  * The note under a **disabled** Send on a wallet's detail screen: why *this*
- * wallet cannot start the air-gapped flow.
+ * wallet cannot start a send.
  *
- * A watch-only import holds public keys only, so it is pointed at the fix — add
- * the account as a signing device — through the same sentence the UTXO screen
- * uses. A hot wallet is signing-ready but the QR dance is not its send (internal
- * signing is a later phase), so it keeps this screen's own long-standing
- * sentence. Only ever called for a wallet [sendSelectedEnabled] refuses.
+ * Only a watch-only import that cannot sign gets a note now — a hot wallet has
+ * its own sign-and-broadcast flow, and a signing device has the air-gapped one —
+ * so the note is the same sentence the UTXO screen uses, pointing at the fix.
+ * Only ever called for a wallet [sendSelectedEnabled] refuses.
  */
-internal fun detailSendNote(signer: Signer): String =
-    if (signer.type is SignerType.HotSeed) {
-        "Send comes with the air-gapped signing flow \u2014 coming soon."
-    } else {
-        WATCH_ONLY_CANNOT_SPEND_HINT
-    }
+internal fun detailSendNote(): String = WATCH_ONLY_CANNOT_SPEND_HINT

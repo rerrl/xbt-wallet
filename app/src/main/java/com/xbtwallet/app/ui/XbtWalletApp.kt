@@ -682,6 +682,10 @@ fun XbtWalletApp() {
                     state = chainState,
                     outpoints = outpoints,
                     auto = auto,
+                    // The hot branch of the send flow signs from the wallet's own
+                    // seed, so the screen that can sign is handed the vault that
+                    // holds it. Every other wallet ignores it.
+                    seedVault = seedVault,
                     // The way back to the manual picker: the same signer's UTXO
                     // list, where a selection can be made by hand exactly as it
                     // always could.

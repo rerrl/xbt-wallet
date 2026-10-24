@@ -162,17 +162,13 @@ class AutoSendSelectionTest {
     }
 
     @Test
-    fun `a hot wallet stays disabled on the automatic path`() {
+    fun `a hot wallet is allowed on the automatic path`() {
         assertTrue("a hot wallet is signing-ready by construction", hotWallet().signingReady)
-        assertFalse("but its send is a later phase, so it stays disabled", sendSelectedEnabled(hotWallet()))
-        assertEquals(
-            "Send comes with the air-gapped signing flow \u2014 coming soon.",
-            detailSendNote(hotWallet()),
-        )
+        assertTrue("…so its send is live", sendSelectedEnabled(hotWallet()))
     }
 
     @Test
     fun `a disabled watch-only wallet is pointed at the fix`() {
-        assertEquals(WATCH_ONLY_CANNOT_SPEND_HINT, detailSendNote(textQrWatchOnly()))
+        assertEquals(WATCH_ONLY_CANNOT_SPEND_HINT, detailSendNote())
     }
 }
