@@ -85,13 +85,26 @@ class HotWalletProvisionerTest {
         provisioner = HotWalletProvisioner(signerStore, vault)
     }
 
+    /**
+     * The new record from a successful attempt.
+     *
+     * [HotWalletProvisioner.provision] reports what it did rather than throwing on
+     * a duplicate, so a test that expects a *new* wallet unwraps the result here —
+     * and fails, with the result it actually got, when it was not one.
+     */
+    private val ProvisionResult.created: Signer
+        get() {
+            assertTrue("expected a new wallet, got $this", this is ProvisionResult.Created)
+            return (this as ProvisionResult.Created).signer
+        }
+
     private fun hotOf(signer: Signer) = signer.type as SignerType.HotSeed
 
     // --- the derivation -----------------------------------------------------
 
     @Test
     fun `the BIP-84 test mnemonic provisions the published account zpub`() {
-        val signer = provisioner.provision("Hot wallet", bip84Words)
+        val signer = provisioner.provision("Hot wallet", bip84Words).created
 
         assertEquals(bip84Zpub, hotOf(signer).xpub)
         assertEquals("84'/0'/0'", hotOf(signer).derivationPath)
@@ -100,7 +113,7 @@ class HotWalletProvisionerTest {
 
     @Test
     fun `a hot wallet is a hot signer, and it is signing-ready`() {
-        val signer = provisioner.provision("Hot wallet", bip84Words)
+        val signer = provisioner.provision("Hot wallet", bip84Words).created
 
         assertTrue("the record is a HotSeed", signer.type is SignerType.HotSeed)
         assertEquals(SignerOrigin.HOT, signer.importedVia)
@@ -113,8 +126,8 @@ class HotWalletProvisionerTest {
 
     @Test
     fun `the mnemonic with a passphrase derives a different account`() {
-        val plain = provisioner.provision("No passphrase", bip84Words)
-        val hidden = provisioner.provision("Hidden", bip84Words, passphrase = "TREZOR")
+        val plain = provisioner.provision("No passphrase", bip84Words).created
+        val hidden = provisioner.provision("Hidden", bip84Words, passphrase = "TREZOR").created
 
         assertFalse("a passphrase changes the seed, and so the account",
             hotOf(plain).xpub == hotOf(hidden).xpub)
@@ -135,10 +148,15 @@ class HotWalletProvisionerTest {
         assertEquals(first, second)
         assertEquals(bip84Zpub, first.zpub)
 
-        val one = provisioner.provision("One", bip84Words)
-        val two = provisioner.provision("Two", bip84Words)
-        assertEquals(hotOf(one).xpub, hotOf(two).xpub)
-        assertEquals(hotOf(one).masterFingerprint, hotOf(two).masterFingerprint)
+        // Provisioning the same phrase twice is the duplicate guard's business
+        // (see below) — the account it derives is still the same account, which
+        // is exactly why there is only one wallet to have.
+        val one = provisioner.provision("One", bip84Words).created
+        val again = provisioner.provision("Two", bip84Words)
+        assertTrue(again is ProvisionResult.AlreadyExists)
+        assertEquals(one, (again as ProvisionResult.AlreadyExists).signer)
+        assertEquals(hotOf(one).xpub, first.zpub)
+        assertEquals(hotOf(one).masterFingerprint, first.masterFingerprint)
     }
 
     @Test
@@ -163,7 +181,7 @@ class HotWalletProvisionerTest {
 
     @Test
     fun `the vault holds the mnemonic entropy, never the seed`() {
-        val signer = provisioner.provision("Hot wallet", bip84Words)
+        val signer = provisioner.provision("Hot wallet", bip84Words).created
 
         val stored = vault.peek(signer.id)
         assertNotNull("the seed is in the vault under the signer id", stored)
@@ -192,13 +210,13 @@ class HotWalletProvisionerTest {
         }
         val sut = HotWalletProvisioner(signerStore, watchedVault)
 
-        val signer = sut.provision("Hot wallet", bip84Words)
+        val signer = sut.provision("Hot wallet", bip84Words).created
         assertTrue(vault.has(signer.id))
     }
 
     @Test
     fun `the stored signer record carries no secret`() {
-        val signer = provisioner.provision("Hot wallet", bip84Words)
+        val signer = provisioner.provision("Hot wallet", bip84Words).created
         val json = backing.map[SignerStore.STORAGE_KEY].orEmpty()
 
         assertTrue("the record is tagged hot", json.contains("\"type\":\"hot\""))
@@ -219,7 +237,7 @@ class HotWalletProvisionerTest {
 
     @Test
     fun `passphraseMatches accepts the passphrase the wallet was made with`() {
-        val signer = provisioner.provision("Hidden", bip84Words, passphrase = "TREZOR")
+        val signer = provisioner.provision("Hidden", bip84Words, passphrase = "TREZOR").created
         val entropy = vault.load(signer.id)!!
 
         assertTrue(provisioner.passphraseMatches(signer, entropy, "TREZOR"))
@@ -227,7 +245,7 @@ class HotWalletProvisionerTest {
 
     @Test
     fun `passphraseMatches is case-sensitive and refuses an empty passphrase`() {
-        val signer = provisioner.provision("Hidden", bip84Words, passphrase = "TREZOR")
+        val signer = provisioner.provision("Hidden", bip84Words, passphrase = "TREZOR").created
         val entropy = vault.load(signer.id)!!
 
         assertFalse("BIP-39 passphrases are case-sensitive", provisioner.passphraseMatches(signer, entropy, "trezor"))
@@ -237,7 +255,7 @@ class HotWalletProvisionerTest {
 
     @Test
     fun `passphraseMatches accepts the empty passphrase on a wallet made without one`() {
-        val signer = provisioner.provision("Hot wallet", bip84Words)
+        val signer = provisioner.provision("Hot wallet", bip84Words).created
         val entropy = vault.load(signer.id)!!
 
         assertTrue(provisioner.passphraseMatches(signer, entropy, ""))
@@ -263,7 +281,7 @@ class HotWalletProvisionerTest {
     fun `passphraseMatches survives the vault round-trip the UI will do`() {
         // The real call site reads the entropy out of the vault, checks it, and
         // wipes what it read. Both halves of that are exercised here.
-        val signer = provisioner.provision("Hidden", bip84Words, passphrase = "TREZOR")
+        val signer = provisioner.provision("Hidden", bip84Words, passphrase = "TREZOR").created
         val entropy = vault.load(signer.id)!!
 
         assertTrue(provisioner.passphraseMatches(signer, entropy, "TREZOR"))
@@ -286,7 +304,7 @@ class HotWalletProvisionerTest {
         listOf(badChecksum, tooShort, notAWord).forEach { words ->
             val vaultBefore = vault.stores.size
             assertThrows("$words must be refused", IllegalArgumentException::class.java) {
-                provisioner.provision("Nope", words)
+                provisioner.provision("Nope", words).created
             }
             assertEquals("the vault is untouched", vaultBefore, vault.stores.size)
             assertTrue("the vault is untouched", vault.deleted.isEmpty())
@@ -322,7 +340,7 @@ class HotWalletProvisionerTest {
 
     @Test
     fun `deleting a hot wallet purges its vault entry`() {
-        val signer = provisioner.provision("Hot wallet", bip84Words)
+        val signer = provisioner.provision("Hot wallet", bip84Words).created
         assertTrue(vault.has(signer.id))
 
         assertTrue(signerStore.delete(signer.id))
@@ -330,5 +348,85 @@ class HotWalletProvisionerTest {
         assertFalse("the seed is gone with the wallet", vault.has(signer.id))
         assertEquals(listOf(signer.id), vault.deleted)
         assertNull(vault.load(signer.id))
+    }
+
+    // --- the duplicate guard ------------------------------------------------
+
+    /**
+     * The account is a wallet's identity, so a phrase whose account is already in
+     * the store is the same wallet — and provisioning it again must leave the
+     * stores exactly as they were: no second record for one account, no second
+     * vault entry for a seed that is already there, and no id allocated on the way
+     * to discovering that.
+     */
+    @Test
+    fun `a phrase this phone already holds is reported, and nothing is written`() {
+        val first = provisioner.provision("Hot wallet", bip84Words).created
+        val vaultWritesAfterFirst = vault.stores.size
+
+        val second = provisioner.provision("Another name entirely", bip84Words)
+
+        assertTrue("the attempt must report what it found", second is ProvisionResult.AlreadyExists)
+        assertEquals(first, (second as ProvisionResult.AlreadyExists).signer)
+        assertEquals("still one signer", 1, signerStore.count())
+        assertEquals(
+            "and the record is the one that already existed, name and all",
+            "Hot wallet",
+            signerStore.get(first.id)?.name,
+        )
+        assertEquals("no second vault entry", vaultWritesAfterFirst, vault.stores.size)
+        assertEquals(1, vault.stores.size)
+    }
+
+    /**
+     * The guard reads the store, so it holds across a relaunch: a second
+     * provisioner over the same backing — a fresh install's worth of state — still
+     * recognises the account.
+     */
+    @Test
+    fun `the guard reads the store, so it survives a reload`() {
+        val first = provisioner.provision("Hot wallet", bip84Words).created
+
+        val reloaded = SignerStore(backing, seedVault = vault)
+        val second = HotWalletProvisioner(reloaded, vault).provision("Hot wallet", bip84Words)
+
+        assertTrue(second is ProvisionResult.AlreadyExists)
+        assertEquals(first.id, (second as ProvisionResult.AlreadyExists).signer.id)
+        assertEquals(1, reloaded.count())
+        assertEquals(1, vault.stores.size)
+    }
+
+    /**
+     * The same words under a different passphrase are a different account
+     * altogether — nothing about them collides, so both wallets exist.
+     */
+    @Test
+    fun `the same words under a passphrase are a different wallet, not a duplicate`() {
+        val plain = provisioner.provision("Plain", bip84Words)
+        val hidden = provisioner.provision("Hidden", bip84Words, passphrase = "TREZOR")
+
+        assertTrue(plain is ProvisionResult.Created)
+        assertTrue(hidden is ProvisionResult.Created)
+        assertEquals(2, signerStore.count())
+        assertEquals(2, vault.stores.size)
+    }
+
+    /**
+     * A duplicate is refused before the vault write, so the ordering guarantee is
+     * untouched: the guard returns ahead of the id allocation and the vault write
+     * entirely, which this fake vault proves by never being called.
+     */
+    @Test
+    fun `a duplicate never reaches the vault`() {
+        provisioner.provision("Hot wallet", bip84Words).created
+        val vault = object : SeedVault by this.vault {
+            override fun store(signerId: String, entropy: ByteArray) {
+                throw AssertionError("a duplicate must not write to the vault")
+            }
+        }
+
+        val result = HotWalletProvisioner(signerStore, vault).provision("Hot wallet", bip84Words)
+
+        assertTrue(result is ProvisionResult.AlreadyExists)
     }
 }

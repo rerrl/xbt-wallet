@@ -4,6 +4,7 @@ import com.xbtwallet.app.crypto.DiceEntropy
 import com.xbtwallet.app.data.FakeSeedVault
 import com.xbtwallet.app.data.HotWalletProvisioner
 import com.xbtwallet.app.data.KeyValueStore
+import com.xbtwallet.app.data.ProvisionResult
 import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerStore
 import com.xbtwallet.app.data.SignerType
@@ -193,7 +194,9 @@ class HotWalletCreateFlowTest {
 
         // What the finish screen does on its terminal button, passphrase included.
         flow.setPassphrase("TREZOR")
-        val created = provisioner.provision("My hot wallet", words, flow.passphrase)
+        val result = provisioner.provision("My hot wallet", words, flow.passphrase)
+        assertTrue("a new wallet, not a duplicate", result is ProvisionResult.Created)
+        val created = (result as ProvisionResult.Created).signer
         flow.clear()
 
         val stored = requireNotNull(store.get(created.id)) { "the wallet is in the list" }
