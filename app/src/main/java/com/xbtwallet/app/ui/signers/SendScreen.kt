@@ -722,7 +722,7 @@ private fun FormStep(
             color = MaterialTheme.colorScheme.error,
         )
 
-        amount != null && maxSendable != null && amount > maxSendable -> Text(
+        amount != null && maxSendable != null && !automatic && amount > maxSendable -> Text(
             text = "Exceeds the max spendable (${formatSats(maxSendable)} sats " +
                 "after the estimated fee).",
             style = MaterialTheme.typography.bodySmall,
