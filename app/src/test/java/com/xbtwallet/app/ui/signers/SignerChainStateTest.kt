@@ -10,6 +10,7 @@ import com.xbtwallet.app.chain.TransactionRow
 import com.xbtwallet.app.data.KeyValueStore
 import com.xbtwallet.app.data.ServerSettings
 import com.xbtwallet.app.data.Signer
+import com.xbtwallet.app.data.SignerOrigin
 import com.xbtwallet.app.data.SignerType
 import com.xbtwallet.app.data.SnapshotStore
 import com.xbtwallet.app.electrum.ElectrumException
@@ -24,6 +25,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -1120,6 +1122,41 @@ class SignerChainStateTest {
 
         assertEquals(ChainPhase.READY, state.phase)
         assertFalse(state.isSyncing)
+    }
+
+    /**
+     * The regression pin for the bug Andrew hit on-device.
+     *
+     * This state used to read its key with `signer.type as? WatchOnlyXpub`, which
+     * is null for a hot wallet: the scanner came out null and every screen built
+     * on this state — balance, transactions, UTXOs, addresses, receive — said
+     * "This wallet's key could not be read. Delete it and import the xpub again."
+     * A hot wallet's key is the same shape as any other and must parse and scan.
+     */
+    @Test
+    fun `a hot wallet's key parses and scans like any other`() {
+        val hot = Signer(
+            id = "hot-1",
+            name = "Hot wallet",
+            type = SignerType.HotSeed(
+                xpub = accountZpub,
+                masterFingerprint = "73c5da0a",
+                hasPassphrase = false,
+            ),
+            createdAtEpochSeconds = 0L,
+            importedVia = SignerOrigin.HOT,
+        )
+        val state = SignerChainState(hot, FakeServerSettings(SERVER)) { _, _, _, _ ->
+            AccountSnapshot.EMPTY
+        }
+
+        assertNotNull("a hot wallet's account key must parse", state.accountKey)
+        assertNotNull("…and it must have a scanner", state.scanner)
+
+        runBlocking { state.load() }
+
+        assertEquals(ChainPhase.READY, state.phase)
+        assertNull("no \"key could not be read\" error", state.errorMessage)
     }
 
     /**

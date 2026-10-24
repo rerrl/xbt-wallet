@@ -4,6 +4,8 @@ import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerOrigin
 import com.xbtwallet.app.data.SignerType
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -192,5 +194,58 @@ class SignerPresentationTest {
 
         assertEquals("watch-only", tag.label)
         assertEquals(SignerTagAccent.NEUTRAL, tag.accent)
+    }
+
+    // --- the "Send selected" gate -------------------------------------------
+    //
+    // Which wallets may start the UTXOs screen's send. Signing-readiness alone
+    // is *not* the rule: a hot wallet is signing-ready by construction, but the
+    // only send wired up there is the air-gapped QR dance, which no device can
+    // sign for a hot wallet — so it is gated out under its own hint.
+
+    private fun signingReadyWatchOnly() = Signer(
+        id = "dev-1",
+        name = "Signing device",
+        type = SignerType.WatchOnlyXpub(
+            bip84Zpub,
+            masterFingerprint = "ab12cd34",
+            derivationPath = "84'/0'/0'",
+        ),
+        createdAtEpochSeconds = 0L,
+        importedVia = SignerOrigin.SEEDSIGNER_UR,
+    )
+
+    @Test
+    fun `a signing-ready watch-only wallet may send`() {
+        val device = signingReadyWatchOnly()
+
+        assertTrue("a signing device is signing-ready", device.signingReady)
+        assertTrue("…and this screen's send is open to it", sendSelectedEnabled(device))
+        assertNull("no hint is shown for a live bar", sendSelectedHint(device))
+    }
+
+    @Test
+    fun `a text-qr watch-only wallet stays disabled under the watch-only hint`() {
+        val textQr = signer(SignerOrigin.TEXT_QR)
+
+        assertFalse(sendSelectedEnabled(textQr))
+        assertEquals(WATCH_ONLY_CANNOT_SPEND_HINT, sendSelectedHint(textQr))
+    }
+
+    @Test
+    fun `a hot wallet is disabled under its own hint, signing-ready or not`() {
+        val hot = hotSigner()
+
+        assertTrue("a hot wallet is signing-ready by construction", hot.signingReady)
+        assertFalse("…but this screen's QR dance is not its send", sendSelectedEnabled(hot))
+        assertEquals(
+            "Sending from a hot wallet comes with the internal signing flow \u2014 coming soon.",
+            sendSelectedHint(hot),
+        )
+        assertEquals(HOT_WALLET_CANNOT_SPEND_HINT, sendSelectedHint(hot))
+        assertTrue(
+            "the hot hint is not the watch-only one",
+            HOT_WALLET_CANNOT_SPEND_HINT != WATCH_ONLY_CANNOT_SPEND_HINT,
+        )
     }
 }

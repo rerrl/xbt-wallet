@@ -1003,6 +1003,10 @@ private fun prepareSend(
 ): PreparedSend {
     val accountKey = state.accountKey
         ?: throw PsbtException("this wallet's key could not be read")
+    // Still a watch-only-only path: this screen is the air-gapped QR-dance send,
+    // which no device can sign for a hot wallet, so the UTXOs screen gates hot
+    // wallets out of it (see UtxosScreen's Send selected bar). Phase F reworks
+    // this for the internal signing flow.
     val type = state.signer.type as? SignerType.WatchOnlyXpub
         ?: throw PsbtException("this wallet has no account key")
     val fingerprintHex = type.masterFingerprint

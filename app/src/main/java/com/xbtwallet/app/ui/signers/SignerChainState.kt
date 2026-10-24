@@ -21,7 +21,6 @@ import com.xbtwallet.app.chain.SubscriptionStateStore
 import com.xbtwallet.app.crypto.ExtendedPublicKey
 import com.xbtwallet.app.data.ServerSettings
 import com.xbtwallet.app.data.Signer
-import com.xbtwallet.app.data.SignerType
 import com.xbtwallet.app.data.SnapshotStore
 import com.xbtwallet.app.electrum.ElectrumClient
 import com.xbtwallet.app.electrum.ElectrumException
@@ -162,11 +161,15 @@ class SignerChainState(
     private val scan: ChainScan = ::scanOverElectrum,
 ) {
 
-    /** The signer's account xpub, or null if this is not a watch-only signer. */
-    private val xpub: String? = (signer.type as? SignerType.WatchOnlyXpub)?.xpub
+    /**
+     * The signer's account xpub — for every signer kind, not just watch-only
+     * ones. Reading it through `type as? WatchOnlyXpub` is what made a hot
+     * wallet scan as "no key" and the screen say its key could not be read.
+     */
+    private val xpub: String = signer.accountXpub
 
     /** Parsed account key, or null when the stored xpub cannot be read. */
-    val accountKey: ExtendedPublicKey? = xpub?.let { runCatching { ExtendedPublicKey.parse(it) }.getOrNull() }
+    val accountKey: ExtendedPublicKey? = runCatching { ExtendedPublicKey.parse(xpub) }.getOrNull()
 
     /** The scanner for this account, or null when the key is unreadable. */
     val scanner: AccountScanner? = accountKey?.let { AccountScanner(it) }

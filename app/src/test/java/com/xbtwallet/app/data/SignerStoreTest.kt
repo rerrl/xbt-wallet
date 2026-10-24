@@ -962,4 +962,76 @@ class SignerStoreTest {
         assertTrue(SignerOrigin.HOT != SignerOrigin.TEXT_QR)
         assertEquals(SignerOrigin.TEXT_QR, SignerOrigin.fromStorage("something-new"))
     }
+
+    // --- the account key, read regardless of signer kind --------------------
+    //
+    // Every screen reads the key through these three accessors instead of
+    // casting the type. The bug they exist to prevent: a hot wallet read through
+    // `type as? WatchOnlyXpub` came back with no key at all, and the screen told
+    // the user to delete the wallet and re-import its xpub.
+
+    @Test
+    fun `a watch-only signer's account key reads with and without metadata`() {
+        val bare = Signer(
+            id = "a",
+            name = "Cold",
+            type = SignerType.WatchOnlyXpub("zpub6xyz"),
+            createdAtEpochSeconds = 0L,
+        )
+        assertEquals("zpub6xyz", bare.accountXpub)
+        assertNull("a bare key carries no fingerprint", bare.accountMasterFingerprint)
+        assertNull("a bare key carries no path", bare.accountDerivationPath)
+
+        val device = Signer(
+            id = "b",
+            name = "Cold",
+            type = SignerType.WatchOnlyXpub(
+                "zpub6xyz",
+                masterFingerprint = "ab12cd34",
+                derivationPath = "84'/0'/0'",
+            ),
+            createdAtEpochSeconds = 0L,
+            importedVia = SignerOrigin.SEEDSIGNER_UR,
+        )
+        assertEquals("zpub6xyz", device.accountXpub)
+        assertEquals("ab12cd34", device.accountMasterFingerprint)
+        assertEquals("84'/0'/0'", device.accountDerivationPath)
+    }
+
+    @Test
+    fun `a hot signer's account key reads through the same accessors`() {
+        val signer = Signer(
+            id = "hot-1",
+            name = "Hot wallet",
+            type = SignerType.HotSeed(
+                xpub = "zpub6hot",
+                masterFingerprint = "73c5da0a",
+                hasPassphrase = true,
+            ),
+            createdAtEpochSeconds = 0L,
+            importedVia = SignerOrigin.HOT,
+        )
+
+        // The whole point: these are the same three answers a watch-only signer
+        // gives, so no screen has to know which kind it is holding.
+        assertEquals("zpub6hot", signer.accountXpub)
+        assertEquals("73c5da0a", signer.accountMasterFingerprint)
+        assertEquals("84'/0'/0'", signer.accountDerivationPath)
+    }
+
+    @Test
+    fun `a stored hot record reads its key back through the accessors`() {
+        val backing = InMemoryStore()
+        hotStore(backing, FakeSeedVault()).addHot(
+            "Hot wallet",
+            "zpub6hot",
+            "73c5da0a",
+            hasPassphrase = false,
+        )
+
+        val reloaded = SignerStore(backing).list().single()
+        assertEquals("zpub6hot", reloaded.accountXpub)
+        assertEquals("73c5da0a", reloaded.accountMasterFingerprint)
+        assertEquals("84'/0'/0'", reloaded.accountDerivationPath)
+    }
 }

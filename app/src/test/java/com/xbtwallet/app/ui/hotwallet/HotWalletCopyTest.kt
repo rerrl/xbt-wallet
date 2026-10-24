@@ -1,5 +1,6 @@
 package com.xbtwallet.app.ui.hotwallet
 
+import com.xbtwallet.app.ui.signers.HOT_WALLET_CANNOT_SPEND_HINT
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -217,6 +218,25 @@ class HotWalletCopyTest {
     @Test
     fun `both create-path screens say the same thing on their terminal button`() {
         assertEquals(HOT_WALLET_DICE_CREATE_BUTTON, HOT_WALLET_FINISH_CREATE)
+    }
+
+    // --- the hot wallet's send hint ------------------------------------------
+
+    /**
+     * The sentence under the UTXOs screen's disabled "Send selected" bar for a
+     * hot wallet, verbatim.
+     *
+     * A hot wallet *can* sign — its seed is on this phone — but not through the
+     * air-gapped QR dance that screen starts, so the hint has to say what is
+     * coming rather than what is missing. Pinned as a literal so a wording edit
+     * fails a test instead of shipping.
+     */
+    @Test
+    fun `the hot wallet's disabled send names the internal signing flow`() {
+        assertEquals(
+            "Sending from a hot wallet comes with the internal signing flow \u2014 coming soon.",
+            HOT_WALLET_CANNOT_SPEND_HINT,
+        )
     }
 
     // --- the word count on the route -----------------------------------------

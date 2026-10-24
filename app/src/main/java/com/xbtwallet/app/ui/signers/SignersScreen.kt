@@ -21,7 +21,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.xbtwallet.app.data.Signer
-import com.xbtwallet.app.data.SignerType
 import com.xbtwallet.app.ui.theme.XbtDeviceTagDark
 import com.xbtwallet.app.ui.theme.XbtHotTagDark
 import com.xbtwallet.app.ui.theme.XbtPrimary
@@ -67,7 +66,7 @@ internal fun SignerRow(
             // Only the ends of the key belong in a list row; the full xpub lives
             // on the signer's own screen.
             Text(
-                text = (signer.type as? SignerType.WatchOnlyXpub)?.let { shortenedXpub(it.xpub) }.orEmpty(),
+                text = shortenedXpub(signer.accountXpub),
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
