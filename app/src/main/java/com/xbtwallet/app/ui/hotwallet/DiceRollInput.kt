@@ -11,9 +11,9 @@ package com.xbtwallet.app.ui.hotwallet
  *
  * The class holds **entropy-bearing input** in the narrow sense only: digits the
  * user typed while reading a physical die. It performs no randomness, no hashing
- * and no key derivation — nothing here creates or stores key material. That work
- * belongs to the (not yet written) hot-wallet phase, and the screen that uses
- * this helper says so: its terminal button is disabled.
+ * and no key derivation — it only says whether the user has finished rolling.
+ * Turning those rolls into recovery words is [com.xbtwallet.app.crypto.DiceEntropy]'s
+ * job, and it happens once, on the tap of the screen's terminal button.
  *
  * @property targetRolls how many rolls the current word count needs; the input
  *   accepts digits up to this many and refuses more.

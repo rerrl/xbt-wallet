@@ -49,6 +49,68 @@ class NavStackTest {
     }
 
     /**
+     * The dice-create walk: create → dice → the words → finish, and back down
+     * the same way. Every entry is a bare destination — the recovery words and
+     * the passphrase are the walk's product, and they deliberately ride the
+     * shared in-memory flow holder rather than any of these entries, because the
+     * stack is saved state.
+     */
+    @Test
+    fun `back unwinds the create-hot-wallet walk one level at a time`() {
+        val stack = NavStack()
+
+        stack.push(Route(Screen.HOT_WALLET_CREATE))
+        stack.push(Route(Screen.HOT_WALLET_DICE))
+        stack.push(Route(Screen.HOT_WALLET_BACKUP))
+        stack.push(Route(Screen.HOT_WALLET_FINISH))
+
+        assertEquals(
+            "no entry on the walk carries an argument",
+            listOf(
+                Route(Screen.HOME),
+                Route(Screen.HOT_WALLET_CREATE),
+                Route(Screen.HOT_WALLET_DICE),
+                Route(Screen.HOT_WALLET_BACKUP),
+                Route(Screen.HOT_WALLET_FINISH),
+            ),
+            stack.routes,
+        )
+
+        // Back from the finish screen is the words, then the dice, then the
+        // create screen, then Home.
+        assertTrue(stack.pop())
+        assertEquals(Screen.HOT_WALLET_BACKUP, stack.current.screen)
+        assertTrue(stack.pop())
+        assertEquals(Screen.HOT_WALLET_DICE, stack.current.screen)
+        assertTrue(stack.pop())
+        assertEquals(Screen.HOT_WALLET_CREATE, stack.current.screen)
+        assertTrue(stack.pop())
+        assertEquals(Route(Screen.HOME), stack.current)
+        assertFalse(stack.pop())
+    }
+
+    /**
+     * A rotation lands the user back on the same step of the create walk — the
+     * destinations survive, and nothing else does (the words are in a plain
+     * `remember`, in memory, and are gone if the process was rebuilt rather than
+     * merely the activity).
+     */
+    @Test
+    fun `the saver round-trips the create walk's bare screens`() {
+        val stack = NavStack()
+        stack.push(Route(Screen.HOT_WALLET_DICE))
+        stack.push(Route(Screen.HOT_WALLET_BACKUP))
+
+        val scope = object : SaverScope {
+            override fun canBeSaved(value: Any): Boolean = true
+        }
+        val saved = with(NavStack.Saver) { with(scope) { save(stack) } }
+
+        assertEquals(listOf("HOME", "HOT_WALLET_DICE", "HOT_WALLET_BACKUP"), saved)
+        assertEquals(stack.routes, NavStack.Saver.restore(saved!!)!!.routes)
+    }
+
+    /**
      * The chooser's second branch: **Add signing device**. It is a sibling of the
      * text-QR form, not a step in front of it — back from it returns to the
      * chooser, and the two branches never stack on top of each other.

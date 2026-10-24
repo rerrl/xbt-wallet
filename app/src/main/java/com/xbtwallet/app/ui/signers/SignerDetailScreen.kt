@@ -38,7 +38,6 @@ import com.xbtwallet.app.PlaceholderPrices
 import com.xbtwallet.app.chain.AccountSnapshot
 import com.xbtwallet.app.chain.AddressChain
 import com.xbtwallet.app.data.Signer
-import com.xbtwallet.app.data.SignerType
 import com.xbtwallet.app.ui.receive.resolveReceiveIndex
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -228,22 +227,22 @@ fun SignerDetailScreen(
             // *is*, but it is not an action and it is long. It lives behind its
             // own button and dialog so the body stays readable; tap to read or
             // copy it.
-            val watchOnly = signer.type as? SignerType.WatchOnlyXpub
-            val xpub = watchOnly?.xpub
+            // Every signer kind carries a key now, so the button is always live:
+            // a hot wallet's account zpub reads here exactly as a watch-only
+            // one's does.
             var showAccountKey by remember { mutableStateOf(false) }
             OutlinedButton(
                 onClick = { showAccountKey = true },
-                enabled = xpub != null,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("Account key")
             }
 
-            if (showAccountKey && xpub != null) {
+            if (showAccountKey) {
                 AccountKeyDialog(
-                    xpub = xpub,
-                    masterFingerprint = watchOnly?.masterFingerprint,
-                    derivationPath = watchOnly?.derivationPath,
+                    xpub = signer.accountXpub,
+                    masterFingerprint = signer.accountMasterFingerprint,
+                    derivationPath = signer.accountDerivationPath,
                     onDismiss = { showAccountKey = false },
                 )
             }

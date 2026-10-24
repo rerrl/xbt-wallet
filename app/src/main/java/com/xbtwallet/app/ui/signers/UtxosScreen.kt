@@ -31,6 +31,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.xbtwallet.app.chain.AccountSnapshot
 import com.xbtwallet.app.chain.ScannedUtxo
+import com.xbtwallet.app.data.Signer
+import com.xbtwallet.app.data.SignerType
 
 /**
  * The one hint shown wherever a watch-only wallet's send path is disabled.
@@ -48,6 +50,44 @@ import com.xbtwallet.app.chain.ScannedUtxo
 internal const val WATCH_ONLY_CANNOT_SPEND_HINT =
     "A watch-only wallet holds public keys only -- it cannot spend. To send " +
         "from this account, add it as a signing device or hot wallet instead."
+
+/**
+ * The one hint shown when a **hot wallet**'s send path is disabled here.
+ *
+ * A hot wallet's seed *is* on this phone, so it is signing-ready by
+ * construction — but the only send this screen can start is the air-gapped
+ * SeedSigner QR dance, which no device can ever sign for a hot wallet (the seed
+ * is not in a device). Internal signing is a later phase, so the bar stays
+ * disabled under this hint rather than walking the user into a flow that cannot
+ * finish.
+ *
+ * Pinned verbatim by `HotWalletCopyTest`, so the wording cannot drift.
+ */
+internal const val HOT_WALLET_CANNOT_SPEND_HINT =
+    "Sending from a hot wallet comes with the internal signing flow \u2014 coming soon."
+
+/**
+ * Whether the "Send selected" bar is live for [signer] — the whole rule, as a
+ * pure function so a JVM test can pin it without a UI.
+ *
+ * Signing-readiness is necessary but not sufficient: a hot wallet is
+ * signing-ready and still must not enter this screen's QR-dance send.
+ */
+internal fun sendSelectedEnabled(signer: Signer): Boolean =
+    signer.signingReady && signer.type !is SignerType.HotSeed
+
+/**
+ * The hint under the bar for [signer], or null when the bar is live.
+ *
+ * A hot wallet gets its own sentence — the watch-only one would be wrong (it
+ * *can* sign, just not through this flow) — and a watch-only wallet that cannot
+ * sign keeps [WATCH_ONLY_CANNOT_SPEND_HINT].
+ */
+internal fun sendSelectedHint(signer: Signer): String? = when {
+    signer.type is SignerType.HotSeed -> HOT_WALLET_CANNOT_SPEND_HINT
+    signer.signingReady -> null
+    else -> WATCH_ONLY_CANNOT_SPEND_HINT
+}
 
 /**
  * The UTXO list for one signer: what `blockchain.scripthash.listunspent` said
@@ -145,7 +185,7 @@ fun UtxosScreen(
                 SendSelectedBar(
                     selected = selected,
                     snapshot = state.snapshot,
-                    signingReady = state.signer.signingReady,
+                    signer = state.signer,
                     onSendSelected = onSendSelected,
                 )
             }
@@ -158,16 +198,18 @@ fun UtxosScreen(
  *
  * It is what carries the selection out of this screen: it sums the selected
  * outpoints that the snapshot actually holds (the same set the list shows),
- * labels the button with that count and sum, and — only for a signing-ready
- * wallet — hands the outpoints up, in list order. A watch-only wallet keeps the
- * button visible but disabled, under [WATCH_ONLY_CANNOT_SPEND_HINT], so the
- * capability is discoverable without ever pretending to be available.
+ * labels the button with that count and sum, and — only when [sendSelectedEnabled]
+ * says so — hands the outpoints up, in list order. A watch-only wallet keeps the
+ * button visible but disabled, under [WATCH_ONLY_CANNOT_SPEND_HINT], and a hot
+ * wallet — signing-ready, but with no device to sign this screen's QR dance —
+ * under [HOT_WALLET_CANNOT_SPEND_HINT], so the capability is discoverable
+ * without ever pretending to be available.
  */
 @Composable
 private fun SendSelectedBar(
     selected: Set<String>,
     snapshot: AccountSnapshot?,
-    signingReady: Boolean,
+    signer: Signer,
     onSendSelected: (List<String>) -> Unit,
 ) {
     // In list order: the order the user sees them in, which is the order the
@@ -181,20 +223,23 @@ private fun SendSelectedBar(
         ?.sumOf { it.utxo.satoshis }
         ?: 0L
 
+    val enabled = sendSelectedEnabled(signer)
+    val hint = sendSelectedHint(signer)
+
     Spacer(modifier = Modifier.height(8.dp))
 
     Button(
         onClick = { onSendSelected(ordered) },
-        enabled = signingReady,
+        enabled = enabled,
         modifier = Modifier.fillMaxWidth(),
     ) {
         Text("Send selected (${selected.size} \u2022 ${formatSats(sum)} sats)")
     }
 
-    if (!signingReady) {
+    if (hint != null) {
         Spacer(modifier = Modifier.height(4.dp))
         Text(
-            text = WATCH_ONLY_CANNOT_SPEND_HINT,
+            text = hint,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

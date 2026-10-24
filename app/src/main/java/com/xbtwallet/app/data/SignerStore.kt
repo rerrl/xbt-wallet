@@ -246,6 +246,44 @@ data class Signer(
                     kind.derivationPath != null
         }
 
+    /**
+     * The account key (xpub/zpub string) regardless of signer kind — the one way
+     * screens should read it, so a new signer type can never again silently read
+     * as "no key".
+     *
+     * Both live kinds carry one: a watch-only signer stores the key it was
+     * imported with, and a hot wallet stores the passphrased account zpub that is
+     * its public identity. Reading it through `type as? WatchOnlyXpub` was the
+     * bug this exists to prevent — it read a hot wallet as having no key at all.
+     */
+    val accountXpub: String
+        get() = when (val t = type) {
+            is SignerType.WatchOnlyXpub -> t.xpub
+            is SignerType.HotSeed -> t.xpub
+        }
+
+    /**
+     * The master fingerprint to show beside [accountXpub], or null when the
+     * signer's kind does not carry one.
+     *
+     * A [SignerType.HotSeed] always has it (it is the passphrased master key's
+     * fingerprint, and it is what names the wallet); a
+     * [SignerType.WatchOnlyXpub]'s arrives only from a signing-device import and
+     * is otherwise absent.
+     */
+    val accountMasterFingerprint: String?
+        get() = when (val t = type) {
+            is SignerType.WatchOnlyXpub -> t.masterFingerprint
+            is SignerType.HotSeed -> t.masterFingerprint
+        }
+
+    /** The derivation path to show beside [accountXpub]; same rule as the fingerprint. */
+    val accountDerivationPath: String?
+        get() = when (val t = type) {
+            is SignerType.WatchOnlyXpub -> t.derivationPath
+            is SignerType.HotSeed -> t.derivationPath
+        }
+
     companion object {
         /** Badge for [SignerType.WatchOnlyXpub]: a wallet this phone can only watch. */
         const val WATCH_ONLY_LABEL = "watch-only"

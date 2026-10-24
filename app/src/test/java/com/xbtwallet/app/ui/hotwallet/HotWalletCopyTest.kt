@@ -1,6 +1,8 @@
 package com.xbtwallet.app.ui.hotwallet
 
+import com.xbtwallet.app.ui.signers.HOT_WALLET_CANNOT_SPEND_HINT
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -9,10 +11,11 @@ import org.junit.Test
  * Pins the locked copy of the hot-wallet screens, verbatim, plus the pure
  * functions that turn a word count into a label and a route into a word count.
  *
- * The hot-wallet flow is UI scaffolding — none of these screens creates, imports
- * or stores key material — so its user-visible strings are the whole of what it
- * promises today. Asserted as literals, not through the constants, so an edit to
- * a constant fails a test instead of silently shipping.
+ * The create path (dice → backup → finish) provisions real wallets now, so its
+ * user-visible strings are the whole of what the user is promised while their
+ * seed is on screen; the import path is still scaffolding, and it keeps its own
+ * note. Asserted as literals, not through the constants, so an edit to a
+ * constant fails a test instead of silently shipping.
  */
 class HotWalletCopyTest {
 
@@ -38,7 +41,7 @@ class HotWalletCopyTest {
     }
 
     @Test
-    fun `the dice screen states the roll counts and keeps the preview note`() {
+    fun `the dice screen states the roll counts and its terminal button`() {
         assertEquals("Dice roll", HOT_WALLET_DICE_TITLE)
         assertEquals(
             "Roll a die and tap the result. 50 rolls make 12 words, 99 rolls make 24 " +
@@ -47,9 +50,41 @@ class HotWalletCopyTest {
         )
         assertEquals("Undo", HOT_WALLET_DICE_UNDO)
         assertEquals("Create wallet", HOT_WALLET_DICE_CREATE_BUTTON)
+    }
+
+    /**
+     * The dice screen's terminal button is live now, so the "not wired up yet"
+     * note is gone from that screen — and gone as a symbol, not merely
+     * unreferenced. Pinned by reflection on the compiled file classes, because a
+     * deleted `const val` cannot be named in a test: the dice screen's file class
+     * carries no `HOT_WALLET_CREATE_NOTE` field, and the two import screens keep
+     * their own note and their own disabled button untouched (Phase D wires
+     * those).
+     */
+    @Test
+    fun `the dice screen no longer carries the preview note, the import screens still do`() {
+        val diceScreenFields = Class.forName("com.xbtwallet.app.ui.hotwallet.HotWalletDiceScreenKt")
+            .declaredFields.map { it.name }
+        val importWordsFields =
+            Class.forName("com.xbtwallet.app.ui.hotwallet.HotWalletImportWordsScreenKt")
+                .declaredFields.map { it.name }
+        val importScreenFields = Class.forName("com.xbtwallet.app.ui.hotwallet.HotWalletImportScreenKt")
+            .declaredFields.map { it.name }
+
+        assertFalse(
+            "wallet creation is wired up on this screen now: $diceScreenFields",
+            diceScreenFields.contains("HOT_WALLET_CREATE_NOTE"),
+        )
+
+        assertEquals("Import wallet", HOT_WALLET_IMPORT_WALLET_BUTTON)
         assertEquals(
-            "Wallet creation is not wired up yet \u2014 this is a UI preview.",
-            HOT_WALLET_CREATE_NOTE,
+            "Import is not wired up yet \u2014 this is a UI preview.",
+            HOT_WALLET_IMPORT_NOTE,
+        )
+        assertTrue(
+            "the import path keeps its note: $importWordsFields / $importScreenFields",
+            importWordsFields.contains("HOT_WALLET_IMPORT_NOTE") ||
+                importScreenFields.contains("HOT_WALLET_IMPORT_NOTE"),
         )
     }
 
@@ -119,6 +154,89 @@ class HotWalletCopyTest {
     @Test
     fun `the header's back label is the app's wording`() {
         assertEquals("\u2190 Back", HOT_WALLET_BACK_LABEL)
+    }
+
+    // --- the two new create-flow screens -------------------------------------
+
+    /**
+     * The backup screen's warning, word for word. It is the sentence that has to
+     * be read *before* the words are shown, so it is pinned here rather than
+     * left to a reviewer's eye: it names the loss (the only backup), the method
+     * (paper, in order), the risk (anyone who sees them) and the prohibition
+     * (never photograph or screenshot).
+     */
+    @Test
+    fun `the backup screen warns before it reveals`() {
+        assertEquals("Recovery words", HOT_WALLET_BACKUP_TITLE)
+        assertEquals(
+            "Your recovery words are the only backup of this wallet. Write them down on " +
+                "paper, in order, and keep them somewhere safe. Anyone who sees them can " +
+                "take your coins \u2014 never photograph or screenshot them.",
+            HOT_WALLET_BACKUP_COPY,
+        )
+    }
+
+    @Test
+    fun `the backup screen reveals on a tap and confirms in the user's words`() {
+        assertEquals("Tap to reveal your recovery words", HOT_WALLET_BACKUP_REVEAL)
+        assertEquals("I've written them down", HOT_WALLET_BACKUP_CONFIRM)
+    }
+
+    @Test
+    fun `the finish screen names the wallet and explains the passphrase`() {
+        assertEquals("Finish", HOT_WALLET_FINISH_TITLE)
+        assertEquals("Wallet name", HOT_WALLET_FINISH_NAME_LABEL)
+        assertEquals("Hot wallet", HOT_WALLET_FINISH_NAME_DEFAULT)
+        assertEquals(
+            "Optional: a passphrase adds a second secret on top of your words. It is " +
+                "never saved \u2014 you will enter it each time you spend. If you forget " +
+                "it, no one can recover your coins. Leave empty to skip.",
+            HOT_WALLET_FINISH_PASSPHRASE_EXPLAINER,
+        )
+    }
+
+    @Test
+    fun `the finish screen's passphrase fields and its terminal button`() {
+        assertEquals("Passphrase (optional)", HOT_WALLET_FINISH_PASSPHRASE_LABEL)
+        assertEquals("Repeat passphrase", HOT_WALLET_FINISH_PASSPHRASE_REPEAT_LABEL)
+        assertEquals("Passphrases don't match", HOT_WALLET_PASSPHRASE_MISMATCH)
+        assertEquals("Create wallet", HOT_WALLET_FINISH_CREATE)
+    }
+
+    /** The error state re-uses the same pinned button with a retry label. */
+    @Test
+    fun `a failed attempt offers a retry`() {
+        assertEquals("Retry", HOT_WALLET_FINISH_RETRY)
+        assertEquals("Couldn't create the wallet. Try again.", HOT_WALLET_FINISH_ERROR)
+    }
+
+    /**
+     * The one button label the two create-path screens share: the dice screen
+     * and the finish screen are the same action at two points in the walk, and
+     * they must not drift apart.
+     */
+    @Test
+    fun `both create-path screens say the same thing on their terminal button`() {
+        assertEquals(HOT_WALLET_DICE_CREATE_BUTTON, HOT_WALLET_FINISH_CREATE)
+    }
+
+    // --- the hot wallet's send hint ------------------------------------------
+
+    /**
+     * The sentence under the UTXOs screen's disabled "Send selected" bar for a
+     * hot wallet, verbatim.
+     *
+     * A hot wallet *can* sign — its seed is on this phone — but not through the
+     * air-gapped QR dance that screen starts, so the hint has to say what is
+     * coming rather than what is missing. Pinned as a literal so a wording edit
+     * fails a test instead of shipping.
+     */
+    @Test
+    fun `the hot wallet's disabled send names the internal signing flow`() {
+        assertEquals(
+            "Sending from a hot wallet comes with the internal signing flow \u2014 coming soon.",
+            HOT_WALLET_CANNOT_SPEND_HINT,
+        )
     }
 
     // --- the word count on the route -----------------------------------------
