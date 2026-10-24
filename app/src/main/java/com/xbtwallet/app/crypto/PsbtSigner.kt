@@ -17,9 +17,16 @@ package com.xbtwallet.app.crypto
  *    un-unified signature is exactly the replay risk the flag exists to prevent;
  * 2. an input with no `0x01` witness utxo — there is nothing to hash against;
  * 3. an input with no `0x06` BIP32 derivation whose master fingerprint matches
- *    the account key — the signature would not be ours;
+ *    the expected one — the signature would not be ours;
  * 4. a matching derivation whose path does not begin `84'/0'/0'` — a different
  *    account than the key handed in.
+ *
+ * **Which fingerprint to expect.** BIP-174 records each input's derivation
+ * against the **master** key's fingerprint, and that is what a caller here should
+ * pass ([masterFingerprint]) — the value a signer record stores and a hardware
+ * wallet would report. It defaults to the fingerprint of the [accountKey] handed
+ * in, which is what a PSBT built by this app's own earlier code carries, so that
+ * call site keeps its exact behaviour.
  *
  * The signature is appended to as `PSBT_IN_PARTIAL_SIG` (key `0x02 || pubkey`,
  * value `<DER signature> 0x21`), so the existing [finalizePsbt] sees a normal
@@ -36,9 +43,16 @@ object PsbtSigner {
     /**
      * Returns a new [Psbt] with a partial signature inserted on every input.
      *
+     * @param masterFingerprint the four-byte BIP-32 master fingerprint the
+     *   PSBT's derivations must name, or null to match the [accountKey]'s own
+     *   fingerprint (see the class doc).
      * @throws PsbtException when any input cannot be signed (see the refusals above).
      */
-    fun signPsbt(psbt: Psbt, accountKey: ExtendedPrivateKey): Psbt {
+    fun signPsbt(
+        psbt: Psbt,
+        accountKey: ExtendedPrivateKey,
+        masterFingerprint: ByteArray? = null,
+    ): Psbt {
         val tx = psbt.transaction
         if (psbt.inputs.size != tx.inputs.size) {
             throw PsbtException(
@@ -46,7 +60,10 @@ object PsbtSigner {
             )
         }
 
-        val fingerprint = accountKey.fingerprint()
+        val fingerprint = masterFingerprint ?: int4(accountKey.fingerprint())
+        if (fingerprint.size != 4) {
+            throw PsbtException("a master fingerprint is four bytes, got ${fingerprint.size}")
+        }
 
         val signedInputs = psbt.inputs.mapIndexed { index, input ->
             val sighash = input.sighashType
@@ -94,13 +111,19 @@ object PsbtSigner {
         )
     }
 
-    /** Whether a 4-byte PSBT fingerprint equals [fingerprint], compared big-endian. */
-    private fun matches(bytes: ByteArray, fingerprint: Int): Boolean {
-        if (bytes.size != 4) return false
-        val value = ((bytes[0].toInt() and 0xFF) shl 24) or
-            ((bytes[1].toInt() and 0xFF) shl 16) or
-            ((bytes[2].toInt() and 0xFF) shl 8) or
-            (bytes[3].toInt() and 0xFF)
-        return value == fingerprint
-    }
+    /**
+     * Whether a derivation's 4-byte fingerprint equals [fingerprint], byte for
+     * byte. BIP-32 fingerprints are compared in the order they are written, so
+     * this is an array equality rather than an endian-aware integer compare.
+     */
+    private fun matches(bytes: ByteArray, fingerprint: ByteArray): Boolean =
+        bytes.size == fingerprint.size && bytes.contentEquals(fingerprint)
+
+    /** An [Int] fingerprint as the four big-endian bytes a PSBT derivation carries. */
+    private fun int4(value: Int): ByteArray = byteArrayOf(
+        (value ushr 24).toByte(),
+        (value ushr 16).toByte(),
+        (value ushr 8).toByte(),
+        value.toByte(),
+    )
 }

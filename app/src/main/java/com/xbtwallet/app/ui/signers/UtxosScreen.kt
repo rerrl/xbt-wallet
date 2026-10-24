@@ -32,7 +32,6 @@ import androidx.compose.ui.unit.dp
 import com.xbtwallet.app.chain.AccountSnapshot
 import com.xbtwallet.app.chain.ScannedUtxo
 import com.xbtwallet.app.data.Signer
-import com.xbtwallet.app.data.SignerType
 
 /**
  * The one hint shown wherever a watch-only wallet's send path is disabled.
@@ -52,39 +51,23 @@ internal const val WATCH_ONLY_CANNOT_SPEND_HINT =
         "from this account, add it as a signing device or hot wallet instead."
 
 /**
- * The one hint shown when a **hot wallet**'s send path is disabled here.
- *
- * A hot wallet's seed *is* on this phone, so it is signing-ready by
- * construction — but the only send this screen can start is the air-gapped
- * SeedSigner QR dance, which no device can ever sign for a hot wallet (the seed
- * is not in a device). Internal signing is a later phase, so the bar stays
- * disabled under this hint rather than walking the user into a flow that cannot
- * finish.
- *
- * Pinned verbatim by `HotWalletCopyTest`, so the wording cannot drift.
- */
-internal const val HOT_WALLET_CANNOT_SPEND_HINT =
-    "Sending from a hot wallet comes with the internal signing flow \u2014 coming soon."
-
-/**
  * Whether the "Send selected" bar is live for [signer] — the whole rule, as a
  * pure function so a JVM test can pin it without a UI.
  *
- * Signing-readiness is necessary but not sufficient: a hot wallet is
- * signing-ready and still must not enter this screen's QR-dance send.
+ * Signing-readiness is the whole rule: a signing device holds its keys elsewhere
+ * (the air-gapped QR dance), and a hot wallet holds its seed on this phone (the
+ * internal sign-and-broadcast flow). Both can send; only an import that cannot
+ * sign at all is turned away.
  */
-internal fun sendSelectedEnabled(signer: Signer): Boolean =
-    signer.signingReady && signer.type !is SignerType.HotSeed
+internal fun sendSelectedEnabled(signer: Signer): Boolean = signer.signingReady
 
 /**
  * The hint under the bar for [signer], or null when the bar is live.
  *
- * A hot wallet gets its own sentence — the watch-only one would be wrong (it
- * *can* sign, just not through this flow) — and a watch-only wallet that cannot
- * sign keeps [WATCH_ONLY_CANNOT_SPEND_HINT].
+ * Only a watch-only wallet that cannot sign gets a sentence, and it is the one
+ * that points at the fix. A hot wallet's bar is live, so it says nothing.
  */
 internal fun sendSelectedHint(signer: Signer): String? = when {
-    signer.type is SignerType.HotSeed -> HOT_WALLET_CANNOT_SPEND_HINT
     signer.signingReady -> null
     else -> WATCH_ONLY_CANNOT_SPEND_HINT
 }

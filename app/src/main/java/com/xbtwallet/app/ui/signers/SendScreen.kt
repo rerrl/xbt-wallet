@@ -3,6 +3,8 @@ package com.xbtwallet.app.ui.signers
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.view.WindowManager
+import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
@@ -30,6 +32,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -42,12 +45,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
@@ -71,10 +77,14 @@ import com.xbtwallet.app.crypto.buildUnsignedPsbt
 import com.xbtwallet.app.crypto.finalizePsbt
 import com.xbtwallet.app.crypto.parsePsbt
 import com.xbtwallet.app.crypto.transactionId
+import com.xbtwallet.app.data.SeedVault
 import com.xbtwallet.app.data.SignerType
+import com.xbtwallet.app.data.signHotSend
 import com.xbtwallet.app.ui.receive.renderQr
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * The route marker that says a Send was opened on the **automatic** path.
@@ -100,6 +110,14 @@ internal const val AUTO_SEND_MARKER = "auto"
  *    required, which is this wallet's replay protection).
  * 4. **BROADCAST** — the finalized transaction, its computed txid, and one
  *    button that hands it to the configured Electrum server.
+ *
+ * **Four steps for an air-gapped wallet, and two for a hot one.** A wallet whose
+ * seed is *not* on this phone walks the QR dance above. A wallet whose seed **is**
+ * here ([SignerType.HotSeed]) cannot use it — there is no device to hold the
+ * unfinished PSBT — so the flow after the FORM is its own: a REVIEW of the same
+ * numbers the QR summary shows, an optional passphrase prompt, a signature from
+ * [signHotSend], a broadcast, and a success screen. The passphrase is attempted
+ * as the empty string first, so an ordinary wallet never sees the prompt.
  *
  * **Two ways in.** The manual path carries a chosen set of coins on the route
  * ([outpoints]) — see [Route] — so a rotation lands back on the same coins. The
@@ -129,9 +147,19 @@ fun SendScreen(
     onBack: () -> Unit,
     auto: Boolean = false,
     onChooseManually: () -> Unit = {},
+    /**
+     * The hot-wallet seed vault, when this screen was opened for a wallet whose
+     * seed is on this phone. Null for every other signer (and in tests) — the hot
+     * branch simply cannot sign without it, and the QR branch never needs it.
+     */
+    seedVault: SeedVault? = null,
     modifier: Modifier = Modifier,
 ) {
     val snapshot = state.snapshot
+
+    // Whether this wallet's seed is on this phone — the one fact that decides
+    // which flow follows the form. See [HotSendFlowState] and [signHotSend].
+    val hot = state.signer.type is SignerType.HotSeed
 
     // The explicit path resolves the selection in `outpoints` order, dropping
     // any outpoint the snapshot does not (or no longer) holds. A resync may have
@@ -167,6 +195,9 @@ fun SendScreen(
                     selected = emptyList(),
                     available = snapshot.utxos,
                     auto = true,
+                    hot = hot,
+                    seedVault = seedVault,
+                    onExit = onBack,
                     onChooseManually = onChooseManually,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -183,6 +214,9 @@ fun SendScreen(
                     selected = selected,
                     available = emptyList(),
                     auto = false,
+                    hot = hot,
+                    seedVault = seedVault,
+                    onExit = onBack,
                     onChooseManually = {},
                     modifier = Modifier
                         .fillMaxWidth()
@@ -222,8 +256,14 @@ private fun SendNotice(text: String) {
     )
 }
 
-/** Where the flow is. Rotating restarts at [FORM] — see the screen's doc. */
-private enum class SendStep { FORM, SHOW_QR, SCAN, BROADCAST }
+/**
+ * Where the flow is. Rotating restarts at [FORM] — see the screen's doc.
+ *
+ * [SHOW_QR], [SCAN] and [BROADCAST] are the air-gapped walk; [REVIEW],
+ * [PASSPHRASE] and [SUCCESS] are the hot one. A given wallet only ever uses one
+ * of those two triples.
+ */
+private enum class SendStep { FORM, SHOW_QR, SCAN, BROADCAST, REVIEW, PASSPHRASE, SUCCESS }
 
 /** The unsigned PSBT and the numbers its summary shows, held between steps. */
 private class PreparedSend(
@@ -234,8 +274,8 @@ private class PreparedSend(
     val changeSatoshis: Long,
 )
 
-/** A finalized transaction ready to broadcast. */
-private class SignedSend(
+/** A finalized transaction the air-gapped walk scanned back, ready to broadcast. */
+private class FinalizedSend(
     val txHex: String,
     val txid: String,
 )
@@ -243,6 +283,13 @@ private class SignedSend(
 /**
  * The step machine itself. All state is in `remember` for this composition —
  * see the screen's doc for why a rotation restarting the flow is accepted.
+ *
+ * @param hot whether this wallet's seed is on this phone, which swaps the
+ *   post-FORM walk from the QR dance to the internal sign-and-broadcast one.
+ * @param seedVault the vault the hot branch reads its seed from, or null when
+ *   this wallet is not hot (or a test has not supplied one).
+ * @param onExit leaves the flow entirely, back to the screen that opened it —
+ *   what the hot walk's success screen does once the user taps `Done`.
  */
 @Composable
 private fun SendFlow(
@@ -250,6 +297,9 @@ private fun SendFlow(
     selected: List<ScannedUtxo>,
     available: List<ScannedUtxo>,
     auto: Boolean,
+    hot: Boolean,
+    seedVault: SeedVault?,
+    onExit: () -> Unit,
     onChooseManually: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -275,7 +325,7 @@ private fun SendFlow(
 
     // --- the round-trip ---
     var prepared by remember(signerKey) { mutableStateOf<PreparedSend?>(null) }
-    var signed by remember(signerKey) { mutableStateOf<SignedSend?>(null) }
+    var signed by remember(signerKey) { mutableStateOf<FinalizedSend?>(null) }
     var scanProgress by remember(signerKey) { mutableIntStateOf(0) }
     var scanMessage by remember(signerKey) { mutableStateOf<String?>(null) }
     var broadcasting by remember(signerKey) { mutableStateOf(false) }
@@ -285,6 +335,46 @@ private fun SendFlow(
     // The scanner's own state machine, one per scan. Remembered (not recreated
     // per frame) because a fountain code is stateful across frames.
     val assembler = remember(signerKey) { UrPsbtAssembler() }
+
+    // The hot branch's machine — null for every other wallet, and for a hot one
+    // with no vault to read (which leaves the review's sign button unable to do
+    // anything honest, so the FORM's build refuses earlier instead).
+    //
+    // The signing itself runs off the main thread: PBKDF2 plus the derivation
+    // walk plus the ECDSA signature is real work, and the frame must not stall
+    // on it. `prepared` is read through its delegate, so the remembered state
+    // always signs the transaction the FORM actually built.
+    val hotFlow: HotSendFlowState? = remember(signerKey) {
+        val vault = seedVault
+        if (!hot || vault == null) {
+            null
+        } else {
+            HotSendFlowState(
+                sign = { passphrase ->
+                    val current = prepared
+                        ?: throw IllegalStateException("nothing has been prepared to sign")
+                    withContext(Dispatchers.Default) {
+                        signHotSend(vault, state.signer, parsePsbt(current.psbtBytes), passphrase)
+                    }
+                },
+                broadcast = { txHex -> state.broadcastTransaction(txHex) },
+            )
+        }
+    }
+
+    // The hot walk's step, mapped from the machine's own derived step. Kept in
+    // lockstep with `step` rather than read at render time so there is still one
+    // switch below for both walks.
+    val syncHotStep: () -> Unit = {
+        val flow = hotFlow
+        if (flow != null) {
+            step = when (flow.step) {
+                HotSendStep.REVIEW -> SendStep.REVIEW
+                HotSendStep.PASSPHRASE -> SendStep.PASSPHRASE
+                HotSendStep.SUCCESS -> SendStep.SUCCESS
+            }
+        }
+    }
 
     // CAMERA is asked for by this app, not by the scanner library: the panel is
     // our own composable and it can only work with the permission in hand. A
@@ -472,7 +562,7 @@ private fun SendFlow(
                     onProgress = { scanProgress = it },
                     onMessage = { scanMessage = it },
                     onComplete = { raw ->
-                        signed = SignedSend(raw.toHexString(), transactionId(raw))
+                        signed = FinalizedSend(raw.toHexString(), transactionId(raw))
                         broadcastError = null
                         broadcastTxid = null
                         step = SendStep.BROADCAST
@@ -518,6 +608,68 @@ private fun SendFlow(
                         )
                     }
                 }
+
+                SendStep.REVIEW -> {
+                    val current = prepared
+                    val flow = hotFlow
+                    if (current == null || flow == null) {
+                        LaunchedEffect(Unit) { step = SendStep.FORM }
+                    } else {
+                        HotReviewStep(
+                            prepared = current,
+                            flow = flow,
+                            onSign = {
+                                scope.launch {
+                                    flow.signAndBroadcast()
+                                    syncHotStep()
+                                }
+                            },
+                        )
+                    }
+                }
+
+                SendStep.PASSPHRASE -> {
+                    val flow = hotFlow
+                    if (flow == null) {
+                        LaunchedEffect(Unit) { step = SendStep.FORM }
+                    } else {
+                        HotPassphraseStep(
+                            flow = flow,
+                            onSubmit = { passphrase ->
+                                scope.launch {
+                                    flow.submitPassphrase(passphrase)
+                                    syncHotStep()
+                                }
+                            },
+                            onBack = {
+                                flow.backToReview()
+                                syncHotStep()
+                            },
+                        )
+                    }
+                }
+
+                SendStep.SUCCESS -> {
+                    val current = prepared
+                    val flow = hotFlow
+                    if (current == null || flow == null) {
+                        LaunchedEffect(Unit) { step = SendStep.FORM }
+                    } else {
+                        HotSuccessStep(
+                            prepared = current,
+                            flow = flow,
+                            onDone = {
+                                // The outgoing transaction should be in the
+                                // account's history as unconfirmed by the time
+                                // the user lands back on it, so the detail screen
+                                // rescans on the way out — the same rescan the
+                                // air-gapped walk does after its broadcast.
+                                scope.launch { state.reload() }
+                                onExit()
+                            },
+                        )
+                    }
+                }
             }
         }
 
@@ -542,7 +694,9 @@ private fun SendFlow(
                             val amount = amountSatoshis ?: return@Button
                             prepareSend(state, selected, recipient, amount, rate)
                         }
-                        step = SendStep.SHOW_QR
+                        // A hot wallet skips the QR entirely: the same prepared
+                        // transaction goes straight to its review.
+                        step = if (hot) SendStep.REVIEW else SendStep.SHOW_QR
                     } catch (failure: Exception) {
                         buildError = "Could not build the transaction: ${failure.message ?: "unknown error"}"
                     }
@@ -550,7 +704,7 @@ private fun SendFlow(
                 enabled = canFinalize,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Finalize transaction for signing")
+                Text(if (hot) HOT_REVIEW_TITLE else "Finalize transaction for signing")
             }
 
             if (!state.signer.signingReady) {
@@ -935,7 +1089,7 @@ private fun ScanStep(
 private fun BroadcastStep(
     state: SignerChainState,
     prepared: PreparedSend,
-    signed: SignedSend,
+    signed: FinalizedSend,
     broadcasting: Boolean,
     error: String?,
     txid: String?,
@@ -1019,6 +1173,230 @@ private fun BroadcastStep(
                 Text(if (error == null) "Broadcast" else "Retry broadcast")
             }
         }
+    }
+}
+
+/**
+ * The hot walk's first screen: the same three numbers the QR summary carries —
+ * the recipient's edges, the amount and the fee — plus which side of the
+ * change/exact-spend line this send falls on, and one `Sign & broadcast`.
+ *
+ * The button's label is [HotSendFlowState]'s: a refused broadcast leaves the
+ * signed transaction in place, so the second press is a **retry of the same
+ * transaction**, never a rebuild.
+ */
+@Composable
+private fun HotReviewStep(
+    prepared: PreparedSend,
+    flow: HotSendFlowState,
+    onSign: () -> Unit,
+) {
+    Text(
+        text = HOT_REVIEW_TITLE,
+        style = MaterialTheme.typography.titleMedium,
+    )
+
+    Spacer(modifier = Modifier.height(4.dp))
+
+    AddressEdgeHighlight(prepared.recipient)
+    Text(
+        text = "Amount: ${formatSats(prepared.amountSatoshis)} sats",
+        style = MaterialTheme.typography.bodyMedium,
+        fontFamily = FontFamily.Monospace,
+    )
+    Text(
+        text = "Fee: ${formatSats(prepared.feeSatoshis)} sats",
+        style = MaterialTheme.typography.bodyMedium,
+        fontFamily = FontFamily.Monospace,
+    )
+    Text(
+        text = hotChangeLine(prepared.changeSatoshis),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+
+    if (flow.error != null) {
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = flow.error.orEmpty(),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+        )
+    }
+    if (flow.broadcastError != null) {
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = flow.broadcastError.orEmpty(),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+        )
+    }
+
+    Spacer(modifier = Modifier.height(16.dp))
+
+    Button(
+        onClick = onSign,
+        enabled = !flow.busy,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        if (flow.busy) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp,
+                color = MaterialTheme.colorScheme.onPrimary,
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(flow.status ?: SIGN_AND_BROADCAST_LABEL)
+        } else {
+            Text(
+                if (flow.hasSignedTransaction && flow.broadcastError != null) {
+                    RETRY_BROADCAST_LABEL
+                } else {
+                    SIGN_AND_BROADCAST_LABEL
+                },
+            )
+        }
+    }
+}
+
+/**
+ * The passphrase prompt, shown only when the silent empty attempt was refused.
+ *
+ * Three things this screen is careful about:
+ *
+ *  - the passphrase lives in a plain `remember` for the length of this prompt —
+ *    never on the route, never `rememberSaveable`, never logged;
+ *  - the window carries `FLAG_SECURE` while the prompt is composed, so a
+ *    screenshot or the recents thumbnail cannot capture what is being typed;
+ *  - backing out calls [HotSendFlowState.backToReview], which abandons the
+ *    attempt and leaves the prepared transaction exactly as it was.
+ */
+@Composable
+private fun HotPassphraseStep(
+    flow: HotSendFlowState,
+    onSubmit: (String) -> Unit,
+    onBack: () -> Unit,
+) {
+    val activity = LocalActivity.current
+    DisposableEffect(activity) {
+        val window = activity?.window
+        window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        onDispose { window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
+    }
+
+    var passphrase by remember { mutableStateOf("") }
+
+    Text(
+        text = HOT_PASSPHRASE_TITLE,
+        style = MaterialTheme.typography.titleMedium,
+    )
+    Text(
+        text = "Enter this wallet's passphrase to sign the transaction. It is used " +
+            "once and never stored.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+
+    Spacer(modifier = Modifier.height(8.dp))
+
+    OutlinedTextField(
+        value = passphrase,
+        onValueChange = { passphrase = it },
+        label = { Text(HOT_PASSPHRASE_TITLE) },
+        singleLine = true,
+        visualTransformation = PasswordVisualTransformation(),
+        modifier = Modifier.fillMaxWidth(),
+    )
+
+    if (flow.passphraseError != null) {
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = flow.passphraseError.orEmpty(),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+        )
+    }
+    if (flow.error != null) {
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = flow.error.orEmpty(),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+        )
+    }
+
+    Spacer(modifier = Modifier.height(16.dp))
+
+    Button(
+        onClick = { onSubmit(passphrase) },
+        enabled = !flow.busy && passphrase.isNotEmpty(),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        if (flow.busy) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp,
+                color = MaterialTheme.colorScheme.onPrimary,
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(flow.status ?: SIGN_AND_BROADCAST_LABEL)
+        } else {
+            Text(SIGN_AND_BROADCAST_LABEL)
+        }
+    }
+
+    TextButton(onClick = onBack, enabled = !flow.busy) { Text("\u2190 Back") }
+}
+
+/**
+ * The hot walk's last screen: a checkmark, the amount, and the txid — tappable,
+ * because the one thing a user does with a fresh txid is copy it somewhere.
+ * `Done` goes back to wherever the send was started and rescans on the way out.
+ */
+@Composable
+private fun HotSuccessStep(
+    prepared: PreparedSend,
+    flow: HotSendFlowState,
+    onDone: () -> Unit,
+) {
+    val clipboard = LocalClipboardManager.current
+    val txid = flow.txid.orEmpty()
+
+    Text(
+        text = HOT_SUCCESS_CHECK,
+        style = MaterialTheme.typography.headlineSmall,
+        color = MaterialTheme.colorScheme.primary,
+    )
+    Text(
+        text = HOT_SUCCESS_TITLE,
+        style = MaterialTheme.typography.titleMedium,
+    )
+
+    Spacer(modifier = Modifier.height(4.dp))
+
+    Text(
+        text = "Amount: ${formatSats(prepared.amountSatoshis)} sats",
+        style = MaterialTheme.typography.bodyMedium,
+        fontFamily = FontFamily.Monospace,
+    )
+    Text(
+        text = "Transaction id (tap to copy)",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 8.dp),
+    )
+    TextButton(onClick = { clipboard.setText(AnnotatedString(txid)) }) {
+        Text(
+            text = txid,
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace,
+        )
+    }
+
+    Spacer(modifier = Modifier.height(16.dp))
+
+    Button(onClick = onDone, modifier = Modifier.fillMaxWidth()) {
+        Text(HOT_DONE_LABEL)
     }
 }
 
@@ -1160,15 +1538,13 @@ private fun prepareSend(
 ): PreparedSend {
     val accountKey = state.accountKey
         ?: throw PsbtException("this wallet's key could not be read")
-    // Still a watch-only-only path: this screen is the air-gapped QR-dance send,
-    // which no device can sign for a hot wallet, so the UTXOs screen gates hot
-    // wallets out of it (see UtxosScreen's Send selected bar). Phase F reworks
-    // this for the internal signing flow.
-    val type = state.signer.type as? SignerType.WatchOnlyXpub
-        ?: throw PsbtException("this wallet has no account key")
-    val fingerprintHex = type.masterFingerprint
+    // The metadata comes off the signer record whichever kind it is: a hot wallet
+    // carries the same passphrased master fingerprint and account path a
+    // signing-device import does (see [Signer.accountMasterFingerprint]), because
+    // the internal signer needs exactly the same BIP32 origin the QR walk does.
+    val fingerprintHex = state.signer.accountMasterFingerprint
         ?: throw PsbtException("this wallet has no master fingerprint")
-    val pathText = type.derivationPath
+    val pathText = state.signer.accountDerivationPath
         ?: throw PsbtException("this wallet has no derivation path")
 
     val accountPath = parseDerivationPath(pathText)
@@ -1303,7 +1679,7 @@ private fun ByteArray.toHexString(): String {
  * unmangled. The wallet's own plumbing failures are prefixed so a reader can
  * tell a *rejected transaction* from a *connection that did not answer*.
  */
-private fun describeBroadcastFailure(failure: Exception): String = when (failure) {
+internal fun describeBroadcastFailure(failure: Exception): String = when (failure) {
     is com.xbtwallet.app.electrum.ElectrumException ->
         "The server refused the transaction: ${failure.message}"
 

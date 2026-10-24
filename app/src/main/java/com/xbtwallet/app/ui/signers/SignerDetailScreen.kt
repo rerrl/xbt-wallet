@@ -56,10 +56,10 @@ import java.math.BigDecimal
  *     answer ("Connect a server"),
  *  3. the four actions: **UTXOs** and **Addresses** open their own screens,
  *     **Receive** resolves the first unused address and shows its QR, and
- *     **Send** opens the air-gapped signing flow with automatic coin selection —
- *     but only for a signing-device wallet, since that flow needs a device that
- *     holds the keys (a watch-only import and a hot wallet keep it disabled,
- *     under the note [detailSendNote] returns),
+ *     **Send** opens the send flow with automatic coin selection — the
+ *     air-gapped QR dance for a signing-device wallet, and the internal
+ *     sign-and-broadcast flow for a hot wallet. Only a watch-only import that
+ *     cannot sign keeps it disabled, under the note [detailSendNote] returns,
  *  4. the **Transactions** list: the same scan's `get_history` answers,
  *     aggregated and deduped (see [TransactionsSection]), below the button that
  *     reveals the account key on demand.
@@ -165,21 +165,18 @@ fun SignerDetailScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Whether this wallet may start the air-gapped send at all — the
-            // rule the button and the note below it both read (see
-            // [sendSelectedEnabled]).
+            // Whether this wallet may start a send at all — the rule the button
+            // and the note below it both read (see [sendSelectedEnabled]).
             val sendEnabled = sendSelectedEnabled(signer)
 
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                // Send is enabled only for a signing-device wallet — the
-                // air-gapped QR-dance flow this opens needs a device that holds
-                // the keys. A watch-only import has no keys on this phone, and a
-                // hot wallet's seed is here but the QR dance cannot sign for it
-                // (internal signing is a later phase), so both stay disabled —
-                // visible, but greyed, so the control never promises a flow that
-                // cannot finish. Receive needs no signing, so it is always live:
-                // it resolves the first unused address *here*, then opens the QR
-                // for it.
+                // Send is live for any wallet that can sign: a signing device
+                // walks the air-gapped QR dance, and a hot wallet signs on this
+                // phone and broadcasts. Only a watch-only import that cannot sign
+                // stays disabled — visible, but greyed, so the control never
+                // promises a flow that cannot finish. Receive needs no signing, so
+                // it is always live: it resolves the first unused address *here*,
+                // then opens the QR for it.
                 Button(
                     onClick = onOpenSend,
                     enabled = sendEnabled,
@@ -234,11 +231,11 @@ fun SignerDetailScreen(
             Spacer(modifier = Modifier.height(6.dp))
 
             // Only shown when Send cannot be started: the note says which wallet
-            // this is and why (see [detailSendNote]). A signing device has a live
-            // Send, so it gets no apology line at all.
+            // this is and why (see [detailSendNote]). Any wallet that can sign has
+            // a live Send, so it gets no apology line at all.
             if (!sendEnabled) {
                 Text(
-                    text = detailSendNote(signer),
+                    text = detailSendNote(),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
