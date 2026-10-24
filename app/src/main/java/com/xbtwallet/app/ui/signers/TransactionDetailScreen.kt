@@ -107,6 +107,13 @@ fun TransactionDetailScreen(
         )
     }
 
+    // The header's badge and amount are read from the fresh [row] on every
+    // composition — the same source the details block uses — so a snapshot
+    // refresh never leaves the header showing the row captured at navigation
+    // time. The fetched detail is the fallback when the row is gone.
+    val badgeConfirmations = row?.confirmations ?: detailState.detail?.confirmations
+    val headerNetSatoshis = row?.netSatoshis ?: detailState.detail?.netSatoshis
+
     LaunchedEffect(txHash) { detailState.load() }
 
     Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
@@ -126,12 +133,12 @@ fun TransactionDetailScreen(
                     style = MaterialTheme.typography.titleLarge,
                     modifier = Modifier.weight(1f),
                 )
-                ConfirmationBadge(detailState.confirmations)
+                ConfirmationBadge(badgeConfirmations)
             }
 
             Header(
-                netSatoshis = detailState.netSatoshis,
-                direction = transactionDirection(detailState.netSatoshis ?: 0L),
+                netSatoshis = headerNetSatoshis,
+                direction = transactionDirection(headerNetSatoshis ?: 0L),
             )
 
             when (detailState.phase) {

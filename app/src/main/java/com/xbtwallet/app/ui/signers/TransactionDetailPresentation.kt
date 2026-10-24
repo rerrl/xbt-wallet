@@ -64,9 +64,16 @@ internal fun groupedThousands(value: Long): String {
     return builder.toString()
 }
 
-/** "#919,231" — a block height as the details block prints it. */
+/**
+ * "#919,231" — a block height as the details block prints it.
+ *
+ * A height of zero or less is not a block: an unconfirmed (mempool)
+ * transaction reports height 0 or -1, which must read as the unknown em dash
+ * rather than "#0"/"#-1" — a block that does not exist. Only a mined
+ * transaction (height > 0) prints a height.
+ */
 internal fun formatBlockHeight(height: Int?): String =
-    height?.let { "#${groupedThousands(it.toLong())}" } ?: UNKNOWN_VALUE
+    height?.takeIf { it > 0 }?.let { "#${groupedThousands(it.toLong())}" } ?: UNKNOWN_VALUE
 
 /**
  * "12,345 sats" — an amount in satoshis with its unit.

@@ -324,8 +324,6 @@ class TransactionDetailTest {
 
     @Test
     fun `address rendering covers the standard scripts and refuses the rest`() {
-        assertEquals("bc1q...", "bc1q...") // placeholder guard; real assertions below
-
         val p2wpkh = "0014" + "11".repeat(20)
         assertTrue(addressFromScriptPubKeyHex(p2wpkh)!!.startsWith("bc1q"))
 
