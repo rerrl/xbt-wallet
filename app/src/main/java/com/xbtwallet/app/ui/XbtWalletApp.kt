@@ -71,13 +71,15 @@ import kotlinx.coroutines.launch
  * name, not a route); it rides in the [Route] that carries this screen onto the
  * back stack, so each level remembers its own argument. See [NavStack].
  */
-enum class Screen { HOME, SERVER, SETTINGS, ABOUT, ADD_SIGNER, SIGNING_DEVICE_CHOICE, IMPORT_XPUB, ADD_SIGNING_DEVICE, HOT_WALLET_CREATE, HOT_WALLET_DICE, HOT_WALLET_BACKUP, HOT_WALLET_FINISH, HOT_WALLET_IMPORT, HOT_WALLET_IMPORT_WORDS, SIGNER_DETAIL, SIGNER_UTXOS, SIGNER_ADDRESSES, RECEIVE, SEND }
+enum class Screen { HOME, SERVER, SETTINGS, ABOUT, ADD_SIGNER, SIGNING_DEVICE_CHOICE, IMPORT_XPUB, ADD_SIGNING_DEVICE, HOT_WALLET_CREATE, HOT_WALLET_DICE, HOT_WALLET_BACKUP, HOT_WALLET_FINISH, HOT_WALLET_IMPORT, HOT_WALLET_IMPORT_WORDS, HOT_WALLET_IMPORT_FINISH, SIGNER_DETAIL, SIGNER_UTXOS, SIGNER_ADDRESSES, RECEIVE, SEND }
 
 /**
- * The screens the create-hot-wallet walk passes through, dice first.
+ * The screens the two hot-wallet walks pass through — create (dice first) and
+ * import (the word field first).
  *
- * The walk's intermediate secrets — the recovery words and the passphrase — live
- * in one in-memory holder rather than in the composition of any one screen
+ * The walks' intermediate secrets — the recovery words, whether they came off a
+ * die or off the user's own paper, and the passphrase — live in one in-memory
+ * holder rather than in the composition of any one screen
  * ([HotWalletCreateFlow]), because the user has to walk through several of these
  * screens while the words are still only in memory. This set is what says how
  * far that memory is allowed to reach: while *any* of these is the current
@@ -88,12 +90,17 @@ enum class Screen { HOME, SERVER, SETTINGS, ABOUT, ADD_SIGNER, SIGNING_DEVICE_CH
  * The dice screen belongs to the set even though it holds no words yet: a walk
  * out of it is a walk out of the flow, and including it keeps the
  * [DisposableEffect]'s key from flickering as the dice screen hands its words to
- * the backup screen one screen later.
+ * the backup screen one screen later. The import walk's word screen and its
+ * finish screen join it for the same reason — and the import screen *ahead* of
+ * them does not, so backing out of the word field (or of the finish step) wipes
+ * the phrase rather than leaving it in memory behind the word-count picker.
  */
 internal val HOT_WALLET_CREATE_FLOW_SCREENS = setOf(
     Screen.HOT_WALLET_DICE,
     Screen.HOT_WALLET_BACKUP,
     Screen.HOT_WALLET_FINISH,
+    Screen.HOT_WALLET_IMPORT_WORDS,
+    Screen.HOT_WALLET_IMPORT_FINISH,
 )
 
 /**
@@ -150,10 +157,13 @@ internal val HOT_WALLET_CREATE_FLOW_SCREENS = setOf(
  *   shared [HotWalletCreateFlow], and walks on to [Screen.HOT_WALLET_BACKUP]
  *   (the words, shown once) and [Screen.HOT_WALLET_FINISH] (a name and an
  *   optional passphrase), where [HotWalletProvisioner] stores the entropy in the
- *   keystore-backed vault and creates the signer. **The import path is still UI
- *   scaffolding: it asks for its word count first, opens
- *   [Screen.HOT_WALLET_IMPORT_WORDS] with it on the route's free-form `address`
- *   slot, and its terminal button stays disabled.**
+ *   keystore-backed vault and creates the signer. The import path asks for its
+ *   word count first, opens [Screen.HOT_WALLET_IMPORT_WORDS] with it on the
+ *   route's free-form `address` slot, and its word field hands the phrase to the
+ *   same holder before walking on to [Screen.HOT_WALLET_IMPORT_FINISH] — the same
+ *   finish screen, worded for the walk that reached it. There is no
+ *   recovery-words step on the import path: the user's words are already written
+ *   down, and this phone is not where they were made.
  * - **Watch only** pushes [Screen.IMPORT_XPUB].
  *
  * So back from any form returns to the screen that sent you there. The add paths
@@ -471,7 +481,11 @@ fun XbtWalletApp() {
             }
         }
 
-        Screen.HOT_WALLET_FINISH -> {
+        // The finish screen, reached by either walk — the create walk from the
+        // recovery words, the import walk from the word field. It is one screen
+        // and one provisioning call; only its title and its terminal button say
+        // which walk got here, and the destination is what carries that.
+        Screen.HOT_WALLET_FINISH, Screen.HOT_WALLET_IMPORT_FINISH -> {
             val words = hotWalletFlow.mnemonic
             if (words == null) {
                 LaunchedEffect(route) { nav.reset() }
@@ -480,8 +494,10 @@ fun XbtWalletApp() {
                     mnemonic = words,
                     flow = hotWalletFlow,
                     provisioner = hotWalletProvisioner,
-                    // The wallet exists by now. Re-read through the store so
-                    // Home shows it — amber "hot" tag and all — and reset the
+                    isImport = route.screen == Screen.HOT_WALLET_IMPORT_FINISH,
+                    // The wallet exists by now (or was already here: a duplicate
+                    // ends the same way, on the list). Re-read through the store
+                    // so Home shows it — amber "hot" tag and all — and reset the
                     // stack, exactly as every other add path lands.
                     onCreated = {
                         homeState.refresh()
@@ -504,7 +520,14 @@ fun XbtWalletApp() {
             if (wordCount == null) {
                 LaunchedEffect(route) { nav.reset() }
             } else {
-                HotWalletImportWordsScreen(wordCount = wordCount, onBack = { nav.pop() })
+                HotWalletImportWordsScreen(
+                    wordCount = wordCount,
+                    // The words go into the shared holder and nowhere else — not
+                    // onto the route, which is saved state (see the holder).
+                    flow = hotWalletFlow,
+                    onWordsEntered = { nav.push(Route(Screen.HOT_WALLET_IMPORT_FINISH)) },
+                    onBack = { nav.pop() },
+                )
             }
         }
 
