@@ -6,13 +6,22 @@ import com.xbtwallet.app.electrum.MiniJson
 /**
  * What kind of signer a [Signer] pairs with.
  *
- * Sealed, with exactly one live variant today: [WatchOnlyXpub]. A `HotSeed`
- * variant — a signer whose seed would live on this phone — is deliberately
- * **absent**, and reserved by name only: adding one would mean carrying private
- * key material, which is the one thing this app must never do (PLAN.md §2.1,
- * "keys never touch the phone"). There is no seed type, no seed storage and no
- * code path that could produce one, so a `when` over this type has nothing to
- * ignore.
+ * Two live variants:
+ *
+ * - [WatchOnlyXpub] — the phone holds an account's extended public key and can
+ *   watch it, and can never sign for it. This is what a text-QR paste and a
+ *   signing-device (BC-UR) export both produce.
+ * - [HotSeed] — a wallet whose seed *is* on this phone: the phone can watch it
+ *   (the same passphrased account zpub), and it can also spend, because the
+ *   seed's entropy sits in the [SeedVault] behind the Android keystore. It is
+ *   watch-only *until it is asked to sign* — nothing about listing, scanning or
+ *   receiving from it differs from an xpub-only wallet.
+ *
+ * The distinction is deliberately in the *type*, not in a flag: everything that
+ * has to behave differently for a wallet that can spend — the tag it wears, the
+ * delete-confirmation copy, `signingReady` — is a `when` over this sealed
+ * interface, so a new kind of signer cannot be added without the compiler
+ * asking every one of those places what it means.
  */
 sealed interface SignerType {
     /**
@@ -37,6 +46,45 @@ sealed interface SignerType {
         val masterFingerprint: String? = null,
         val derivationPath: String? = null,
     ) : SignerType
+
+    /**
+     * A hot wallet: this phone holds the seed.
+     *
+     * The record itself carries **no secret**. [xpub] is the account zpub of the
+     * *passphrased* key — the wallet's public identity, and the same shape a
+     * watch-only signer stores, so the whole watching half of the app works on a
+     * hot wallet unchanged. The entropy that can spend it lives in the
+     * [SeedVault], under the signer's id, and the passphrase to go with it exists
+     * only in the user's head (and on their written-down paper).
+     *
+     * Both [xpub] and [masterFingerprint] are the **passphrased** values. That
+     * is not a detail: it is how the passphrase is verified at spend time — the
+     * UI re-derives from the vault's entropy plus the passphrase the user typed
+     * and compares the account zpub ([HotWalletProvisioner.passphraseMatches]).
+     * No passphrase hash is stored anywhere, so there is nothing extra to leak
+     * and nothing to keep in sync.
+     *
+     * [masterFingerprint] is eight lowercase hex characters, the same format a
+     * signing-device import stores on
+     * [WatchOnlyXpub.masterFingerprint] — one fingerprint format across the app,
+     * so a hot wallet and a hardware wallet of the same seed are recognisable as
+     * the same key.
+     */
+    data class HotSeed(
+        /** The **passphrased** account zpub — the wallet's public identity. */
+        val xpub: String,
+        /** Eight lowercase hex characters: the passphrased master key's fingerprint. */
+        val masterFingerprint: String,
+        /** Always the BIP-84 account path today; stored so the record is self-describing. */
+        val derivationPath: String = DEFAULT_HOT_DERIVATION_PATH,
+        /** Whether the user chose a BIP-39 passphrase when this wallet was created. */
+        val hasPassphrase: Boolean,
+    ) : SignerType
+
+    companion object {
+        /** The account path a hot wallet is derived at (BIP-84, first account, mainnet). */
+        const val DEFAULT_HOT_DERIVATION_PATH = "84'/0'/0'"
+    }
 }
 
 /**
@@ -88,6 +136,19 @@ enum class SignerOrigin(val storageValue: String) {
      * because the orange one would claim more than the user told us.
      */
     SIGNING_DEVICE_UR("other-signing-device-ur"),
+
+    /**
+     * The wallet's seed was generated or imported **on this phone** — a hot
+     * wallet. This is the only origin that describes a signer the app can sign
+     * with, and the only one whose record has an entry in the [SeedVault].
+     *
+     * Its wire value is spelled out for the same reason as the others: it is
+     * written into the blob and read back by name, so renaming the Kotlin
+     * constant can never invalidate data already on someone's phone. It is a
+     * value no earlier build wrote, so — unlike the historical
+     * `signing-device-ur` — there is nothing on disk for it to be confused with.
+     */
+    HOT("hot"),
     ;
 
     companion object {
@@ -134,8 +195,8 @@ data class Signer(
     val importedVia: SignerOrigin = SignerOrigin.TEXT_QR,
 ) {
     /**
-     * The label for this signer's *type* — [WATCH_ONLY_LABEL] — which is also
-     * the label of the grey tag a text-QR import wears.
+     * The label for this signer's *type* — [WATCH_ONLY_LABEL] for an xpub-only
+     * wallet, [HOT_LABEL] for one whose seed is on this phone.
      *
      * Derived from [type] rather than stored, so the label can never disagree
      * with the data. It says nothing about [importedVia]: the tag a signer
@@ -146,37 +207,55 @@ data class Signer(
     val typeLabel: String
         get() = when (type) {
             is SignerType.WatchOnlyXpub -> WATCH_ONLY_LABEL
+            is SignerType.HotSeed -> HOT_LABEL
         }
 
     /**
      * True when this signer can actually produce signatures — not merely watch the
      * account.
      *
-     * Signing-readiness is **computed from the record, never stored**, and it
-     * takes two things. The record must be a [SignerType.WatchOnlyXpub] carrying
-     * both [SignerType.WatchOnlyXpub.masterFingerprint] and
+     * Signing-readiness is **computed from the record, never stored**, and there
+     * are two ways to earn it.
+     *
+     * A [SignerType.HotSeed] is signing-ready **by construction**: the record
+     * only ever exists alongside its seed in the [SeedVault] (the vault write
+     * happens first — see [HotWalletProvisioner.provision]), so the seed *is*
+     * here. What the app still cannot do with it without asking is sign: the
+     * passphrase may not be the empty one, and that is checked at spend time by
+     * re-derivation, not by a flag on the record.
+     *
+     * A [SignerType.WatchOnlyXpub] must carry both
+     * [SignerType.WatchOnlyXpub.masterFingerprint] and
      * [SignerType.WatchOnlyXpub.derivationPath] — exactly the fields a PSBT's
      * BIP32 derivation records require, neither of which can be derived from the
-     * xpub after the fact. And the signer must have come off a **signing device**
-     * ([SignerOrigin.SEEDSIGNER_UR] / [SignerOrigin.SIGNING_DEVICE_UR]).
+     * xpub after the fact — **and** the signer must have come off a **signing
+     * device** ([SignerOrigin.SEEDSIGNER_UR] / [SignerOrigin.SIGNING_DEVICE_UR]).
      *
      * **A text-QR import is never signing-ready.** Metadata reaches this app only
      * through a signing-device (BC-UR) import; a text-QR record loads with both
      * fields already dropped (see [SignerStore.toSigner]), and this rule refuses
      * its origin outright on top of that, so a key that arrived as text can never
-     * grow into a signing one. A future signer kind that is not a
-     * [SignerType.WatchOnlyXpub] is not signing-ready by this rule either.
+     * grow into a signing one.
      */
     val signingReady: Boolean
-        get() {
-            if (importedVia == SignerOrigin.TEXT_QR) return false
-            val watchOnly = type as? SignerType.WatchOnlyXpub ?: return false
-            return watchOnly.masterFingerprint != null && watchOnly.derivationPath != null
+        get() = when (val kind = type) {
+            is SignerType.HotSeed -> true
+            is SignerType.WatchOnlyXpub ->
+                importedVia != SignerOrigin.TEXT_QR &&
+                    kind.masterFingerprint != null &&
+                    kind.derivationPath != null
         }
 
     companion object {
-        /** Badge for [SignerType.WatchOnlyXpub] — the only signer kind that exists. */
+        /** Badge for [SignerType.WatchOnlyXpub]: a wallet this phone can only watch. */
         const val WATCH_ONLY_LABEL = "watch-only"
+
+        /**
+         * Badge for [SignerType.HotSeed], and its `type` discriminator in the
+         * stored JSON — the same word, deliberately: it is the word the record
+         * is written and read under, and the word the tag shows.
+         */
+        const val HOT_LABEL = "hot"
     }
 }
 
@@ -215,6 +294,17 @@ class SignerStore(
     private val storage: KeyValueStore,
     private val now: () -> Long = { System.currentTimeMillis() / 1000 },
     private val newId: () -> String = { java.util.UUID.randomUUID().toString() },
+    /**
+     * The hot-wallet seed vault, when this store is wired to one.
+     *
+     * Optional, and null by default, because a store that never sees a hot
+     * wallet should not have to have a vault: the signing-device and text-QR
+     * paths pass nothing, and every test of them stays a store over a map. It is
+     * used for exactly one thing — [delete] purges a removed
+     * [SignerType.HotSeed]'s entry — so the store never reads seed material and
+     * never writes it; the entropy goes in through [HotWalletProvisioner].
+     */
+    private val seedVault: SeedVault? = null,
 ) {
 
     /** Every stored signer, oldest first. */
@@ -257,12 +347,95 @@ class SignerStore(
         return signer
     }
 
-    /** Removes one signer; returns false when the id was not present. */
+    /**
+     * Creates and persists a **hot** signer, returning it so the caller has the
+     * new id — and so it can be handed the seed that goes with it.
+     *
+     * The record it writes carries the passphrased account zpub and fingerprint
+     * and no secret at all; [HotWalletProvisioner] is what puts the entropy in
+     * the vault — before calling this, so the id has to be known first (see
+     * [allocateId]). The origin is stamped [SignerOrigin.HOT] here rather than
+     * taken as an argument: there is exactly one way a hot wallet arrives, so
+     * there is nothing for a caller to get wrong.
+     */
+    fun addHot(
+        name: String,
+        xpub: String,
+        masterFingerprint: String,
+        derivationPath: String = SignerType.DEFAULT_HOT_DERIVATION_PATH,
+        hasPassphrase: Boolean,
+    ): Signer = addHotWithId(
+        id = newId(),
+        name = name,
+        xpub = xpub,
+        masterFingerprint = masterFingerprint,
+        derivationPath = derivationPath,
+        hasPassphrase = hasPassphrase,
+    )
+
+    /**
+     * [addHot] under an id the caller already chose.
+     *
+     * This is the seam the vault ordering needs: [HotWalletProvisioner] has to
+     * write the entropy under the signer's id, and it must do that *before* the
+     * record exists — otherwise a crash in between would leave a wallet listed
+     * on Home that can never spend. So it allocates the id first
+     * ([allocateId]), fills the vault, and only then creates the record.
+     */
+    internal fun addHotWithId(
+        id: String,
+        name: String,
+        xpub: String,
+        masterFingerprint: String,
+        derivationPath: String = SignerType.DEFAULT_HOT_DERIVATION_PATH,
+        hasPassphrase: Boolean,
+    ): Signer {
+        val signer = Signer(
+            id = id,
+            name = name.trim(),
+            type = SignerType.HotSeed(
+                xpub = xpub.trim(),
+                masterFingerprint = masterFingerprint.trim(),
+                derivationPath = derivationPath,
+                hasPassphrase = hasPassphrase,
+            ),
+            createdAtEpochSeconds = now(),
+            importedVia = SignerOrigin.HOT,
+        )
+        saveAll(read() + signer)
+        return signer
+    }
+
+    /**
+     * A fresh signer id, with no record written for it.
+     *
+     * Exposed for one caller — see [addHotWithId] — because the hot-seed vault
+     * is keyed by signer id and has to be written before the record that will
+     * own it. Everything else gets its id from [add]/[addHot].
+     */
+    internal fun allocateId(): String = newId()
+
+    /**
+     * Removes one signer; returns false when the id was not present.
+     *
+     * A [SignerType.HotSeed] takes its secret with it: its [SeedVault] entry —
+     * and the keystore key that decrypts it — is purged as well, so removing a
+     * hot wallet is the destructive act the confirmation dialog says it is. A
+     * watch-only signer never had a vault entry, so removing one does not touch
+     * the vault at all: "nothing is deleted on the signer itself" stays true.
+     *
+     * Only the vault is handled here. The cached chain snapshot lives in
+     * [SnapshotStore] and is cleared by the caller that owns both stores (the
+     * wiring in `XbtWalletApp`), which is where the delete action already runs.
+     */
     fun delete(id: String): Boolean {
         val current = read()
-        val remaining = current.filterNot { it.id == id }
-        if (remaining.size == current.size) return false
-        saveAll(remaining)
+        val removed = current.firstOrNull { it.id == id } ?: return false
+        saveAll(current.filterNot { it.id == id })
+        // Purge after the record is gone: a signer no longer in the list cannot
+        // be read by the UI, so the worst a failure here leaves behind is an
+        // orphaned blob rather than a live wallet whose seed has been destroyed.
+        if (removed.type is SignerType.HotSeed) seedVault?.delete(id)
         return true
     }
 
@@ -320,6 +493,23 @@ class SignerStore(
             if (signer.importedVia != SignerOrigin.TEXT_QR) {
                 put(IMPORTED_VIA_KEY, signer.importedVia.storageValue)
             }
+            put("createdAt", signer.createdAtEpochSeconds)
+        }
+        // A hot wallet is a shape of its own, and every field of it is always
+        // written: unlike the watch-only record there is no "absent means the old
+        // default" story to preserve, because no earlier build wrote this type at
+        // all. The origin is spelled out even though it is not the text-QR
+        // default, so the blob says what it is rather than leaving the reader to
+        // infer "hot" from the type tag.
+        is SignerType.HotSeed -> buildMap {
+            put("id", signer.id)
+            put("name", signer.name)
+            put("type", Signer.HOT_LABEL)
+            put("xpub", type.xpub)
+            put("masterFingerprint", type.masterFingerprint)
+            put("derivationPath", type.derivationPath)
+            put("hasPassphrase", type.hasPassphrase)
+            put(IMPORTED_VIA_KEY, signer.importedVia.storageValue)
             put("createdAt", signer.createdAtEpochSeconds)
         }
     }
@@ -400,6 +590,39 @@ class SignerStore(
                     ),
                     createdAt,
                     importedVia = importedVia,
+                )
+            }
+            // A hot wallet. It is read as it is written: the zpub and the
+            // fingerprint are required — without them the record names no key —
+            // while the derivation path and the passphrase flag have defaults, so
+            // a blob missing them still parses rather than vanishing.
+            //
+            // The origin falls back to HOT when the key is absent, which is the
+            // one place this reader does not use the TEXT_QR default: a record
+            // whose own type tag says "hot" describes a wallet holding its seed
+            // on this phone, and reading it as a text-xpub import would paint it
+            // with the grey tag that means "nothing to lose here". This build
+            // always writes the key, so the fallback is for a blob from somewhere
+            // else — not a migration.
+            Signer.HOT_LABEL -> {
+                val xpub = map["xpub"] as? String ?: return null
+                val fingerprint = map["masterFingerprint"] as? String ?: return null
+                val path = map["derivationPath"] as? String
+                    ?: SignerType.DEFAULT_HOT_DERIVATION_PATH
+                val hasPassphrase = map["hasPassphrase"] as? Boolean ?: false
+                val storedOrigin = map[IMPORTED_VIA_KEY] as? String
+                    ?: SignerOrigin.HOT.storageValue
+                Signer(
+                    id,
+                    name,
+                    SignerType.HotSeed(
+                        xpub = xpub,
+                        masterFingerprint = fingerprint,
+                        derivationPath = path,
+                        hasPassphrase = hasPassphrase,
+                    ),
+                    createdAt,
+                    importedVia = SignerOrigin.fromStorage(storedOrigin),
                 )
             }
             else -> null

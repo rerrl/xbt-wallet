@@ -112,13 +112,68 @@ class SignerPresentationTest {
         val tags = SignerOrigin.entries.map { signerTagFor(signer(it)) }
 
         assertEquals(
-            setOf("watch-only", "seedsigner", "signing device"),
+            setOf("watch-only", "seedsigner", "signing device", "hot"),
             tags.map { it.label }.toSet(),
         )
         assertEquals(
             "one accent per origin, no sharing",
             SignerOrigin.entries.size,
             tags.map { it.accent }.toSet().size,
+        )
+    }
+
+    // --- the hot wallet's tag ------------------------------------------------
+    //
+    // A hot wallet is the one signer whose spending power is on the phone, so its
+    // tag has to be the one that reads as a warning — and it has to be the *only*
+    // thing wearing that word.
+
+    private fun hotSigner() = Signer(
+        id = "hot-1",
+        name = "Hot wallet",
+        type = SignerType.HotSeed(
+            xpub = bip84Zpub,
+            masterFingerprint = "73c5da0a",
+            hasPassphrase = false,
+        ),
+        createdAtEpochSeconds = 0L,
+        importedVia = SignerOrigin.HOT,
+    )
+
+    @Test
+    fun `a hot wallet wears the hot tag in its own accent`() {
+        val tag = signerTagFor(hotSigner())
+
+        assertEquals("hot", tag.label)
+        assertEquals(SignerTagAccent.HOT, tag.accent)
+        assertEquals("the label is the constant the screen renders", HOT_TAG_LABEL, tag.label)
+        assertTrue(
+            "the hot accent must not be the grey of a text xpub",
+            tag.accent != SignerTagAccent.NEUTRAL,
+        )
+        assertTrue(
+            "…nor the orange of a SeedSigner, nor the blue of another device",
+            tag.accent != SignerTagAccent.ORANGE && tag.accent != SignerTagAccent.DEVICE,
+        )
+    }
+
+    @Test
+    fun `the hot wallet's amber is driven by its origin`() {
+        // The word and the accent come from different halves of the record, and
+        // this pins which is which: the label is the *type*'s, like every other
+        // tag here, while the amber belongs to the origin — the wallet whose seed
+        // arrived on this phone.
+        val hot = signerTagFor(hotSigner())
+        val readAsText = signerTagFor(hotSigner().copy(importedVia = SignerOrigin.TEXT_QR))
+
+        assertEquals("hot", hot.label)
+        assertEquals(SignerTagAccent.HOT, hot.accent)
+
+        assertEquals("the word still comes from the type", HOT_TAG_LABEL, readAsText.label)
+        assertEquals(
+            "…but the amber does not survive a different origin",
+            SignerTagAccent.NEUTRAL,
+            readAsText.accent,
         )
     }
 

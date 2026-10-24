@@ -52,6 +52,17 @@ internal const val SEEDSIGNER_TAG_LABEL = "seedsigner"
 internal const val SIGNING_DEVICE_TAG_LABEL = "signing device"
 
 /**
+ * The word on the tag a signer wears when the wallet's own seed is on this
+ * phone — a hot wallet.
+ *
+ * The same word as the record's own `type` discriminator, deliberately: "hot" is
+ * what the wallet *is*, and the tag is where a user sees it. It is also the word
+ * that should make someone careful — this is the one tag whose wallet can be
+ * emptied by whoever holds the phone.
+ */
+internal const val HOT_TAG_LABEL = "hot"
+
+/**
  * The accent a signer's tag is painted in.
  *
  * An enum rather than a `Color` on purpose: this file has no Compose imports so
@@ -72,6 +83,18 @@ internal enum class SignerTagAccent {
      * palette's calm blue.
      */
     DEVICE,
+
+    /**
+     * The amber accent for a hot wallet — a seed on this phone.
+     *
+     * Amber because it is the one tag that is a warning: the other three
+     * describe keys that live somewhere else, and this one describes a wallet
+     * whose entire spending power is in the device the user is looking at. The
+     * three neighbouring colours are taken (grey means a text xpub, orange means
+     * SeedSigner, blue means another signing device) and the palette's amber is
+     * the one that reads as caution without being the red of an error.
+     */
+    HOT,
 }
 
 /**
@@ -79,9 +102,11 @@ internal enum class SignerTagAccent {
  *
  * [Signer.importedVia] decides it — the origin the chooser declared. A key read
  * off a SeedSigner over BC-UR wears "seedsigner" in orange; a key read off any
- * other signing device wears "signing device" in the blue; and a key that
- * arrived as plain text keeps the original grey "watch-only" pill, unchanged,
- * because for a text xpub that word is still exactly right.
+ * other signing device wears "signing device" in the blue; a key that arrived as
+ * plain text keeps the original grey "watch-only" pill, unchanged, because for a
+ * text xpub that word is still exactly right; and a wallet whose seed is on this
+ * phone wears "hot" in amber, because that is the one case where the phone
+ * itself can spend.
  */
 internal data class SignerTag(val label: String, val accent: SignerTagAccent)
 
@@ -96,4 +121,5 @@ internal fun signerTagFor(signer: Signer): SignerTag =
         SignerOrigin.TEXT_QR -> SignerTag(signer.typeLabel, SignerTagAccent.NEUTRAL)
         SignerOrigin.SEEDSIGNER_UR -> SignerTag(SEEDSIGNER_TAG_LABEL, SignerTagAccent.ORANGE)
         SignerOrigin.SIGNING_DEVICE_UR -> SignerTag(SIGNING_DEVICE_TAG_LABEL, SignerTagAccent.DEVICE)
+        SignerOrigin.HOT -> SignerTag(HOT_TAG_LABEL, SignerTagAccent.HOT)
     }
