@@ -138,6 +138,50 @@ class HotSendFlowTest {
         assertNull("nothing was signed", flow.signedTxHex)
     }
 
+    // --- the device prompt ---------------------------------------------------
+
+    /**
+     * A cancelled device prompt is a decision, not a failure: the flow lands back
+     * on the review with nothing signed, nothing broadcast, and no error — the
+     * prepared transaction is exactly as it was, so the button can be pressed
+     * again.
+     */
+    @Test
+    fun `a cancelled authentication goes back to the review with the plan intact`() = runBlocking {
+        val flow = HotSendFlowState(
+            sign = { SignedSend.AuthenticationCancelled },
+            broadcast = { error("nothing may be broadcast after a refusal") },
+        )
+
+        flow.signAndBroadcast()
+
+        assertEquals("the review is where a refusal lands", HotSendStep.REVIEW, flow.step)
+        assertNull("the user made a choice, not an error", flow.error)
+        assertNull("nothing was signed", flow.signedTxHex)
+        assertNull(flow.txid)
+        assertFalse(flow.busy)
+    }
+
+    /** A refusal on the passphrase prompt's attempt also returns to the review. */
+    @Test
+    fun `a cancelled authentication on the prompt attempt returns to the review`() = runBlocking {
+        val flow = HotSendFlowState(
+            sign = { passphrase ->
+                if (passphrase.isEmpty()) SignedSend.WrongPassphrase else SignedSend.AuthenticationCancelled
+            },
+            broadcast = { error("nothing may be broadcast after a refusal") },
+        )
+
+        flow.signAndBroadcast()
+        assertEquals(HotSendStep.PASSPHRASE, flow.step)
+
+        flow.submitPassphrase("correct horse")
+
+        assertEquals(HotSendStep.REVIEW, flow.step)
+        assertNull(flow.passphraseError)
+        assertNull(flow.signedTxHex)
+    }
+
     // --- a refused broadcast -------------------------------------------------
 
     @Test

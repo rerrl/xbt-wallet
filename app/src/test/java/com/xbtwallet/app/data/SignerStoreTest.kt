@@ -921,7 +921,7 @@ class SignerStoreTest {
         // delete, and the confirmation copy for a hot wallet says so.
         assertEquals(listOf(hot.id), vault.deleted)
         assertFalse(vault.has(hot.id))
-        assertNull(vault.load(hot.id))
+        assertNull(vault.load(hot.id).entropyOrNull())
         assertTrue(store.list().isEmpty())
     }
 

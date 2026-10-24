@@ -42,6 +42,18 @@ sealed interface SignedSend {
      * it, or the keystore key that decrypts it is gone.
      */
     data object VaultUnavailable : SignedSend
+
+    /**
+     * The vault key is bound to device authentication and the user did not
+     * authenticate — they cancelled the prompt, or the authentication did not
+     * satisfy the key.
+     *
+     * **Nothing was signed and nothing was broadcast.** This is a decision, not
+     * a failure: the send flow puts the user back on the review with the
+     * prepared transaction exactly as it was, so `Sign & broadcast` can be
+     * pressed again.
+     */
+    data object AuthenticationCancelled : SignedSend
 }
 
 /**
@@ -74,23 +86,55 @@ sealed interface SignedSend {
  * immutable. Nothing here writes a secret anywhere, and no secret appears in a log
  * or an exception message.
  *
+ * **The vault read may need the user.** Since the app-lock phase a hot wallet's
+ * key is bound to device authentication, so [vault]'s read can come back as
+ * [SeedLoad.AuthenticationRequired] — the signer has not authenticated recently
+ * enough for the key. That challenge is handed to [authenticate], which shows
+ * the system prompt and, on success, completes the read. The key's 30-second
+ * validity window then covers the rest of this function — the passphrase
+ * re-derivation and the signature — so **one prompt covers the whole send**. A
+ * refused prompt is [SignedSend.AuthenticationCancelled] and nothing is signed.
+ *
  * @param hotSigner the hot wallet to sign for. Must be a [SignerType.HotSeed];
  *   any other kind is a programming error and throws.
+ * @param authenticate shows the system authentication prompt for a vault read
+ *   that needs one, and reports whether the user authenticated. Defaults to
+ *   "assume yes", which is correct for an in-memory vault that never challenges
+ *   (the JVM tests) and never correct for the device — the send screen supplies
+ *   the real prompt.
  * @throws IllegalArgumentException when [hotSigner] is not a hot wallet.
  * @throws com.xbtwallet.app.crypto.PsbtException when the PSBT itself cannot be
  *   signed (a defect in the PSBT, not in the seed or the passphrase).
  */
-fun signHotSend(
+suspend fun signHotSend(
     vault: SeedVault,
     hotSigner: Signer,
     psbt: Psbt,
     passphrase: String,
+    authenticate: suspend (AuthenticatedRead) -> Boolean = { true },
 ): SignedSend {
     val hot = hotSigner.type as? SignerType.HotSeed
         ?: throw IllegalArgumentException("signHotSend needs a hot wallet to sign for")
 
-    val entropy = runCatching { vault.load(hotSigner.id) }.getOrNull()
-        ?: return SignedSend.VaultUnavailable
+    val entropy = when (val loaded = runCatching { vault.load(hotSigner.id) }.getOrNull()) {
+        // Nothing stored, or a vault whose keystore key is gone (the real vault
+        // reports that by throwing, which lands here as null).
+        null, SeedLoad.Absent -> return SignedSend.VaultUnavailable
+
+        is SeedLoad.Loaded -> loaded.entropy
+
+        // The key wants the user. Prompt, and only sign if they authenticate.
+        is SeedLoad.AuthenticationRequired -> {
+            if (!authenticate(loaded.operation)) return SignedSend.AuthenticationCancelled
+            try {
+                loaded.operation.read()
+            } catch (refused: VaultAuthenticationRequiredException) {
+                return SignedSend.AuthenticationCancelled
+            } catch (unreadable: Exception) {
+                return SignedSend.VaultUnavailable
+            }
+        }
+    }
 
     val mnemonic = try {
         Bip39.entropyToMnemonic(entropy)

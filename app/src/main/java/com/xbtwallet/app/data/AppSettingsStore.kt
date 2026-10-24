@@ -43,7 +43,38 @@ class AppSettingsStore(private val storage: KeyValueStore) {
             storage.putString(KEY_KEEP_SCREEN_ON, value.toString())
         }
 
+    /**
+     * Whether the user has already dismissed the app lock's no-device-lock
+     * warning.
+     *
+     * The warning exists because a device with no lock screen cannot have an app
+     * lock, which the user should be told once. It is dismissible and the
+     * dismissal is remembered, so it is a one-time notice rather than a dialog on
+     * every launch; a device that *does* have a lock screen never shows it and
+     * never reads this flag.
+     *
+     * Reads back `false` when the key is absent (the default) or holds anything
+     * that is not a boolean, so a first launch and a corrupt value agree.
+     */
+    var lockWarningDismissed: Boolean
+        get() = storage.getString(KEY_LOCK_WARNING_DISMISSED)?.toBooleanStrictOrNull()
+            ?: DEFAULT_LOCK_WARNING_DISMISSED
+        set(value) {
+            storage.putString(KEY_LOCK_WARNING_DISMISSED, value.toString())
+        }
+
     companion object {
+        /**
+         * SharedPreferences key for [lockWarningDismissed].
+         *
+         * Its own key, and a name that says what it records — nothing depends on
+         * a legacy value here, so it is free to be legible.
+         */
+        const val KEY_LOCK_WARNING_DISMISSED = "appLockWarningDismissed"
+
+        /** Shown until the user has dismissed it: the warning is on by default. */
+        const val DEFAULT_LOCK_WARNING_DISMISSED = false
+
         /**
          * SharedPreferences key for [keepScreenOnWhileOpen].
          *

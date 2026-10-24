@@ -58,6 +58,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
 import com.google.zxing.common.BitMatrix
 import com.xbtwallet.app.chain.AddressChain
 import com.xbtwallet.app.chain.P2WPKH_SCRIPT_SIZE
@@ -80,6 +81,8 @@ import com.xbtwallet.app.crypto.transactionId
 import com.xbtwallet.app.data.SeedVault
 import com.xbtwallet.app.data.SignerType
 import com.xbtwallet.app.data.signHotSend
+import com.xbtwallet.app.ui.lock.BiometricLockAuthenticator
+import com.xbtwallet.app.ui.lock.authenticateAndWait
 import com.xbtwallet.app.ui.receive.renderQr
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -344,6 +347,23 @@ private fun SendFlow(
     // walk plus the ECDSA signature is real work, and the frame must not stall
     // on it. `prepared` is read through its delegate, so the remembered state
     // always signs the transaction the FORM actually built.
+    //
+    // The device prompt a hot send needs when the wallet's vault key is bound to
+    // device authentication and its 30-second window has lapsed. Built from the
+    // host activity; a composition with no activity (a preview, a JVM test) gets
+    // none, and the sign then reports the user did not authenticate rather than
+    // signing anything.
+    val activity = LocalActivity.current as? FragmentActivity
+    val lockAuthenticator = remember(activity) {
+        activity?.let {
+            BiometricLockAuthenticator(
+                activity = it,
+                title = HOT_SIGN_PROMPT_TITLE,
+                subtitle = HOT_SIGN_PROMPT_SUBTITLE,
+            )
+        }
+    }
+
     val hotFlow: HotSendFlowState? = remember(signerKey) {
         val vault = seedVault
         if (!hot || vault == null) {
@@ -354,7 +374,20 @@ private fun SendFlow(
                     val current = prepared
                         ?: throw IllegalStateException("nothing has been prepared to sign")
                     withContext(Dispatchers.Default) {
-                        signHotSend(vault, state.signer, parsePsbt(current.psbtBytes), passphrase)
+                        val prompt = lockAuthenticator
+                        // The vault read may come back as an authentication
+                        // challenge; the prompt answers it on the main thread
+                        // (a prompt is a fragment transaction) and the key's
+                        // 30-second window then covers the rest of the sign.
+                        signHotSend(vault, state.signer, parsePsbt(current.psbtBytes), passphrase) { operation ->
+                            if (prompt == null) {
+                                false
+                            } else {
+                                withContext(Dispatchers.Main) {
+                                    prompt.authenticateAndWait(operation.cryptoObject)
+                                }
+                            }
+                        }
                     }
                 },
                 broadcast = { txHex -> state.broadcastTransaction(txHex) },

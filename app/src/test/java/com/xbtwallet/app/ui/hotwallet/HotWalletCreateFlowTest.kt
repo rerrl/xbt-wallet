@@ -8,6 +8,7 @@ import com.xbtwallet.app.data.ProvisionResult
 import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerStore
 import com.xbtwallet.app.data.SignerType
+import com.xbtwallet.app.data.entropyOrNull
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -207,7 +208,7 @@ class HotWalletCreateFlowTest {
 
         // The entropy is in the vault, and only there: the record carries the
         // passphrased account, the vault carries the 16 bytes of mnemonic entropy.
-        val vaulted = vault.load(created.id)
+        val vaulted = vault.load(created.id).entropyOrNull()
         assertNotNull("the seed went to the vault", vaulted)
         assertArrayEquals(DiceEntropy.rollsToEntropy(rolls), vaulted)
 

@@ -9,6 +9,7 @@ import com.xbtwallet.app.crypto.PsbtInput
 import com.xbtwallet.app.crypto.buildUnsignedPsbt
 import com.xbtwallet.app.crypto.parsePsbt
 import java.io.ByteArrayOutputStream
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -53,7 +54,7 @@ class HotSignerTest {
         val vault = vaultFor(signer, passphrase = "")
         val psbt = psbtFor(passphrase = "")
 
-        val outcome = signHotSend(vault, signer, psbt, passphrase = "")
+        val outcome = runBlocking { signHotSend(vault, signer, psbt, passphrase = "") }
 
         val signed = outcome as SignedSend.Signed
 
@@ -73,7 +74,7 @@ class HotSignerTest {
         val signer = hotSigner(passphrase = "")
         val vault = vaultFor(signer, passphrase = "")
 
-        val outcome = signHotSend(vault, signer, psbtFor(passphrase = ""), passphrase = "")
+        val outcome = runBlocking { signHotSend(vault, signer, psbtFor(passphrase = ""), passphrase = "") }
 
         assertTrue("an empty passphrase is the ordinary case", outcome is SignedSend.Signed)
     }
@@ -83,7 +84,7 @@ class HotSignerTest {
         val signer = hotSigner(passphrase = "correct horse")
         val vault = vaultFor(signer, passphrase = "correct horse")
 
-        val outcome = signHotSend(vault, signer, psbtFor(passphrase = "correct horse"), passphrase = "correct horse")
+        val outcome = runBlocking { signHotSend(vault, signer, psbtFor(passphrase = "correct horse"), passphrase = "correct horse") }
 
         assertTrue("the right passphrase must sign", outcome is SignedSend.Signed)
     }
@@ -99,7 +100,7 @@ class HotSignerTest {
         val psbt = psbtFor(passphrase = "correct horse")
         val before = psbt.toBytes().copyOf()
 
-        val outcome = signHotSend(vault, signer, psbt, passphrase = "wrong horse")
+        val outcome = runBlocking { signHotSend(vault, signer, psbt, passphrase = "wrong horse") }
 
         assertEquals(SignedSend.WrongPassphrase, outcome)
         // Nothing was signed: no partial signatures, and the bytes are identical.
@@ -112,7 +113,7 @@ class HotSignerTest {
         val signer = hotSigner(passphrase = "correct horse")
         val vault = vaultFor(signer, passphrase = "correct horse")
 
-        val outcome = signHotSend(vault, signer, psbtFor(passphrase = "correct horse"), passphrase = "")
+        val outcome = runBlocking { signHotSend(vault, signer, psbtFor(passphrase = "correct horse"), passphrase = "") }
 
         assertEquals(SignedSend.WrongPassphrase, outcome)
     }
@@ -121,7 +122,7 @@ class HotSignerTest {
     fun `a vault with no entry for the wallet is VaultUnavailable`() {
         val signer = hotSigner(passphrase = "")
 
-        val outcome = signHotSend(FakeSeedVault(), signer, psbtFor(passphrase = ""), passphrase = "")
+        val outcome = runBlocking { signHotSend(FakeSeedVault(), signer, psbtFor(passphrase = ""), passphrase = "") }
 
         assertEquals(SignedSend.VaultUnavailable, outcome)
     }
@@ -132,9 +133,78 @@ class HotSignerTest {
         val vault = vaultFor(signer, passphrase = "")
         vault.delete(signer.id)
 
-        val outcome = signHotSend(vault, signer, psbtFor(passphrase = ""), passphrase = "")
+        val outcome = runBlocking { signHotSend(vault, signer, psbtFor(passphrase = ""), passphrase = "") }
 
         assertEquals(SignedSend.VaultUnavailable, outcome)
+    }
+
+    // ---------------------------------------------------------------------
+    // The app lock's authentication challenge
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun `a vault read that needs the user authenticates once and then signs`() {
+        val signer = hotSigner(passphrase = "")
+        var prompts = 0
+
+        val outcome = runBlocking {
+            signHotSend(challengingVault(), signer, psbtFor(passphrase = ""), passphrase = "") { operation ->
+                prompts++
+                operation.read()
+                true
+            }
+        }
+
+        assertEquals("one prompt covers the whole send", 1, prompts)
+        assertTrue("and the send goes through", outcome is SignedSend.Signed)
+    }
+
+    @Test
+    fun `a refused prompt signs nothing and reports the decision`() {
+        val signer = hotSigner(passphrase = "")
+        val psbt = psbtFor(passphrase = "")
+
+        val outcome = runBlocking {
+            signHotSend(challengingVault(), signer, psbt, passphrase = "") { false }
+        }
+
+        assertEquals(SignedSend.AuthenticationCancelled, outcome)
+        assertTrue("no input may be signed", psbt.inputs.all { it.partialSigs.isEmpty() })
+    }
+
+    @Test
+    fun `an ordinary vault never asks for the user`() {
+        val signer = hotSigner(passphrase = "")
+        var prompts = 0
+
+        val outcome = runBlocking {
+            signHotSend(vaultFor(signer, passphrase = ""), signer, psbtFor(passphrase = ""), passphrase = "") {
+                prompts++
+                true
+            }
+        }
+
+        assertEquals("a vault that never challenges shows no prompt", 0, prompts)
+        assertTrue(outcome is SignedSend.Signed)
+    }
+
+    /** A vault that always asks for the user before handing the entropy over. */
+    private fun challengingVault(): SeedVault {
+        val stored = Bip39.mnemonicToEntropy(words)
+        return object : SeedVault {
+            override fun store(signerId: String, entropy: ByteArray) = Unit
+
+            override fun load(signerId: String): SeedLoad =
+                SeedLoad.AuthenticationRequired(
+                    object : AuthenticatedRead {
+                        override val cryptoObject: Any? = null
+                        override fun read(): ByteArray = stored.copyOf()
+                    },
+                )
+
+            override fun delete(signerId: String) = Unit
+            override fun has(signerId: String): Boolean = true
+        }
     }
 
     // ---------------------------------------------------------------------

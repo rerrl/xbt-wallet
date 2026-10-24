@@ -501,9 +501,17 @@ class SignerStore(
      * exception in the middle of composition would take the whole app down.
      */
     private fun read(): List<Signer> {
-        storage.getString(STORAGE_KEY)?.let { raw -> return parseSigners(raw) }
+        // Both blobs are read, in both shapes, before either decides anything.
+        // The legacy read is not wasted work even when the current key is
+        // present: the sealed store migrates a plaintext value **in place** the
+        // first time it is read (see [EncryptedKeyValueStore]), so reading the
+        // pre-rename blob here is what keeps an old plaintext xpub list from
+        // outliving the app-lock upgrade. The current key still wins.
+        val current = storage.getString(STORAGE_KEY)
+        val legacy = storage.getString(LEGACY_STORAGE_KEY)
+        current?.let { raw -> return parseSigners(raw) }
 
-        val legacy = storage.getString(LEGACY_STORAGE_KEY) ?: return emptyList()
+        legacy ?: return emptyList()
         val migrated = parseLegacyWallets(legacy)
         // Only write when there was something to migrate — a corrupt or empty
         // legacy blob should not create a new key that then blocks a later,

@@ -17,11 +17,14 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.xbtwallet.app.data.AppSettingsStore
+import com.xbtwallet.app.data.EncryptedKeyValueStore
 import com.xbtwallet.app.data.HotWalletProvisioner
 import com.xbtwallet.app.data.KeystoreSeedVault
+import com.xbtwallet.app.data.KeystoreStoreCipher
 import com.xbtwallet.app.data.SavedServersStore
 import com.xbtwallet.app.data.ServerSettingsStore
 import com.xbtwallet.app.data.SharedPreferencesKeyValueStore
+import com.xbtwallet.app.data.isDeviceSecure
 import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerOrigin
 import com.xbtwallet.app.data.SignerStore
@@ -37,6 +40,8 @@ import com.xbtwallet.app.ui.hotwallet.HotWalletFinishScreen
 import com.xbtwallet.app.ui.hotwallet.HotWalletImportScreen
 import com.xbtwallet.app.ui.hotwallet.HotWalletImportWordsScreen
 import com.xbtwallet.app.ui.hotwallet.hotWalletWordCount
+import com.xbtwallet.app.ui.lock.AppLockGate
+import com.xbtwallet.app.ui.lock.rememberAppLockState
 import com.xbtwallet.app.ui.server.ServerScreen
 import com.xbtwallet.app.ui.server.rememberServerScreenState
 import com.xbtwallet.app.ui.settings.SettingsScreen
@@ -187,30 +192,63 @@ internal val HOT_WALLET_CREATE_FLOW_SCREENS = setOf(
 fun XbtWalletApp() {
     val context = LocalContext.current
     val serverStore = remember(context) { ServerSettingsStore(context) }
-    // The hot-wallet seed vault: an Android-keystore key per hot signer, and the
-    // encrypted blobs in the same prefs file as everything else (under their own
-    // `hotseed.*` keys). Built here so the one store that can delete a signer
-    // record also has the vault that holds its seed; nothing else needs it yet —
-    // the create/import screens of the next phase will.
+
+    // --- The storage, in two layers -----------------------------------------
+    //
+    // One raw prefs file, and one *sealed* view of it. The signer list and the
+    // cached account snapshots describe an account — its xpubs, the addresses
+    // derived from them and every transaction it has seen — so they go through
+    // [EncryptedKeyValueStore] and are ciphertext at rest (see that class; a
+    // pre-existing plaintext blob is migrated in place on its first read).
+    //
+    // The vault writes to the raw store on purpose: its own blobs are already
+    // ciphertext under a keystore key, and double-sealing them would only add a
+    // second key to lose. The app's preference flags and the named server
+    // presets stay plaintext too — they are not account data, and they must be
+    // readable before any key exists.
+    val rawStore = remember(context) { SharedPreferencesKeyValueStore(context) }
+    val sealedStore = remember { EncryptedKeyValueStore(rawStore, KeystoreStoreCipher()) }
+
+    // The hot-wallet seed vault: an Android-keystore key per hot signer, bound
+    // to device authentication, and the encrypted blobs in the same prefs file
+    // as everything else (under their own `hotseed.*` keys). Built here so the
+    // one store that can delete a signer record also has the vault that holds
+    // its seed.
     val seedVault = remember(context) {
-        KeystoreSeedVault(context, SharedPreferencesKeyValueStore(context))
+        KeystoreSeedVault(context, rawStore)
     }
     val signerStore = remember(context) {
-        SignerStore(SharedPreferencesKeyValueStore(context), seedVault = seedVault)
+        SignerStore(sealedStore, seedVault = seedVault)
     }
-    // One snapshot store for the app: same prefs file as the signer list, its own
-    // `snapshot_<id>` keys. Held here so the chain state below can both seed from
-    // it and save back to it, and so the delete path can clear a signer's cache.
-    val snapshotStore = remember(context) { SnapshotStore(SharedPreferencesKeyValueStore(context)) }
-    // The app's own preferences (one flag today). Same prefs file and the same
-    // KeyValueStore shell as the signer list, under its own key.
-    val appSettings = remember(context) { AppSettingsStore(SharedPreferencesKeyValueStore(context)) }
+    // One snapshot store for the app: same sealed store as the signer list, its
+    // own `snapshot_<id>` keys. Held here so the chain state below can both seed
+    // from it and save back to it, and so the delete path can clear a signer's
+    // cache.
+    val snapshotStore = remember(context) { SnapshotStore(sealedStore) }
+    // The app's own preferences (two flags today). Same prefs file and the same
+    // KeyValueStore shell as the signer list, under its own keys — plaintext,
+    // because the app lock has to be able to read them before any key exists.
+    val appSettings = remember(context) { AppSettingsStore(rawStore) }
     // Named server presets — the Server screen's picker. Same prefs file and the
     // same KeyValueStore shell as the stores above, under its own key; a preset
     // only refills the server form, it never dials.
     val savedServersStore = remember(context) {
-        SavedServersStore(SharedPreferencesKeyValueStore(context))
+        SavedServersStore(rawStore)
     }
+
+    // --- The app lock -------------------------------------------------------
+    //
+    // Cold start is locked, and every backgrounding re-locks — see
+    // [AppLockState]. The device's own lock screen is the only credential
+    // involved (there is no in-app PIN), and a device with no lock screen opens
+    // straight up with a one-time warning, because there is nothing to
+    // authenticate against.
+    val deviceSecure = remember(context) { context.isDeviceSecure() }
+    val appLock = rememberAppLockState(
+        deviceSecure = deviceSecure,
+        warningDismissed = remember { appSettings.lockWarningDismissed },
+        onWarningDismissed = { appSettings.lockWarningDismissed = true },
+    )
     // The one thing that turns recovery words into a stored wallet: derived
     // account, entropy into the vault, signer record. Built once here, beside
     // the stores it writes through, and handed to the finish screen — it holds
@@ -328,6 +366,26 @@ fun XbtWalletApp() {
         }
     }
 
+    // --- Lock again on the way out -------------------------------------------
+    //
+    // Every stop locks, with no grace period: a glance at a notification and a
+    // return is a return to the gate. ON_STOP rather than ON_PAUSE, so a dialog
+    // of the system's own (a permission prompt, the share sheet) does not lock
+    // the app out from under the user — only actually leaving the foreground
+    // does. A no-op on a device with no lock screen, which is never locked.
+    DisposableEffect(appLifecycleOwner) {
+        val owner = appLifecycleOwner
+        if (owner == null) {
+            onDispose { }
+        } else {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_STOP) appLock.onLeftForeground()
+            }
+            owner.lifecycle.addObserver(observer)
+            onDispose { owner.lifecycle.removeObserver(observer) }
+        }
+    }
+
     // Ask for a sync whenever a signer's screen opens. `sync()` starts a scan only
     // if none is in flight for that signer, and `load()` inside it skips the
     // rescan while the last completed sync is fresh — so recomposition and screen
@@ -338,398 +396,404 @@ fun XbtWalletApp() {
     // the activity instead, which is the app-default we want there.
     BackHandler(enabled = nav.canGoBack) { nav.pop() }
 
-    when (route.screen) {
-        Screen.HOME -> {
-            // The heartbeat is owned here, not inside HomeScreen: it has to run
-            // only while the home screen is on display. Leaving HOME drops this
-            // branch from composition and cancels the LaunchedEffect; going to
-            // the background cancels it via repeatOnLifecycle. Re-keying on the
-            // saved endpoint means editing the server and coming back re-checks
-            // with the new settings straight away. No service, no wake lock and
-            // no new permission is involved.
-            val lifecycleOwner = appLifecycleOwner
-            val serverKey = homeState.serverKey
-            LaunchedEffect(lifecycleOwner, serverKey) {
-                if (lifecycleOwner == null) {
-                    // No activity (e.g. a preview): one check, no loop.
-                    homeState.checkServerStatus()
-                } else {
-                    lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-                        homeState.runHeartbeat()
+    AppLockGate(appLock) {
+        when (route.screen) {
+            Screen.HOME -> {
+                // The heartbeat is owned here, not inside HomeScreen: it has to run
+                // only while the home screen is on display. Leaving HOME drops this
+                // branch from composition and cancels the LaunchedEffect; going to
+                // the background cancels it via repeatOnLifecycle. Re-keying on the
+                // saved endpoint means editing the server and coming back re-checks
+                // with the new settings straight away. No service, no wake lock and
+                // no new permission is involved.
+                val lifecycleOwner = appLifecycleOwner
+                val serverKey = homeState.serverKey
+                LaunchedEffect(lifecycleOwner, serverKey) {
+                    if (lifecycleOwner == null) {
+                        // No activity (e.g. a preview): one check, no loop.
+                        homeState.checkServerStatus()
+                    } else {
+                        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                            homeState.runHeartbeat()
+                        }
                     }
+                }
+
+                // The landing page, and the wallet list itself: a row opens that
+                // wallet's own screen, and removing one is the row's ⋮ overflow menu
+                // (the store write lives in [onDeleteSigner] below).
+                HomeScreen(
+                    state = homeState,
+                    onOpenAbout = { nav.push(Route(Screen.ABOUT)) },
+                    onOpenSettings = { nav.push(Route(Screen.SETTINGS)) },
+                    onOpenSigner = { signer: Signer ->
+                        nav.push(Route(Screen.SIGNER_DETAIL, signerId = signer.id))
+                    },
+                    onAddSigner = { nav.push(Route(Screen.ADD_SIGNER)) },
+                    onDeleteSigner = { signer: Signer ->
+                        // The one place a signer is removed: the screen that owns the
+                        // store. Re-read through Home so the list (which renders
+                        // Home's snapshot) drops the row immediately, and any detail
+                        // entry still on the stack — should there be one — stops
+                        // resolving (that branch restarts at Home).
+                        signerStore.delete(signer.id)
+                        // Drop this signer's cached scan too, so a later signer that
+                        // happens to reuse the id can never open on another account's
+                        // addresses, UTXOs or balance.
+                        snapshotStore.clear(signer.id)
+                        // And forget its in-memory chain state: this cancels any scan
+                        // still in flight for it and drops the state, so a reused id
+                        // starts from scratch rather than inheriting the old scan.
+                        chainStateStore.remove(signer.id)
+                        homeState.refresh()
+                    },
+                )
+            }
+
+            Screen.SERVER -> {
+                val state = rememberServerScreenState(serverStore, savedServersStore)
+                ServerScreen(state = state, onBack = { nav.pop() })
+            }
+
+            // Settings: the app-level preferences (moved off Home) and the way into
+            // the Server screen, which is unchanged behind the button. The
+            // keep-screen-on value is owned here and persisted the moment the switch
+            // is flipped.
+            Screen.SETTINGS -> SettingsScreen(
+                keepScreenOn = keepScreenOn,
+                onKeepScreenOnChange = { checked ->
+                    keepScreenOn = checked
+                    appSettings.keepScreenOnWhileOpen = checked
+                },
+                onOpenServer = { nav.push(Route(Screen.SERVER)) },
+                onBack = { nav.pop() },
+            )
+
+            // About: the app's own explanation, one level off the landing page.
+            Screen.ABOUT -> AboutScreen(onBack = { nav.pop() })
+
+            Screen.ADD_SIGNER -> AddSignerScreen(
+                // The three cards, each with its own way out. Card 1 asks its
+                // follow-up question on a screen of its own, so the two animated
+                // origins stay distinguishable; its answers are mapped by
+                // [routeFor], pinned by a JVM test.
+                onOpenSigningDeviceChoice = { nav.push(Route(Screen.SIGNING_DEVICE_CHOICE)) },
+                onOpenHotWalletCreate = { nav.push(Route(Screen.HOT_WALLET_CREATE)) },
+                onOpenHotWalletImport = { nav.push(Route(Screen.HOT_WALLET_IMPORT)) },
+                // Watch only is the unchanged text path: no chooser, because there
+                // is one watch-only import form.
+                onOpenWatchOnly = { nav.push(Route(Screen.IMPORT_XPUB, origin = SignerOrigin.TEXT_QR)) },
+                // A hot wallet's seed is bound to device authentication, so
+                // with no lock screen the card refuses rather than letting a
+                // wallet be created that could never be opened.
+                hotWalletCreationBlocked = appLock.hotWalletCreationBlocked,
+                onBack = { nav.pop() },
+                )
+
+            // The follow-up question behind the first card: which external signer.
+            // Both answers push the *same* destination with different origins — the
+            // downstream flow is untouched, so what the user tapped still decides the
+            // tag on the saved wallet.
+            Screen.SIGNING_DEVICE_CHOICE -> SigningDeviceChoiceScreen(
+                onChoose = { row -> nav.push(routeFor(row)) },
+                onBack = { nav.pop() },
+            )
+
+            // --- The hot-wallet walk --------------------------------------------
+            //
+            // The dice path carries no argument at all: the dice screen owns the
+            // 12/24 word-count choice, so the create screen's one button pushes a
+            // bare route. Neither do the two screens after it — the walk's secrets
+            // ride the shared `hotWalletFlow`, never the route (see that class). The
+            // import path still asks for the word count first, and it rides the
+            // route's free-form `address` slot as "12" or "24" — the same segment
+            // Send uses for its selected outpoints — so no codec change was needed.
+            // A route that arrives without one of those two values (a saved stack
+            // from a build that had no such screen, say) restarts at Home rather
+            // than rendering a word-entry screen with no idea how many words to
+            // expect; the two create-path screens after the dice guard the same way
+            // on a missing mnemonic (a stack restored after process death mid-walk,
+            // which is exactly when the flow is empty).
+
+            Screen.HOT_WALLET_CREATE -> HotWalletCreateScreen(
+                onDiceRoll = { nav.push(Route(Screen.HOT_WALLET_DICE)) },
+                onBack = { nav.pop() },
+            )
+
+            Screen.HOT_WALLET_DICE -> HotWalletDiceScreen(
+                flow = hotWalletFlow,
+                // The words are in the flow by the time this runs (the screen sets
+                // them first). Which screen comes next is the caller's business —
+                // that is what keeps the secrets off the route.
+                onCreateWallet = { nav.push(Route(Screen.HOT_WALLET_BACKUP)) },
+                onBack = { nav.pop() },
+            )
+
+            Screen.HOT_WALLET_BACKUP -> {
+                val words = hotWalletFlow.mnemonic
+                if (words == null) {
+                    // No words to show: the walk was never started, or the process
+                    // died mid-walk and the flow died with it. Restart at Home
+                    // rather than show an empty backup screen. Keyed on the route so
+                    // this fires once per bad entry.
+                    LaunchedEffect(route) { nav.reset() }
+                } else {
+                    HotWalletBackupScreen(
+                        words = words,
+                        onConfirm = { nav.push(Route(Screen.HOT_WALLET_FINISH)) },
+                        onBack = { nav.pop() },
+                    )
                 }
             }
 
-            // The landing page, and the wallet list itself: a row opens that
-            // wallet's own screen, and removing one is the row's ⋮ overflow menu
-            // (the store write lives in [onDeleteSigner] below).
-            HomeScreen(
-                state = homeState,
-                onOpenAbout = { nav.push(Route(Screen.ABOUT)) },
-                onOpenSettings = { nav.push(Route(Screen.SETTINGS)) },
-                onOpenSigner = { signer: Signer ->
-                    nav.push(Route(Screen.SIGNER_DETAIL, signerId = signer.id))
+            // The finish screen, reached by either walk — the create walk from the
+            // recovery words, the import walk from the word field. It is one screen
+            // and one provisioning call; only its title and its terminal button say
+            // which walk got here, and the destination is what carries that.
+            Screen.HOT_WALLET_FINISH, Screen.HOT_WALLET_IMPORT_FINISH -> {
+                val words = hotWalletFlow.mnemonic
+                if (words == null) {
+                    LaunchedEffect(route) { nav.reset() }
+                } else {
+                    HotWalletFinishScreen(
+                        mnemonic = words,
+                        flow = hotWalletFlow,
+                        provisioner = hotWalletProvisioner,
+                        isImport = route.screen == Screen.HOT_WALLET_IMPORT_FINISH,
+                        // The wallet exists by now (or was already here: a duplicate
+                        // ends the same way, on the list). Re-read through the store
+                        // so Home shows it — amber "hot" tag and all — and reset the
+                        // stack, exactly as every other add path lands.
+                        onCreated = {
+                            homeState.refresh()
+                            nav.reset()
+                        },
+                        onBack = { nav.pop() },
+                    )
+                }
+            }
+
+            Screen.HOT_WALLET_IMPORT -> HotWalletImportScreen(
+                onChooseWords = { words ->
+                    nav.push(Route(Screen.HOT_WALLET_IMPORT_WORDS, address = words.toString()))
                 },
-                onAddSigner = { nav.push(Route(Screen.ADD_SIGNER)) },
-                onDeleteSigner = { signer: Signer ->
-                    // The one place a signer is removed: the screen that owns the
-                    // store. Re-read through Home so the list (which renders
-                    // Home's snapshot) drops the row immediately, and any detail
-                    // entry still on the stack — should there be one — stops
-                    // resolving (that branch restarts at Home).
-                    signerStore.delete(signer.id)
-                    // Drop this signer's cached scan too, so a later signer that
-                    // happens to reuse the id can never open on another account's
-                    // addresses, UTXOs or balance.
-                    snapshotStore.clear(signer.id)
-                    // And forget its in-memory chain state: this cancels any scan
-                    // still in flight for it and drops the state, so a reused id
-                    // starts from scratch rather than inheriting the old scan.
-                    chainStateStore.remove(signer.id)
-                    homeState.refresh()
-                },
+                onBack = { nav.pop() },
             )
-        }
 
-        Screen.SERVER -> {
-            val state = rememberServerScreenState(serverStore, savedServersStore)
-            ServerScreen(state = state, onBack = { nav.pop() })
-        }
-
-        // Settings: the app-level preferences (moved off Home) and the way into
-        // the Server screen, which is unchanged behind the button. The
-        // keep-screen-on value is owned here and persisted the moment the switch
-        // is flipped.
-        Screen.SETTINGS -> SettingsScreen(
-            keepScreenOn = keepScreenOn,
-            onKeepScreenOnChange = { checked ->
-                keepScreenOn = checked
-                appSettings.keepScreenOnWhileOpen = checked
-            },
-            onOpenServer = { nav.push(Route(Screen.SERVER)) },
-            onBack = { nav.pop() },
-        )
-
-        // About: the app's own explanation, one level off the landing page.
-        Screen.ABOUT -> AboutScreen(onBack = { nav.pop() })
-
-        Screen.ADD_SIGNER -> AddSignerScreen(
-            // The three cards, each with its own way out. Card 1 asks its
-            // follow-up question on a screen of its own, so the two animated
-            // origins stay distinguishable; its answers are mapped by
-            // [routeFor], pinned by a JVM test.
-            onOpenSigningDeviceChoice = { nav.push(Route(Screen.SIGNING_DEVICE_CHOICE)) },
-            onOpenHotWalletCreate = { nav.push(Route(Screen.HOT_WALLET_CREATE)) },
-            onOpenHotWalletImport = { nav.push(Route(Screen.HOT_WALLET_IMPORT)) },
-            // Watch only is the unchanged text path: no chooser, because there
-            // is one watch-only import form.
-            onOpenWatchOnly = { nav.push(Route(Screen.IMPORT_XPUB, origin = SignerOrigin.TEXT_QR)) },
-            onBack = { nav.pop() },
-        )
-
-        // The follow-up question behind the first card: which external signer.
-        // Both answers push the *same* destination with different origins — the
-        // downstream flow is untouched, so what the user tapped still decides the
-        // tag on the saved wallet.
-        Screen.SIGNING_DEVICE_CHOICE -> SigningDeviceChoiceScreen(
-            onChoose = { row -> nav.push(routeFor(row)) },
-            onBack = { nav.pop() },
-        )
-
-        // --- The hot-wallet walk --------------------------------------------
-        //
-        // The dice path carries no argument at all: the dice screen owns the
-        // 12/24 word-count choice, so the create screen's one button pushes a
-        // bare route. Neither do the two screens after it — the walk's secrets
-        // ride the shared `hotWalletFlow`, never the route (see that class). The
-        // import path still asks for the word count first, and it rides the
-        // route's free-form `address` slot as "12" or "24" — the same segment
-        // Send uses for its selected outpoints — so no codec change was needed.
-        // A route that arrives without one of those two values (a saved stack
-        // from a build that had no such screen, say) restarts at Home rather
-        // than rendering a word-entry screen with no idea how many words to
-        // expect; the two create-path screens after the dice guard the same way
-        // on a missing mnemonic (a stack restored after process death mid-walk,
-        // which is exactly when the flow is empty).
-
-        Screen.HOT_WALLET_CREATE -> HotWalletCreateScreen(
-            onDiceRoll = { nav.push(Route(Screen.HOT_WALLET_DICE)) },
-            onBack = { nav.pop() },
-        )
-
-        Screen.HOT_WALLET_DICE -> HotWalletDiceScreen(
-            flow = hotWalletFlow,
-            // The words are in the flow by the time this runs (the screen sets
-            // them first). Which screen comes next is the caller's business —
-            // that is what keeps the secrets off the route.
-            onCreateWallet = { nav.push(Route(Screen.HOT_WALLET_BACKUP)) },
-            onBack = { nav.pop() },
-        )
-
-        Screen.HOT_WALLET_BACKUP -> {
-            val words = hotWalletFlow.mnemonic
-            if (words == null) {
-                // No words to show: the walk was never started, or the process
-                // died mid-walk and the flow died with it. Restart at Home
-                // rather than show an empty backup screen. Keyed on the route so
-                // this fires once per bad entry.
-                LaunchedEffect(route) { nav.reset() }
-            } else {
-                HotWalletBackupScreen(
-                    words = words,
-                    onConfirm = { nav.push(Route(Screen.HOT_WALLET_FINISH)) },
-                    onBack = { nav.pop() },
-                )
+            Screen.HOT_WALLET_IMPORT_WORDS -> {
+                val wordCount = hotWalletWordCount(route.address)
+                if (wordCount == null) {
+                    LaunchedEffect(route) { nav.reset() }
+                } else {
+                    HotWalletImportWordsScreen(
+                        wordCount = wordCount,
+                        // The words go into the shared holder and nowhere else — not
+                        // onto the route, which is saved state (see the holder).
+                        flow = hotWalletFlow,
+                        onWordsEntered = { nav.push(Route(Screen.HOT_WALLET_IMPORT_FINISH)) },
+                        onBack = { nav.pop() },
+                    )
+                }
             }
-        }
 
-        // The finish screen, reached by either walk — the create walk from the
-        // recovery words, the import walk from the word field. It is one screen
-        // and one provisioning call; only its title and its terminal button say
-        // which walk got here, and the destination is what carries that.
-        Screen.HOT_WALLET_FINISH, Screen.HOT_WALLET_IMPORT_FINISH -> {
-            val words = hotWalletFlow.mnemonic
-            if (words == null) {
-                LaunchedEffect(route) { nav.reset() }
-            } else {
-                HotWalletFinishScreen(
-                    mnemonic = words,
-                    flow = hotWalletFlow,
-                    provisioner = hotWalletProvisioner,
-                    isImport = route.screen == Screen.HOT_WALLET_IMPORT_FINISH,
-                    // The wallet exists by now (or was already here: a duplicate
-                    // ends the same way, on the list). Re-read through the store
-                    // so Home shows it — amber "hot" tag and all — and reset the
-                    // stack, exactly as every other add path lands.
-                    onCreated = {
-                        homeState.refresh()
-                        nav.reset()
-                    },
-                    onBack = { nav.pop() },
-                )
+            Screen.IMPORT_XPUB -> {
+                val state = rememberImportXpubScreenState(signerStore) { _: Signer ->
+                    // Re-read through the store so Home shows the new signer, then
+                    // land back on Home — where the wallet list lives now, and where
+                    // an add started from. The stack is reset so the submitted form is
+                    // not left underneath it (see the class doc).
+                    homeState.refresh()
+                    nav.reset()
+                }
+                ImportXpubScreen(state = state, onBack = { nav.pop() })
             }
-        }
 
-        Screen.HOT_WALLET_IMPORT -> HotWalletImportScreen(
-            onChooseWords = { words ->
-                nav.push(Route(Screen.HOT_WALLET_IMPORT_WORDS, address = words.toString()))
-            },
-            onBack = { nav.pop() },
-        )
-
-        Screen.HOT_WALLET_IMPORT_WORDS -> {
-            val wordCount = hotWalletWordCount(route.address)
-            if (wordCount == null) {
-                LaunchedEffect(route) { nav.reset() }
-            } else {
-                HotWalletImportWordsScreen(
-                    wordCount = wordCount,
-                    // The words go into the shared holder and nowhere else — not
-                    // onto the route, which is saved state (see the holder).
-                    flow = hotWalletFlow,
-                    onWordsEntered = { nav.push(Route(Screen.HOT_WALLET_IMPORT_FINISH)) },
-                    onBack = { nav.pop() },
-                )
+            // The signing-device sibling of the form above: same name field, same
+            // save, same signer record — a scanner that assembles animated BC-UR
+            // `crypto-account` frames instead of reading one text QR. It lands the
+            // user in the same place, for the same reason.
+            //
+            // Which chooser row opened it decides the origin the record is stamped
+            // with. A route saved by a build that had only one animated row restored
+            // with no origin at all, and that missing origin reads as the SeedSigner
+            // path — which is exactly what the store's own migration does to the
+            // records such a build wrote, so the two agree.
+            Screen.ADD_SIGNING_DEVICE -> {
+                val origin = route.origin ?: SignerOrigin.SEEDSIGNER_UR
+                val state = rememberAddSigningDeviceScreenState(signerStore, origin) { _: Signer ->
+                    // Same landing as the text-import form above: the reset puts the
+                    // user back on Home, where the new wallet is in the list.
+                    homeState.refresh()
+                    nav.reset()
+                }
+                AddSigningDeviceScreen(state = state, onBack = { nav.pop() })
             }
-        }
 
-        Screen.IMPORT_XPUB -> {
-            val state = rememberImportXpubScreenState(signerStore) { _: Signer ->
-                // Re-read through the store so Home shows the new signer, then
-                // land back on Home — where the wallet list lives now, and where
-                // an add started from. The stack is reset so the submitted form is
-                // not left underneath it (see the class doc).
-                homeState.refresh()
-                nav.reset()
+            Screen.SIGNER_DETAIL -> {
+                if (openSigner == null || chainState == null) {
+                    // The id no longer resolves (the signer was removed, or a saved
+                    // id went stale). Restart at Home rather than show an empty
+                    // detail page. Keyed on the route so this fires once per bad
+                    // entry.
+                    LaunchedEffect(route) { nav.reset() }
+                } else {
+                    SignerDetailScreen(
+                        signer = openSigner,
+                        state = chainState,
+                        onOpenUtxos = { nav.push(Route(Screen.SIGNER_UTXOS, signerId = openSigner.id)) },
+                        onOpenAddresses = { nav.push(Route(Screen.SIGNER_ADDRESSES, signerId = openSigner.id)) },
+                        // The address is resolved by the button before it navigates,
+                        // so the receive screen opens with a QR already in hand.
+                        onOpenReceive = { address ->
+                            nav.push(Route(Screen.RECEIVE, signerId = openSigner.id, address = address))
+                        },
+                        // The route carries only the txid; the detail screen reads the
+                        // row back out of this same snapshot. See [Route].
+                        onOpenTransaction = { txHash ->
+                            nav.push(
+                                Route(
+                                    Screen.SIGNER_TRANSACTION_DETAIL,
+                                    signerId = openSigner.id,
+                                    address = txHash,
+                                ),
+                            )
+                        },
+                        // Send opens the air-gapped flow with automatic coin
+                        // selection: no outpoints ride the route, only the marker
+                        // that says so. The screen re-derives the coins from the
+                        // snapshot, which is what makes the route safe to restore
+                        // after process death. See [AUTO_SEND_MARKER].
+                        onOpenSend = {
+                            nav.push(
+                                Route(
+                                    Screen.SEND,
+                                    signerId = openSigner.id,
+                                    address = AUTO_SEND_MARKER,
+                                ),
+                            )
+                        },
+                        onBack = { nav.pop() },
+                    )
+                }
             }
-            ImportXpubScreen(state = state, onBack = { nav.pop() })
-        }
 
-        // The signing-device sibling of the form above: same name field, same
-        // save, same signer record — a scanner that assembles animated BC-UR
-        // `crypto-account` frames instead of reading one text QR. It lands the
-        // user in the same place, for the same reason.
-        //
-        // Which chooser row opened it decides the origin the record is stamped
-        // with. A route saved by a build that had only one animated row restored
-        // with no origin at all, and that missing origin reads as the SeedSigner
-        // path — which is exactly what the store's own migration does to the
-        // records such a build wrote, so the two agree.
-        Screen.ADD_SIGNING_DEVICE -> {
-            val origin = route.origin ?: SignerOrigin.SEEDSIGNER_UR
-            val state = rememberAddSigningDeviceScreenState(signerStore, origin) { _: Signer ->
-                // Same landing as the text-import form above: the reset puts the
-                // user back on Home, where the new wallet is in the list.
-                homeState.refresh()
-                nav.reset()
+            Screen.SIGNER_TRANSACTION_DETAIL -> {
+                val txHash = route.address
+                if (chainState == null || txHash.isNullOrBlank()) {
+                    // No signer to read the row from, or no txid carried on the route
+                    // (a stack restored from a build that saved this screen before it
+                    // existed). Restart at Home rather than show a fabricated detail.
+                    LaunchedEffect(route) { nav.reset() }
+                } else {
+                    TransactionDetailScreen(
+                        txHash = txHash,
+                        state = chainState,
+                        onBack = { nav.pop() },
+                    )
+                }
             }
-            AddSigningDeviceScreen(state = state, onBack = { nav.pop() })
-        }
 
-        Screen.SIGNER_DETAIL -> {
-            if (openSigner == null || chainState == null) {
-                // The id no longer resolves (the signer was removed, or a saved
-                // id went stale). Restart at Home rather than show an empty
-                // detail page. Keyed on the route so this fires once per bad
-                // entry.
-                LaunchedEffect(route) { nav.reset() }
-            } else {
-                SignerDetailScreen(
-                    signer = openSigner,
-                    state = chainState,
-                    onOpenUtxos = { nav.push(Route(Screen.SIGNER_UTXOS, signerId = openSigner.id)) },
-                    onOpenAddresses = { nav.push(Route(Screen.SIGNER_ADDRESSES, signerId = openSigner.id)) },
-                    // The address is resolved by the button before it navigates,
-                    // so the receive screen opens with a QR already in hand.
-                    onOpenReceive = { address ->
-                        nav.push(Route(Screen.RECEIVE, signerId = openSigner.id, address = address))
-                    },
-                    // The route carries only the txid; the detail screen reads the
-                    // row back out of this same snapshot. See [Route].
-                    onOpenTransaction = { txHash ->
-                        nav.push(
-                            Route(
-                                Screen.SIGNER_TRANSACTION_DETAIL,
-                                signerId = openSigner.id,
-                                address = txHash,
-                            ),
-                        )
-                    },
-                    // Send opens the air-gapped flow with automatic coin
-                    // selection: no outpoints ride the route, only the marker
-                    // that says so. The screen re-derives the coins from the
-                    // snapshot, which is what makes the route safe to restore
-                    // after process death. See [AUTO_SEND_MARKER].
-                    onOpenSend = {
-                        nav.push(
-                            Route(
-                                Screen.SEND,
-                                signerId = openSigner.id,
-                                address = AUTO_SEND_MARKER,
-                            ),
-                        )
-                    },
-                    onBack = { nav.pop() },
-                )
+            Screen.SIGNER_UTXOS -> {
+                if (chainState == null) {
+                    // Same rule as the detail screen: no signer, nothing to show.
+                    LaunchedEffect(route) { nav.reset() }
+                } else {
+                    UtxosScreen(
+                        state = chainState,
+                        // The selected outpoints ride on the Send route (comma-joined
+                        // in the free-form address slot) rather than in shared state,
+                        // so a rotation on the Send screen keeps the same coin
+                        // selection. See [Route].
+                        onSendSelected = { outpoints ->
+                            nav.push(
+                                Route(
+                                    Screen.SEND,
+                                    signerId = route.signerId,
+                                    address = outpoints.joinToString(","),
+                                ),
+                            )
+                        },
+                        onBack = { nav.pop() },
+                    )
+                }
             }
-        }
 
-        Screen.SIGNER_TRANSACTION_DETAIL -> {
-            val txHash = route.address
-            if (chainState == null || txHash.isNullOrBlank()) {
-                // No signer to read the row from, or no txid carried on the route
-                // (a stack restored from a build that saved this screen before it
-                // existed). Restart at Home rather than show a fabricated detail.
-                LaunchedEffect(route) { nav.reset() }
-            } else {
-                TransactionDetailScreen(
-                    txHash = txHash,
-                    state = chainState,
-                    onBack = { nav.pop() },
-                )
+            Screen.SEND -> {
+                val signerId = route.signerId
+                // Two payloads share this route's free-form slot: the automatic path
+                // carries only the [AUTO_SEND_MARKER], and the manual path carries
+                // the selection as `txid:vout,txid:vout,…` — blanks (a trailing
+                // comma, an empty address) are dropped rather than becoming a
+                // phantom outpoint.
+                val auto = route.address == AUTO_SEND_MARKER
+                val outpoints = if (auto) {
+                    emptyList()
+                } else {
+                    route.address.orEmpty()
+                        .split(",")
+                        .filter { it.isNotBlank() }
+                }
+                if (chainState == null || signerId == null || (!auto && outpoints.isEmpty())) {
+                    // No signer to send from, or no coins carried on the route (a
+                    // stack restored from a build that saved a Send route before the
+                    // selection was put on it). Restart at Home rather than show an
+                    // empty send form. The automatic path carries no coins, so it is
+                    // not held to that rule.
+                    LaunchedEffect(route) { nav.reset() }
+                } else {
+                    SendScreen(
+                        state = chainState,
+                        outpoints = outpoints,
+                        auto = auto,
+                        // The hot branch of the send flow signs from the wallet's own
+                        // seed, so the screen that can sign is handed the vault that
+                        // holds it. Every other wallet ignores it.
+                        seedVault = seedVault,
+                        // The way back to the manual picker: the same signer's UTXO
+                        // list, where a selection can be made by hand exactly as it
+                        // always could.
+                        onChooseManually = { nav.push(Route(Screen.SIGNER_UTXOS, signerId = signerId)) },
+                        onBack = { nav.pop() },
+                    )
+                }
             }
-        }
 
-        Screen.SIGNER_UTXOS -> {
-            if (chainState == null) {
-                // Same rule as the detail screen: no signer, nothing to show.
-                LaunchedEffect(route) { nav.reset() }
-            } else {
-                UtxosScreen(
-                    state = chainState,
-                    // The selected outpoints ride on the Send route (comma-joined
-                    // in the free-form address slot) rather than in shared state,
-                    // so a rotation on the Send screen keeps the same coin
-                    // selection. See [Route].
-                    onSendSelected = { outpoints ->
-                        nav.push(
-                            Route(
-                                Screen.SEND,
-                                signerId = route.signerId,
-                                address = outpoints.joinToString(","),
-                            ),
-                        )
-                    },
-                    onBack = { nav.pop() },
-                )
+            Screen.SIGNER_ADDRESSES -> {
+                val signerId = route.signerId
+                if (chainState == null || signerId == null) {
+                    LaunchedEffect(route) { nav.reset() }
+                } else {
+                    AddressesScreen(
+                        state = chainState,
+                        // The QR for a specific row: the address the user tapped
+                        // rides on the route, so back/rotation return to *that*
+                        // address rather than to the first unused one.
+                        onShowQr = { address ->
+                            nav.push(Route(Screen.RECEIVE, signerId = signerId, address = address))
+                        },
+                        onBack = { nav.pop() },
+                    )
+                }
             }
-        }
 
-        Screen.SEND -> {
-            val signerId = route.signerId
-            // Two payloads share this route's free-form slot: the automatic path
-            // carries only the [AUTO_SEND_MARKER], and the manual path carries
-            // the selection as `txid:vout,txid:vout,…` — blanks (a trailing
-            // comma, an empty address) are dropped rather than becoming a
-            // phantom outpoint.
-            val auto = route.address == AUTO_SEND_MARKER
-            val outpoints = if (auto) {
-                emptyList()
-            } else {
-                route.address.orEmpty()
-                    .split(",")
-                    .filter { it.isNotBlank() }
-            }
-            if (chainState == null || signerId == null || (!auto && outpoints.isEmpty())) {
-                // No signer to send from, or no coins carried on the route (a
-                // stack restored from a build that saved a Send route before the
-                // selection was put on it). Restart at Home rather than show an
-                // empty send form. The automatic path carries no coins, so it is
-                // not held to that rule.
-                LaunchedEffect(route) { nav.reset() }
-            } else {
-                SendScreen(
-                    state = chainState,
-                    outpoints = outpoints,
-                    auto = auto,
-                    // The hot branch of the send flow signs from the wallet's own
-                    // seed, so the screen that can sign is handed the vault that
-                    // holds it. Every other wallet ignores it.
-                    seedVault = seedVault,
-                    // The way back to the manual picker: the same signer's UTXO
-                    // list, where a selection can be made by hand exactly as it
-                    // always could.
-                    onChooseManually = { nav.push(Route(Screen.SIGNER_UTXOS, signerId = signerId)) },
-                    onBack = { nav.pop() },
-                )
-            }
-        }
-
-        Screen.SIGNER_ADDRESSES -> {
-            val signerId = route.signerId
-            if (chainState == null || signerId == null) {
-                LaunchedEffect(route) { nav.reset() }
-            } else {
-                AddressesScreen(
-                    state = chainState,
-                    // The QR for a specific row: the address the user tapped
-                    // rides on the route, so back/rotation return to *that*
-                    // address rather than to the first unused one.
-                    onShowQr = { address ->
-                        nav.push(Route(Screen.RECEIVE, signerId = signerId, address = address))
-                    },
-                    onBack = { nav.pop() },
-                )
-            }
-        }
-
-        Screen.RECEIVE -> {
-            val requestedAddress = route.address
-            if (chainState == null || requestedAddress == null) {
-                // Either the signer no longer resolves, or the route carries no
-                // address — a stack restored from a build that saved a receive
-                // route before the address was resolved pre-navigation. Restart
-                // at Home rather than show a receive screen with nothing to
-                // receive to.
-                LaunchedEffect(route) { nav.reset() }
-            } else {
-                ReceiveScreen(
-                    state = chainState,
-                    // Always known: the signer's Receive button resolves it
-                    // before pushing, and an addresses-list row passes its own.
-                    address = requestedAddress,
-                    onBack = { nav.pop() },
-                )
+            Screen.RECEIVE -> {
+                val requestedAddress = route.address
+                if (chainState == null || requestedAddress == null) {
+                    // Either the signer no longer resolves, or the route carries no
+                    // address — a stack restored from a build that saved a receive
+                    // route before the address was resolved pre-navigation. Restart
+                    // at Home rather than show a receive screen with nothing to
+                    // receive to.
+                    LaunchedEffect(route) { nav.reset() }
+                } else {
+                    ReceiveScreen(
+                        state = chainState,
+                        // Always known: the signer's Receive button resolves it
+                        // before pushing, and an addresses-list row passes its own.
+                        address = requestedAddress,
+                        onBack = { nav.pop() },
+                    )
+                }
             }
         }
     }

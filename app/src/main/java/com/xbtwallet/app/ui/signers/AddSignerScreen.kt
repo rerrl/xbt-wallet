@@ -109,6 +109,28 @@ internal const val ADD_SIGNER_HOT_COPY =
     "Private keys live on this device. Create a new wallet with dice rolls, or " +
         "import an existing seed."
 
+/**
+ * What the Hot wallet card says instead of its buttons when the device has no
+ * lock screen.
+ *
+ * A hot wallet's seed is sealed under a key bound to device authentication, so
+ * a device with no lock screen has nothing to bind to: the wallet could be
+ * created and then never opened. The card refuses rather than failing later, and
+ * says why and what to do about it.
+ */
+internal const val ADD_SIGNER_HOT_LOCKED_COPY =
+    "A hot wallet's seed is protected by your device lock, and this device has " +
+        "no screen lock. Set a PIN, pattern or password in Android settings, then " +
+        "reopen the app to create one."
+
+/**
+ * Whether the Hot wallet card offers its two buttons.
+ *
+ * A pure function of the one fact that decides it, so the rule is pinned by a
+ * JVM test rather than only by the rendering.
+ */
+internal fun hotWalletOffered(deviceSecure: Boolean): Boolean = deviceSecure
+
 /** Card 3's title. */
 internal const val ADD_SIGNER_WATCH_TITLE = "Watch only"
 
@@ -246,6 +268,12 @@ internal fun AddWalletCard(
     }
 }
 
+/**
+ * @param hotWalletCreationBlocked whether the device has no lock screen, so a
+ *   hot wallet must be refused. When true the Hot wallet card shows
+ *   [ADD_SIGNER_HOT_LOCKED_COPY] instead of its buttons. Defaults to false so
+ *   every existing caller (and the preview) keeps offering the card.
+ */
 @Composable
 fun AddSignerScreen(
     onOpenSigningDeviceChoice: () -> Unit,
@@ -253,6 +281,7 @@ fun AddSignerScreen(
     onOpenHotWalletImport: () -> Unit,
     onOpenWatchOnly: () -> Unit,
     onBack: () -> Unit,
+    hotWalletCreationBlocked: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
@@ -283,25 +312,36 @@ fun AddSignerScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // --- 2. The hot wallet: two ways in, both still UI-only. ----------
+            // --- 2. The hot wallet: two ways in, both needing a device lock. ---
+            // On a device with no lock screen the card explains itself instead of
+            // offering the two buttons: a hot wallet's seed is bound to device
+            // authentication, and there is none here to bind it to.
             AddWalletCard(
                 title = ADD_SIGNER_HOT_TITLE,
                 copy = ADD_SIGNER_HOT_COPY,
                 borderColor = AddWalletHotBorder,
             ) {
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    OrangeOutlineButton(
-                        onClick = onOpenHotWalletCreate,
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text(ADD_SIGNER_CREATE_BUTTON)
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    OrangeOutlineButton(
-                        onClick = onOpenHotWalletImport,
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text(ADD_SIGNER_IMPORT_BUTTON)
+                if (!hotWalletOffered(deviceSecure = !hotWalletCreationBlocked)) {
+                    Text(
+                        text = ADD_SIGNER_HOT_LOCKED_COPY,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                } else {
+                    Row(modifier = Modifier.fillMaxWidth()) {
+                        OrangeOutlineButton(
+                            onClick = onOpenHotWalletCreate,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(ADD_SIGNER_CREATE_BUTTON)
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        OrangeOutlineButton(
+                            onClick = onOpenHotWalletImport,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(ADD_SIGNER_IMPORT_BUTTON)
+                        }
                     }
                 }
             }

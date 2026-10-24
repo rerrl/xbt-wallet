@@ -20,6 +20,10 @@ package com.xbtwallet.app.data
  *  - **A call log.** [deleted] records every [delete] and [stores] every
  *    [store], so a test can assert that a *watch-only* signer's removal touched
  *    the vault not at all — which is only observable as "no call was made".
+ *
+ * It never challenges: a read is always [SeedLoad.Loaded] or [SeedLoad.Absent].
+ * The authentication path belongs to [KeystoreSeedVault] and is tested there,
+ * against a fake key provider.
  */
 class FakeSeedVault : SeedVault {
 
@@ -36,7 +40,8 @@ class FakeSeedVault : SeedVault {
         stores += signerId to entropy.copyOf()
     }
 
-    override fun load(signerId: String): ByteArray? = entries[signerId]?.copyOf()
+    override fun load(signerId: String): SeedLoad =
+        entries[signerId]?.let { SeedLoad.Loaded(it.copyOf()) } ?: SeedLoad.Absent
 
     override fun delete(signerId: String) {
         entries.remove(signerId)
