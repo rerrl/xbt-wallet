@@ -101,6 +101,36 @@ object HotWalletDerivation {
 }
 
 /**
+ * What a provisioning attempt did.
+ *
+ * A result rather than an exception, because a duplicate is not a failure: the
+ * user has typed a seed this phone already holds, which is a thing to *say* to
+ * them rather than a stack trace to swallow. [HotWalletProvisioner.provision]
+ * returns one of these, and the only alternative it can take is throwing — it
+ * refuses a mnemonic that is not a real one with an
+ * [IllegalArgumentException], because there is no wallet to describe in that case.
+ */
+sealed interface ProvisionResult {
+
+    /**
+     * The wallet is new: its entropy is in the vault and its signer record is
+     * written.
+     *
+     * @property signer the record, carrying no secret.
+     */
+    data class Created(val signer: Signer) : ProvisionResult
+
+    /**
+     * The phrase describes an account this phone already holds, and **nothing was
+     * written** — no vault entry, no record.
+     *
+     * @property signer the record that already exists, so a screen can name the
+     *   wallet the user is looking at.
+     */
+    data class AlreadyExists(val signer: Signer) : ProvisionResult
+}
+
+/**
  * The orchestration the create/import screens call: words in, a stored wallet
  * out.
  *
@@ -112,6 +142,14 @@ object HotWalletDerivation {
  * whose seed was never stored, which would be a wallet that can never spend and
  * never say why. The vault is keyed by signer id, so the id is allocated first
  * and the record created under it.
+ *
+ * **The same seed is only ever stored once.** Before anything is written the
+ * derived account is compared against every signer already in the store, and a
+ * match comes back as [ProvisionResult.AlreadyExists] with the stores untouched.
+ * Importing a phrase the phone already holds would otherwise leave two records
+ * for one account — two rows on Home, one of them indistinguishable from the
+ * other, and a second vault entry for a seed that is already there. The check is
+ * on the account's key string, so it is exact and works across both signer kinds.
  *
  * **There is no passphrase check to store.** The passphrase is verified by
  * re-deriving: the record's zpub *is* the passphrased account, so the app can
@@ -129,16 +167,23 @@ class HotWalletProvisioner(
 ) {
 
     /**
-     * Validates [mnemonic], derives its account, stores the entropy and creates
-     * the signer — in that order.
+     * Validates [mnemonic], derives its account, and — if this phone does not
+     * already hold that account — stores the entropy and creates the signer, in
+     * that order.
      *
      * The record it returns carries no secret: the passphrased zpub, the
      * passphrased master fingerprint, the account path, and whether a passphrase
      * was used at all. [HotWalletDerivation.derive] and [Bip39.mnemonicToEntropy]
      * both reject a bad phrase, so nothing is written — to the vault or to the
      * record — for a mnemonic that is not a real one.
+     *
+     * A phrase whose account is already in the store returns
+     * [ProvisionResult.AlreadyExists] and writes nothing at all: the vault is not
+     * touched and no id is allocated. The account is the identity of a wallet, so
+     * a record that is already there is the same wallet, whatever name this call
+     * was given.
      */
-    fun provision(name: String, mnemonic: List<String>, passphrase: String = ""): Signer {
+    fun provision(name: String, mnemonic: List<String>, passphrase: String = ""): ProvisionResult {
         // Validate once, and keep the entropy the validation produced: it is what
         // the vault stores. (Only the entropy is stored — never the 64-byte seed,
         // which is passphrase-dependent and would freeze the wallet to one
@@ -146,18 +191,32 @@ class HotWalletProvisioner(
         val entropy = Bip39.mnemonicToEntropy(mnemonic)
         val account = HotWalletDerivation.derive(mnemonic, passphrase)
 
+        // The duplicate guard, before anything has been written. The comparison
+        // is on the account key string the store already holds (see
+        // Signer.accountXpub), which the reader hands back unchanged, so it is
+        // exact for a hot wallet and for a watch-only signer of the same account.
+        val existing = signerStore.list().firstOrNull { it.accountXpub == account.zpub }
+        if (existing != null) {
+            // The vault never saw this copy, but the caller handed it to us and
+            // nothing here keeps it.
+            entropy.fill(0)
+            return ProvisionResult.AlreadyExists(existing)
+        }
+
         val id = signerStore.allocateId()
         seedVault.store(id, entropy)
         // The vault has its own (encrypted) copy now, so this one can go.
         entropy.fill(0)
 
-        return signerStore.addHotWithId(
-            id = id,
-            name = name,
-            xpub = account.zpub,
-            masterFingerprint = account.masterFingerprint,
-            derivationPath = account.derivationPath,
-            hasPassphrase = passphrase.isNotEmpty(),
+        return ProvisionResult.Created(
+            signerStore.addHotWithId(
+                id = id,
+                name = name,
+                xpub = account.zpub,
+                masterFingerprint = account.masterFingerprint,
+                derivationPath = account.derivationPath,
+                hasPassphrase = passphrase.isNotEmpty(),
+            ),
         )
     }
 

@@ -24,10 +24,12 @@ import com.xbtwallet.app.ui.theme.XbtWalletTheme
  *
  * Two options, 12 words or 24, and nothing else: no passphrase, no derivation
  * path, no "paste it another way". Which one the user picks only chooses the
- * wording of the word-entry screen that follows ([HotWalletImportWordsScreen]).
+ * wording of the word-entry screen that follows ([HotWalletImportWordsScreen]),
+ * and how long a phrase that screen expects.
  *
- * **UI scaffolding only.** Nothing here reads, validates or stores key material;
- * the button picks a word count and navigates.
+ * **This screen only chooses.** Nothing here reads, validates or stores key
+ * material: the word-entry screen behind it is where the phrase is typed, checked
+ * against the BIP-39 wordlist, and handed to the in-memory flow holder.
  */
 
 /** The screen title. */
@@ -56,12 +58,8 @@ internal const val HOT_WALLET_IMPORT_FIELD_12 = "Enter your 12 words, separated 
 /** The word field's label, twenty-four words. */
 internal const val HOT_WALLET_IMPORT_FIELD_24 = "Enter your 24 words, separated by spaces"
 
-/** The terminal button the word-entry screen shows disabled. */
+/** The terminal button the word-entry screen shows. */
 internal const val HOT_WALLET_IMPORT_WALLET_BUTTON = "Import wallet"
-
-/** The note under it, saying why it is disabled. */
-internal const val HOT_WALLET_IMPORT_NOTE =
-    "Import is not wired up yet \u2014 this is a UI preview."
 
 /** The word-count option label for a count: `12 words` / `24 words`. */
 internal fun importWordCountLabel(wordCount: Int): String =

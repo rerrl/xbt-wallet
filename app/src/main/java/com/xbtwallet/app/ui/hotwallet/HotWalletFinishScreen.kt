@@ -29,13 +29,23 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.xbtwallet.app.data.HotWalletProvisioner
+import com.xbtwallet.app.data.ProvisionResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** The screen's title, in the header. */
+/** The screen's title, in the header, on the create walk. */
 internal const val HOT_WALLET_FINISH_TITLE = "Finish"
+
+/**
+ * The screen's title on the **import** walk.
+ *
+ * The same screen, reached by the other way into a hot wallet: the import walk
+ * has no recovery-words step (the words are already the user's), so this is its
+ * last step and says so.
+ */
+internal const val HOT_WALLET_FINISH_IMPORT_TITLE = "Import \u2014 final step"
 
 /** The wallet-name field's label. */
 internal const val HOT_WALLET_FINISH_NAME_LABEL = "Wallet name"
@@ -71,6 +81,34 @@ internal const val HOT_WALLET_FINISH_RETRY = "Retry"
 internal const val HOT_WALLET_FINISH_ERROR = "Couldn't create the wallet. Try again."
 
 /**
+ * Shown when the phrase is a wallet this phone already holds.
+ *
+ * A duplicate is not a failure — the store refuses a second record for one
+ * account (see [com.xbtwallet.app.data.HotWalletProvisioner]) — so this is the
+ * sentence that explains the refusal, and the button beside it does the only
+ * thing left to do: leave the walk.
+ */
+internal const val HOT_WALLET_FINISH_DUPLICATE = "This wallet is already imported"
+
+/** The action beside [HOT_WALLET_FINISH_DUPLICATE]: out of the walk, to the list. */
+internal const val HOT_WALLET_FINISH_HOME = "Go to Home"
+
+/**
+ * The header title for a walk: `Finish` when the wallet is being created,
+ * `Import — final step` when it is being imported.
+ */
+internal fun finishTitle(isImport: Boolean): String =
+    if (isImport) HOT_WALLET_FINISH_IMPORT_TITLE else HOT_WALLET_FINISH_TITLE
+
+/**
+ * The terminal button's wording for a walk: `Create wallet` when creating,
+ * `Import wallet` when importing. The import wording is the same phrase the
+ * word-entry screen's button uses — it is the same action.
+ */
+internal fun finishSubmitLabel(isImport: Boolean): String =
+    if (isImport) HOT_WALLET_IMPORT_WALLET_BUTTON else HOT_WALLET_FINISH_CREATE
+
+/**
  * Whether the create button is tappable for a given passphrase pair.
  *
  * The rule, in full: **no passphrase at all** (`""`/`""`) is the ordinary case
@@ -88,13 +126,26 @@ internal fun createEnabled(passphrase: String, repeat: String): Boolean =
     repeat == passphrase
 
 /**
- * **Finish** — the last step of the create-hot-wallet walk: name the wallet, add
- * an optional passphrase, and provision it.
+ * **Finish** — the last step of either hot-wallet walk: name the wallet, add an
+ * optional passphrase, and provision it.
  *
  * The words come in from the shared [HotWalletCreateFlow] (never off the route;
  * see that class) and go straight into [HotWalletProvisioner], which validates
- * them, derives the account, writes the entropy into the keystore-backed vault
- * and only then creates the signer record.
+ * them, derives the account, refuses an account the phone already holds, and
+ * otherwise writes the entropy into the keystore-backed vault and only then
+ * creates the signer record.
+ *
+ * **One screen, two walks.** [isImport] changes exactly two strings — the title
+ * and the terminal button — because the work is the same either way: the words
+ * are in the flow holder, and the rest is derivation and storage. The create walk
+ * reaches this screen from the recovery-words screen; the import walk reaches it
+ * straight from the words it typed.
+ *
+ * **A duplicate is reported, not retried.** When the phrase resolves to an
+ * account this phone already holds, nothing was written and there is nothing to
+ * retry: the screen says so ([HOT_WALLET_FINISH_DUPLICATE]) and its button turns
+ * into the way out ([HOT_WALLET_FINISH_HOME]). The words are cleared on the way
+ * out, exactly as they are after a successful provision.
  *
  * The passphrase is a *second* secret on top of the words, so the screen is
  * screenshot-proof for as long as it is composed: the activity window carries
@@ -108,14 +159,17 @@ internal fun createEnabled(passphrase: String, repeat: String): Boolean =
  *
  * On success the flow is wiped and [onCreated] lands the user on Home, where the
  * new wallet is in the list. On failure the flow is **not** wiped: the words are
- * still only in memory, and a retry should not send the user back to the dice.
+ * still only in memory, and a retry should not send the user back to the dice or
+ * to the word field.
  *
- * @param mnemonic the recovery words, in order. Never empty: the navigation guard
- *   ahead of this screen restarts at Home when there is no mnemonic.
- * @param flow the shared holder, wiped here on success.
+ * @param mnemonic the recovery words, in order. Never empty: the navigation
+ *   guards ahead of this screen restart at Home when there is no mnemonic.
+ * @param flow the shared holder, wiped on success and on the way out of a
+ *   duplicate.
  * @param provisioner the app's one provisioner, built in `XbtWalletApp`.
- * @param onCreated called once the signer record exists — the caller refreshes
- *   Home and resets the stack.
+ * @param isImport which walk reached this screen. Only the wording changes.
+ * @param onCreated called once the wallet exists, or once the user accepts a
+ *   duplicate — the caller refreshes Home and resets the stack.
  * @param onBack the header's back affordance, one level up the walk.
  */
 @Composable
@@ -123,6 +177,7 @@ fun HotWalletFinishScreen(
     mnemonic: List<String>,
     flow: HotWalletCreateFlow,
     provisioner: HotWalletProvisioner,
+    isImport: Boolean = false,
     onCreated: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -131,6 +186,7 @@ fun HotWalletFinishScreen(
     var repeatPassphrase by remember { mutableStateOf("") }
     var creating by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var duplicate by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
 
@@ -144,6 +200,12 @@ fun HotWalletFinishScreen(
     }
 
     val canSubmit = createEnabled(passphrase, repeatPassphrase) && !creating
+    val submitLabel = when {
+        creating -> finishSubmitLabel(isImport)
+        duplicate -> HOT_WALLET_FINISH_HOME
+        error == null -> finishSubmitLabel(isImport)
+        else -> HOT_WALLET_FINISH_RETRY
+    }
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -155,6 +217,16 @@ fun HotWalletFinishScreen(
             ) {
                 Button(
                     onClick = {
+                        // A duplicate has nothing left to do here: the wallet is
+                        // already in the list, so the button is the way out. The
+                        // words go with it — they have been matched against a
+                        // wallet the phone holds, and there is no reason to keep
+                        // them in memory for the rest of the session.
+                        if (duplicate) {
+                            flow.clear()
+                            onCreated()
+                            return@Button
+                        }
                         // Trimmed on save, with the default standing in for a
                         // name the user emptied out.
                         val walletName = name.trim().ifEmpty { HOT_WALLET_FINISH_NAME_DEFAULT }
@@ -166,14 +238,22 @@ fun HotWalletFinishScreen(
                                 // of the attempt, so the success path wipes it
                                 // with everything else.
                                 flow.setPassphrase(passphrase)
-                                withContext(Dispatchers.Default) {
+                                val result = withContext(Dispatchers.Default) {
                                     provisioner.provision(walletName, mnemonic, passphrase)
                                 }
-                                // Only now — the entropy is in the vault and the
-                                // record exists. Wipe the words, then land on
-                                // Home with the new wallet in the list.
-                                flow.clear()
-                                onCreated()
+                                when (result) {
+                                    // The entropy is in the vault and the record
+                                    // exists. Wipe the words, then land on Home
+                                    // with the new wallet in the list.
+                                    is ProvisionResult.Created -> {
+                                        flow.clear()
+                                        onCreated()
+                                    }
+                                    // Nothing was written: this account is already
+                                    // this phone's. Say so, and let the button
+                                    // become the way out.
+                                    is ProvisionResult.AlreadyExists -> duplicate = true
+                                }
                             } catch (cancellation: CancellationException) {
                                 throw cancellation
                             } catch (failure: Exception) {
@@ -186,7 +266,7 @@ fun HotWalletFinishScreen(
                             }
                         }
                     },
-                    enabled = canSubmit,
+                    enabled = duplicate || canSubmit,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     if (creating) {
@@ -196,9 +276,9 @@ fun HotWalletFinishScreen(
                             color = MaterialTheme.colorScheme.onPrimary,
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text(HOT_WALLET_FINISH_CREATE)
+                        Text(submitLabel)
                     } else {
-                        Text(if (error == null) HOT_WALLET_FINISH_CREATE else HOT_WALLET_FINISH_RETRY)
+                        Text(submitLabel)
                     }
                 }
             }
@@ -211,7 +291,7 @@ fun HotWalletFinishScreen(
                 .padding(horizontal = 20.dp, vertical = 12.dp)
                 .verticalScroll(rememberScrollState()),
         ) {
-            HotWalletHeader(title = HOT_WALLET_FINISH_TITLE, onBack = onBack)
+            HotWalletHeader(title = finishTitle(isImport), onBack = onBack)
 
             Spacer(modifier = Modifier.height(16.dp))
 
@@ -259,6 +339,17 @@ fun HotWalletFinishScreen(
                     text = HOT_WALLET_PASSPHRASE_MISMATCH,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
+                )
+            }
+
+            // A duplicate explains itself where the passphrase fields are, since
+            // the button below has already become the way out of the walk.
+            if (duplicate) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = HOT_WALLET_FINISH_DUPLICATE,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
                 )
             }
 

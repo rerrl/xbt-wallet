@@ -11,10 +11,10 @@ import org.junit.Test
  * Pins the locked copy of the hot-wallet screens, verbatim, plus the pure
  * functions that turn a word count into a label and a route into a word count.
  *
- * The create path (dice → backup → finish) provisions real wallets now, so its
- * user-visible strings are the whole of what the user is promised while their
- * seed is on screen; the import path is still scaffolding, and it keeps its own
- * note. Asserted as literals, not through the constants, so an edit to a
+ * The create path (dice → backup → finish) provisions real wallets now, and so
+ * does the import path (word count → words → finish), so its user-visible strings
+ * are the whole of what the user is promised while their seed is on screen.
+ * Asserted as literals, not through the constants, so an edit to a
  * constant fails a test instead of silently shipping.
  */
 class HotWalletCopyTest {
@@ -56,13 +56,12 @@ class HotWalletCopyTest {
      * The dice screen's terminal button is live now, so the "not wired up yet"
      * note is gone from that screen — and gone as a symbol, not merely
      * unreferenced. Pinned by reflection on the compiled file classes, because a
-     * deleted `const val` cannot be named in a test: the dice screen's file class
-     * carries no `HOT_WALLET_CREATE_NOTE` field, and the two import screens keep
-     * their own note and their own disabled button untouched (Phase D wires
-     * those).
+     * deleted `const val` cannot be named in a test: neither the dice screen's
+     * file class nor the two import screens' file classes carries a preview note,
+     * because the import walk provisions real wallets now too.
      */
     @Test
-    fun `the dice screen no longer carries the preview note, the import screens still do`() {
+    fun `no hot-wallet screen carries the preview note any more`() {
         val diceScreenFields = Class.forName("com.xbtwallet.app.ui.hotwallet.HotWalletDiceScreenKt")
             .declaredFields.map { it.name }
         val importWordsFields =
@@ -75,14 +74,8 @@ class HotWalletCopyTest {
             "wallet creation is wired up on this screen now: $diceScreenFields",
             diceScreenFields.contains("HOT_WALLET_CREATE_NOTE"),
         )
-
-        assertEquals("Import wallet", HOT_WALLET_IMPORT_WALLET_BUTTON)
-        assertEquals(
-            "Import is not wired up yet \u2014 this is a UI preview.",
-            HOT_WALLET_IMPORT_NOTE,
-        )
-        assertTrue(
-            "the import path keeps its note: $importWordsFields / $importScreenFields",
+        assertFalse(
+            "and import is wired up too: $importWordsFields / $importScreenFields",
             importWordsFields.contains("HOT_WALLET_IMPORT_NOTE") ||
                 importScreenFields.contains("HOT_WALLET_IMPORT_NOTE"),
         )
@@ -142,13 +135,29 @@ class HotWalletCopyTest {
         assertEquals(HOT_WALLET_IMPORT_FIELD_24, importFieldLabel(24))
     }
 
+    /**
+     * The import walk's terminal wording, which is the same action as the create
+     * walk's at the same screen: `Import wallet` on the word field's button and on
+     * the finish screen's, under the title the finish screen wears for an import.
+     * The duplicate sentence and its way out belong to that screen too — a phrase
+     * this phone already holds is reported rather than retried.
+     */
     @Test
-    fun `the import screen keeps the preview note`() {
+    fun `the import walk says import from the word field to the finish screen`() {
         assertEquals("Import wallet", HOT_WALLET_IMPORT_WALLET_BUTTON)
+        assertEquals("Import \u2014 final step", HOT_WALLET_FINISH_IMPORT_TITLE)
         assertEquals(
-            "Import is not wired up yet \u2014 this is a UI preview.",
-            HOT_WALLET_IMPORT_NOTE,
+            HOT_WALLET_IMPORT_WALLET_BUTTON,
+            finishSubmitLabel(isImport = true),
         )
+        assertEquals(HOT_WALLET_FINISH_CREATE, finishSubmitLabel(isImport = false))
+
+        assertEquals("Finish", HOT_WALLET_FINISH_TITLE)
+        assertEquals(HOT_WALLET_FINISH_TITLE, finishTitle(isImport = false))
+        assertEquals(HOT_WALLET_FINISH_IMPORT_TITLE, finishTitle(isImport = true))
+
+        assertEquals("This wallet is already imported", HOT_WALLET_FINISH_DUPLICATE)
+        assertEquals("Go to Home", HOT_WALLET_FINISH_HOME)
     }
 
     @Test
