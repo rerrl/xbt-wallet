@@ -83,6 +83,13 @@ dependencies {
     // the JVM (see app/src/test). One artifact, plus cbor transitively.
     implementation(libs.hummingbird)
 
+    // The app lock's prompt: the system BiometricPrompt with a device-credential
+    // fallback. AOSP, no Google Play services. Used by the lock gate in
+    // ui/lock/AppLock.kt (and by the vault's authentication challenge). See the
+    // module comment in gradle/libs.versions.toml — this is the only dependency
+    // the app-lock phase adds.
+    implementation(libs.androidx.biometric)
+
     debugImplementation(libs.androidx.ui.tooling)
 
     // JVM unit tests: the Electrum client is Android-free on purpose so it can

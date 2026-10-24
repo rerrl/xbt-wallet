@@ -164,6 +164,19 @@ class HotSendFlowState(
                 busy = false
                 status = null
             }
+
+            SignedSend.AuthenticationCancelled -> {
+                // The user backed out of the device prompt, or it did not satisfy
+                // the vault key. Nothing was signed and nothing was broadcast, and
+                // the prepared transaction is untouched — so this is the review,
+                // exactly as it was, with the button still there to try again.
+                // Deliberately not an error: the user made a choice.
+                passphraseRequired = false
+                passphraseError = null
+                error = null
+                busy = false
+                status = null
+            }
         }
     }
 
@@ -211,6 +224,19 @@ internal const val BROADCASTING_LABEL = "Broadcasting\u2026"
 
 /** The passphrase prompt's title and field label. */
 internal const val HOT_PASSPHRASE_TITLE = "Passphrase"
+
+/**
+ * The device prompt a hot send shows when the wallet's vault key needs the user.
+ *
+ * Worded for the action rather than for the app: the user pressed
+ * `Sign & broadcast`, and this is the confirmation that authorises it. The
+ * system owns the prompt itself (biometric or device credential); only these two
+ * lines are ours.
+ */
+internal const val HOT_SIGN_PROMPT_TITLE = "Confirm it's you"
+
+/** The sign prompt's subtitle. */
+internal const val HOT_SIGN_PROMPT_SUBTITLE = "Authenticate to sign this transaction."
 
 /** The success screen: a checkmark, the amount, the txid and one way out. */
 internal const val HOT_SUCCESS_TITLE = "Sent"

@@ -1,9 +1,9 @@
 package com.xbtwallet.app
 
 import android.os.Bundle
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.lifecycleScope
 import com.xbtwallet.app.data.ServerSettingsStore
 import com.xbtwallet.app.electrum.ElectrumRouting
@@ -15,7 +15,16 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
-class MainActivity : ComponentActivity() {
+/**
+ * The app's one activity.
+ *
+ * A `FragmentActivity` rather than a plain `ComponentActivity` for exactly one
+ * reason: `androidx.biometric.BiometricPrompt` — the app lock's prompt, and the
+ * prompt a hot send uses when the vault key's 30-second window has lapsed —
+ * requires one. `FragmentActivity` is a `ComponentActivity`, so `setContent`,
+ * `enableEdgeToEdge` and the lifecycle this app already uses are unchanged.
+ */
+class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)

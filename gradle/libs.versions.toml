@@ -21,6 +21,12 @@ torAndroid = "0.4.9.6"
 # that will decode the animated-QR PSBT frames later), and adds one artifact
 # instead of three. com.google.zxing:core comes along transitively.
 zxingEmbedded = "4.3.0"
+# androidx.biometric for the app lock: the system BiometricPrompt with a device
+# -credential fallback (setAllowedAuthenticators(BIOMETRIC_WEAK or
+# DEVICE_CREDENTIAL)). AOSP, no Google Play services, no ML Kit; it is the
+# support-library prompt that wraps the platform one and normalises the API
+# across 26..36. This is the only new dependency the app-lock phase adds.
+biometric = "1.1.0"
 # BC-UR (Uniform Resources) for the SeedSigner-native import: the animated
 # fountain-code QR frames a signer shows when exporting its account. hummingbird
 # is Sparrow's implementation of the UR spec (a direct port of URKit), Apache-2.0,
@@ -45,6 +51,7 @@ junit = { group = "junit", name = "junit", version.ref = "junit" }
 tor-android = { group = "info.guardianproject", name = "tor-android", version.ref = "torAndroid" }
 zxing-android-embedded = { group = "com.journeyapps", name = "zxing-android-embedded", version.ref = "zxingEmbedded" }
 hummingbird = { group = "com.sparrowwallet", name = "hummingbird", version.ref = "hummingbird" }
+androidx-biometric = { group = "androidx.biometric", name = "biometric", version.ref = "biometric" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

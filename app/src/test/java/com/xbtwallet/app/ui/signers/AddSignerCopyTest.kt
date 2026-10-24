@@ -51,6 +51,23 @@ class AddSignerCopyTest {
         assertEquals("Import", ADD_SIGNER_IMPORT_BUTTON)
     }
 
+    /**
+     * The Hot wallet card is refused, with an explanation, when the device has
+     * no lock screen: a hot wallet's seed is sealed under a key bound to device
+     * authentication, and there is none here to bind it to.
+     */
+    @Test
+    fun `card two refuses the hot wallet when there is no device lock`() {
+        assertTrue("a device with a lock screen offers the card", hotWalletOffered(deviceSecure = true))
+        assertTrue("no device lock means no hot wallet", !hotWalletOffered(deviceSecure = false))
+        assertEquals(
+            "A hot wallet's seed is protected by your device lock, and this device has " +
+                "no screen lock. Set a PIN, pattern or password in Android settings, then " +
+                "reopen the app to create one.",
+            ADD_SIGNER_HOT_LOCKED_COPY,
+        )
+    }
+
     @Test
     fun `card three is watch only, and says what it cannot do`() {
         assertEquals("Watch only", ADD_SIGNER_WATCH_TITLE)

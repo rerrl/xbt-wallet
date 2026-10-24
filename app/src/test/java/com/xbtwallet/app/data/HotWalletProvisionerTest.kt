@@ -205,7 +205,7 @@ class HotWalletProvisionerTest {
             override fun store(signerId: String, entropy: ByteArray) {
                 assertNull("the record must not exist yet", signerStore.get(signerId))
                 vault.store(signerId, entropy)
-                assertNotNull("…and it must not exist while the vault is written", vault.load(signerId))
+                assertNotNull("…and it must not exist while the vault is written", vault.load(signerId).entropyOrNull())
             }
         }
         val sut = HotWalletProvisioner(signerStore, watchedVault)
@@ -238,7 +238,7 @@ class HotWalletProvisionerTest {
     @Test
     fun `passphraseMatches accepts the passphrase the wallet was made with`() {
         val signer = provisioner.provision("Hidden", bip84Words, passphrase = "TREZOR").created
-        val entropy = vault.load(signer.id)!!
+        val entropy = vault.load(signer.id).entropyOrNull()!!
 
         assertTrue(provisioner.passphraseMatches(signer, entropy, "TREZOR"))
     }
@@ -246,7 +246,7 @@ class HotWalletProvisionerTest {
     @Test
     fun `passphraseMatches is case-sensitive and refuses an empty passphrase`() {
         val signer = provisioner.provision("Hidden", bip84Words, passphrase = "TREZOR").created
-        val entropy = vault.load(signer.id)!!
+        val entropy = vault.load(signer.id).entropyOrNull()!!
 
         assertFalse("BIP-39 passphrases are case-sensitive", provisioner.passphraseMatches(signer, entropy, "trezor"))
         assertFalse("and 'no passphrase' is a different wallet entirely", provisioner.passphraseMatches(signer, entropy, ""))
@@ -256,7 +256,7 @@ class HotWalletProvisionerTest {
     @Test
     fun `passphraseMatches accepts the empty passphrase on a wallet made without one`() {
         val signer = provisioner.provision("Hot wallet", bip84Words).created
-        val entropy = vault.load(signer.id)!!
+        val entropy = vault.load(signer.id).entropyOrNull()!!
 
         assertTrue(provisioner.passphraseMatches(signer, entropy, ""))
         assertFalse(provisioner.passphraseMatches(signer, entropy, "TREZOR"))
@@ -282,13 +282,13 @@ class HotWalletProvisionerTest {
         // The real call site reads the entropy out of the vault, checks it, and
         // wipes what it read. Both halves of that are exercised here.
         val signer = provisioner.provision("Hidden", bip84Words, passphrase = "TREZOR").created
-        val entropy = vault.load(signer.id)!!
+        val entropy = vault.load(signer.id).entropyOrNull()!!
 
         assertTrue(provisioner.passphraseMatches(signer, entropy, "TREZOR"))
         entropy.fill(0)
         assertArrayEquals(ByteArray(16), entropy)
         // The vault's own copy is untouched by the wipe.
-        assertTrue(provisioner.passphraseMatches(signer, vault.load(signer.id)!!, "TREZOR"))
+        assertTrue(provisioner.passphraseMatches(signer, vault.load(signer.id).entropyOrNull()!!, "TREZOR"))
     }
 
     // --- invalid input ------------------------------------------------------
@@ -347,7 +347,7 @@ class HotWalletProvisionerTest {
 
         assertFalse("the seed is gone with the wallet", vault.has(signer.id))
         assertEquals(listOf(signer.id), vault.deleted)
-        assertNull(vault.load(signer.id))
+        assertNull(vault.load(signer.id).entropyOrNull())
     }
 
     // --- the duplicate guard ------------------------------------------------
