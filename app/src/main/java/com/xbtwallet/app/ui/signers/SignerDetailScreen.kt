@@ -75,6 +75,7 @@ fun SignerDetailScreen(
     onOpenUtxos: () -> Unit,
     onOpenAddresses: () -> Unit,
     onOpenReceive: (String) -> Unit,
+    onOpenTransaction: (String) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -251,7 +252,7 @@ fun SignerDetailScreen(
 
             // 4. Transactions: what the scan's own get_history answers add up to,
             // underneath the account key. Same scan, same server, no extra RPC.
-            TransactionsSection(state)
+            TransactionsSection(state, onOpenTransaction = onOpenTransaction)
         }
     }
 }

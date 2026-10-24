@@ -42,7 +42,9 @@ object TransactionParser {
         val bytes = hexBytes(hex)
         val reader = ByteReader(bytes)
 
-        reader.skip(4) // version; the wallet does not interpret it
+        // The version is kept for the detail view, which prints it as-is. It is
+        // still not *interpreted* here — nothing in the wallet branches on it.
+        val version = reader.readUInt32()
         // BIP-144: a zero byte where an input count would be is the marker, and
         // the flag is 1. A legacy transaction can never have zero inputs, so the
         // pattern is unambiguous.
@@ -84,7 +86,7 @@ object TransactionParser {
         }
 
         val lockTimeStart = reader.position
-        reader.skip(4) // locktime
+        val lockTime = reader.readUInt32().toLong() and 0xFFFFFFFFL
         if (!reader.atEnd()) {
             throw TransactionParseException(
                 "transaction has ${reader.remaining} trailing byte(s) after the locktime",
@@ -97,10 +99,19 @@ object TransactionParser {
             bytes.copyOfRange(bodyStart, bodyEnd) +
             bytes.copyOfRange(lockTimeStart, lockTimeStart + 4)
         val digest = Hashes.sha256d(stripped)
+        // BIP-141 weight: the stripped serialisation counts four times, the
+        // witness bytes once. The detail view reports both size measures; the
+        // arithmetic belongs here, where the boundaries are already known.
+        val strippedSize = stripped.size
+        val weight = strippedSize * 4L + (bytes.size - strippedSize).toLong()
         return ParsedTransaction(
             txHash = toHex(digest.reversedArray()),
             inputs = inputs,
             outputs = outputs,
+            version = version,
+            lockTime = lockTime,
+            weight = weight,
+            vsize = (weight + 3) / 4,
         )
     }
 
@@ -242,11 +253,22 @@ data class TxOutput(
     val scriptPubKeyHex: String,
 )
 
-/** A decoded transaction: the txid, what it spends, what it creates. */
+/**
+ * A decoded transaction: the txid, what it spends, what it creates, and the
+ * serialisation facts the detail view reports.
+ *
+ * [version], [lockTime], [weight] and [vsize] default to zero so a
+ * [ParsedTransaction] built by hand in a test or a fixture still reads as the
+ * three-field value it always was; the parser fills all seven.
+ */
 data class ParsedTransaction(
     val txHash: String,
     val inputs: List<TxInput>,
     val outputs: List<TxOutput>,
+    val version: Int = 0,
+    val lockTime: Long = 0,
+    val weight: Long = 0,
+    val vsize: Long = 0,
 ) {
     /** `txid:vout` for one of this transaction's own outputs. */
     fun outpoint(index: Int): String = "$txHash:$index"

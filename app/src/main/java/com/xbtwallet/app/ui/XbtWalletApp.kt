@@ -48,6 +48,7 @@ import com.xbtwallet.app.ui.signers.ChainPhase
 import com.xbtwallet.app.ui.signers.ImportXpubScreen
 import com.xbtwallet.app.ui.signers.SignerChainStateStore
 import com.xbtwallet.app.ui.signers.SignerDetailScreen
+import com.xbtwallet.app.ui.signers.TransactionDetailScreen
 import com.xbtwallet.app.ui.signers.SendScreen
 import com.xbtwallet.app.ui.signers.SigningDeviceChoiceScreen
 import com.xbtwallet.app.ui.signers.UtxosScreen
@@ -71,7 +72,7 @@ import kotlinx.coroutines.launch
  * name, not a route); it rides in the [Route] that carries this screen onto the
  * back stack, so each level remembers its own argument. See [NavStack].
  */
-enum class Screen { HOME, SERVER, SETTINGS, ABOUT, ADD_SIGNER, SIGNING_DEVICE_CHOICE, IMPORT_XPUB, ADD_SIGNING_DEVICE, HOT_WALLET_CREATE, HOT_WALLET_DICE, HOT_WALLET_BACKUP, HOT_WALLET_FINISH, HOT_WALLET_IMPORT, HOT_WALLET_IMPORT_WORDS, HOT_WALLET_IMPORT_FINISH, SIGNER_DETAIL, SIGNER_UTXOS, SIGNER_ADDRESSES, RECEIVE, SEND }
+enum class Screen { HOME, SERVER, SETTINGS, ABOUT, ADD_SIGNER, SIGNING_DEVICE_CHOICE, IMPORT_XPUB, ADD_SIGNING_DEVICE, HOT_WALLET_CREATE, HOT_WALLET_DICE, HOT_WALLET_BACKUP, HOT_WALLET_FINISH, HOT_WALLET_IMPORT, HOT_WALLET_IMPORT_WORDS, HOT_WALLET_IMPORT_FINISH, SIGNER_DETAIL, SIGNER_TRANSACTION_DETAIL, SIGNER_UTXOS, SIGNER_ADDRESSES, RECEIVE, SEND }
 
 /**
  * The screens the two hot-wallet walks pass through — create (dice first) and
@@ -582,6 +583,33 @@ fun XbtWalletApp() {
                     onOpenReceive = { address ->
                         nav.push(Route(Screen.RECEIVE, signerId = openSigner.id, address = address))
                     },
+                    // The route carries only the txid; the detail screen reads the
+                    // row back out of this same snapshot. See [Route].
+                    onOpenTransaction = { txHash ->
+                        nav.push(
+                            Route(
+                                Screen.SIGNER_TRANSACTION_DETAIL,
+                                signerId = openSigner.id,
+                                address = txHash,
+                            ),
+                        )
+                    },
+                    onBack = { nav.pop() },
+                )
+            }
+        }
+
+        Screen.SIGNER_TRANSACTION_DETAIL -> {
+            val txHash = route.address
+            if (chainState == null || txHash.isNullOrBlank()) {
+                // No signer to read the row from, or no txid carried on the route
+                // (a stack restored from a build that saved this screen before it
+                // existed). Restart at Home rather than show a fabricated detail.
+                LaunchedEffect(route) { nav.reset() }
+            } else {
+                TransactionDetailScreen(
+                    txHash = txHash,
+                    state = chainState,
                     onBack = { nav.pop() },
                 )
             }
