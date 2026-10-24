@@ -8,6 +8,7 @@ import androidx.compose.runtime.setValue
 import com.xbtwallet.app.chain.AccountScanner
 import com.xbtwallet.app.chain.AccountSnapshot
 import com.xbtwallet.app.chain.ChainEvent
+import com.xbtwallet.app.chain.ChainQuery
 import com.xbtwallet.app.chain.ChainSubscriptionSession
 import com.xbtwallet.app.chain.ChainTip
 import com.xbtwallet.app.chain.ChainUtxo
@@ -323,6 +324,27 @@ class SignerChainState(
         val server = configuredServer()
             ?: throw ElectrumException("no Electrum server is configured \u2014 connect one from the home screen first")
         return ElectrumClient(server = server, log = {}).withChainSession { query -> query.broadcast(txHex) }
+    }
+
+    /**
+     * Runs [block] against one read connection to the configured endpoint.
+     *
+     * The same plumbing [broadcastTransaction] and the scan use — a `.onion`
+     * server goes through the bundled Tor — but for one-off reads a screen needs
+     * outside a scan, such as the transaction detail's single fetch and its
+     * on-demand parent lookups. The connection is opened, [block] runs, and the
+     * session closes when [block] returns.
+     *
+     * The block is blocking by design (see [ChainQuery]); callers run this from a
+     * coroutine on the IO dispatcher. A missing endpoint is a sentence rather
+     * than a failure, exactly as in [broadcastTransaction].
+     *
+     * @throws ElectrumException when no server is configured.
+     */
+    suspend fun <T> withChainSession(block: (ChainQuery) -> T): T {
+        val server = configuredServer()
+            ?: throw ElectrumException("no Electrum server is configured \u2014 connect one from the home screen first")
+        return ElectrumClient(server = server, log = {}).withChainSession(block)
     }
 
     // ---- the live subscription's lifecycle ---------------------------------
