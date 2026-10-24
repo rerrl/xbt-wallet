@@ -32,6 +32,10 @@ import com.xbtwallet.app.data.SignerOrigin
  *   separator and the segment needs no escaping. Keeping the selection on the
  *   route (rather than in shared state) is what makes a rotation on the Send
  *   screen land back on the same set of coins.
+ *   The automatic send (a signing-device wallet's detail-screen Send) carries
+ *   the literal `auto` in the same slot — a marker no outpoint can collide
+ *   with, since the coins are re-selected from the snapshot rather than
+ *   persisted. See `AUTO_SEND_MARKER`.
  *   For [Screen.SIGNER_TRANSACTION_DETAIL] the same slot carries the **txid**
  *   of the row that was tapped. The screen reads the row itself back out of the
  *   current snapshot by that id; putting row data on a persisted route would

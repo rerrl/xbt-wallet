@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.google.zxing.common.BitMatrix
 import com.xbtwallet.app.chain.AddressChain
+import com.xbtwallet.app.chain.P2WPKH_SCRIPT_SIZE
 import com.xbtwallet.app.chain.ScannedUtxo
 import com.xbtwallet.app.chain.SendInput
 import com.xbtwallet.app.chain.buildUnsignedTransaction
@@ -76,6 +77,17 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
+ * The route marker that says a Send was opened on the **automatic** path.
+ *
+ * It rides in [Route]'s free-form `address` slot instead of a comma-joined
+ * outpoint list — that slot is a persisted string, and `auto` is a literal no
+ * outpoint can collide with (an outpoint is `txid:vout`, hex around a colon).
+ * A restored route therefore decodes straight back to the automatic path, which
+ * re-derives its coins from the snapshot.
+ */
+internal const val AUTO_SEND_MARKER = "auto"
+
+/**
  * The Send screen: the whole air-gapped round-trip, in four steps.
  *
  * 1. **FORM** — the selected coins, a recipient, a fee rate, an amount and a
@@ -89,13 +101,20 @@ import kotlinx.coroutines.launch
  * 4. **BROADCAST** — the finalized transaction, its computed txid, and one
  *    button that hands it to the configured Electrum server.
  *
- * **The selection rides on the route** ([outpoints]) rather than in shared
- * state, so a rotation lands back on the same coins. [step] and every field are
- * held in `remember` for this composition only: a rotation restarts the flow at
- * the FORM, which is deliberate — the round-trip is a single sitting with a
- * signer in hand, and re-rendering a half-scanned QR after a rotation would be a
- * worse lie than starting the form again. Nothing is lost by it: the recipient
- * and amount are still on screen to re-submit.
+ * **Two ways in.** The manual path carries a chosen set of coins on the route
+ * ([outpoints]) — see [Route] — so a rotation lands back on the same coins. The
+ * automatic path ([auto]) carries no outpoints at all: it is opened from a
+ * signing-device wallet's detail screen, and it picks the coins itself
+ * ([selectCoins]) from the snapshot for the amount and fee rate the user types.
+ * Because the selector is deterministic, a route restored after process death
+ * re-selects the same coins from the same snapshot and the same form.
+ *
+ * [step] and every field are held in `remember` for this composition only: a
+ * rotation restarts the flow at the FORM, which is deliberate — the round-trip
+ * is a single sitting with a signer in hand, and re-rendering a half-scanned QR
+ * after a rotation would be a worse lie than starting the form again. Nothing is
+ * lost by it: the recipient and amount are still on screen to re-submit, and the
+ * automatic path re-derives its selection from what is re-typed.
  *
  * The outpoints are resolved against [SignerChainState.snapshot] — the cached
  * snapshot renders instantly, and locally derivable data must never wait on the
@@ -108,15 +127,18 @@ fun SendScreen(
     state: SignerChainState,
     outpoints: List<String>,
     onBack: () -> Unit,
+    auto: Boolean = false,
+    onChooseManually: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val snapshot = state.snapshot
 
-    // Resolve the selection in `outpoints` order, dropping any outpoint the
-    // snapshot does not (or no longer) holds. A resync may have found one spent;
-    // it simply falls out here, exactly as it falls out of the UTXO screen's
-    // selection.
-    val selected: List<ScannedUtxo> = if (snapshot == null) {
+    // The explicit path resolves the selection in `outpoints` order, dropping
+    // any outpoint the snapshot does not (or no longer) holds. A resync may have
+    // found one spent; it simply falls out here, exactly as it falls out of the
+    // UTXO screen's selection. The automatic path carries no outpoints — it
+    // selects from the snapshot below the form.
+    val selected: List<ScannedUtxo> = if (auto || snapshot == null) {
         emptyList()
     } else {
         outpoints.mapNotNull { outpoint ->
@@ -140,6 +162,17 @@ fun SendScreen(
                     text = "Syncing \u2014 selected outputs unavailable until the first snapshot lands.",
                 )
 
+                auto -> SendFlow(
+                    state = state,
+                    selected = emptyList(),
+                    available = snapshot.utxos,
+                    auto = true,
+                    onChooseManually = onChooseManually,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                )
+
                 selected.isEmpty() -> SendNotice(
                     text = "The selected outputs are no longer in this wallet's UTXO set " +
                         "\u2014 a resync may have found them spent.",
@@ -148,6 +181,9 @@ fun SendScreen(
                 else -> SendFlow(
                     state = state,
                     selected = selected,
+                    available = emptyList(),
+                    auto = false,
+                    onChooseManually = {},
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
@@ -212,6 +248,9 @@ private class SignedSend(
 private fun SendFlow(
     state: SignerChainState,
     selected: List<ScannedUtxo>,
+    available: List<ScannedUtxo>,
+    auto: Boolean,
+    onChooseManually: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -227,6 +266,12 @@ private fun SendFlow(
     var label by remember(signerKey) { mutableStateOf("") }
     var scannerOpen by remember(signerKey) { mutableStateOf(false) }
     var buildError by remember(signerKey) { mutableStateOf<String?>(null) }
+
+    // On the automatic path, whether the amount on the form came from "Max".
+    // A max send spends every coin and keeps nothing — a *different* selection
+    // from an ordinary amount (see selectMax) — so the form must not re-derive
+    // it as one. Editing the amount clears the flag.
+    var autoMax by remember(signerKey) { mutableStateOf(false) }
 
     // --- the round-trip ---
     var prepared by remember(signerKey) { mutableStateOf<PreparedSend?>(null) }
@@ -274,16 +319,74 @@ private fun SendFlow(
         }
     }
 
-    val totalSatoshis = selected.sumOf { it.utxo.satoshis }
+    val coins = if (auto) available else selected
+    val totalSatoshis = coins.sumOf { it.utxo.satoshis }
     val feeRate = parseFeeRate(feeInput)
-    val maxSendable = feeRate?.let { rate -> maxSendableSatoshis(totalSatoshis, selected.size, rate) }
-    val estimatedFee = feeRate?.let { rate -> estimateFeeSatoshis(selected.size, rate) }
     val amountSatoshis = parseAmountSats(amountInput)
     val addressError = validateRecipientAddress(recipient)
 
-    val canFinalize = state.signer.signingReady &&
-        recipient.isNotEmpty() && addressError == null &&
-        amountSatoshis != null && maxSendable != null && amountSatoshis <= maxSendable
+    // The recipient's output size, so the automatic selector prices the send for
+    // the output it will actually build. Before a valid address is typed the
+    // standard P2WPKH size stands in — it only moves the live preview, and the
+    // selection is priced again, with the real script, the moment the address
+    // resolves.
+    val recipientScriptSize = if (recipient.isNotEmpty() && addressError == null) {
+        runCatching { scriptPubKeyFromAddress(recipient).size }.getOrDefault(P2WPKH_SCRIPT_SIZE)
+    } else {
+        P2WPKH_SCRIPT_SIZE
+    }
+
+    // "Max" is a different question per path: the manual path asks what its
+    // explicit coins can send, the automatic one prices the whole snapshot with
+    // no change output (selectMax) and offers that.
+    val maxOutcome: AutoSendOutcome? = if (auto) {
+        feeRate?.let { rate ->
+            autoSelect(
+                utxos = available,
+                amountSatoshis = 1,
+                feeRateSatPerVb = rate,
+                recipientScriptSize = recipientScriptSize,
+                changeScriptSize = P2WPKH_SCRIPT_SIZE,
+                max = true,
+            )
+        }
+    } else {
+        null
+    }
+    val maxSendable: Long? = if (auto) {
+        (maxOutcome as? AutoSendOutcome.Selection)?.amountSatoshis
+    } else {
+        feeRate?.let { rate -> maxSendableSatoshis(totalSatoshis, selected.size, rate) }
+    }
+    val estimatedFee: Long? = if (auto) {
+        (maxOutcome as? AutoSendOutcome.Selection)?.feeSatoshis
+    } else {
+        feeRate?.let { rate -> estimateFeeSatoshis(selected.size, rate) }
+    }
+
+    // The automatic selection for what is currently typed — recomputed on every
+    // recomposition so the form's summary tracks the amount and the fee rate.
+    val autoOutcome: AutoSendOutcome? = if (auto && feeRate != null && amountSatoshis != null) {
+        autoSelect(
+            utxos = available,
+            amountSatoshis = amountSatoshis,
+            feeRateSatPerVb = feeRate,
+            recipientScriptSize = recipientScriptSize,
+            changeScriptSize = P2WPKH_SCRIPT_SIZE,
+            max = autoMax,
+        )
+    } else {
+        null
+    }
+
+    val canFinalize = state.signer.signingReady && recipient.isNotEmpty() && addressError == null &&
+        (
+            if (auto) {
+                autoOutcome is AutoSendOutcome.Selection
+            } else {
+                amountSatoshis != null && maxSendable != null && amountSatoshis <= maxSendable
+            }
+            )
 
     Column(modifier = modifier) {
         // The SHOW_QR step is the one step that must not scroll: its QR is sized
@@ -321,12 +424,27 @@ private fun SendFlow(
                     feeInput = feeInput,
                     onFeeChange = { feeInput = it },
                     amountInput = amountInput,
-                    onAmountChange = { amountInput = it },
+                    onAmountChange = {
+                        amountInput = it
+                        autoMax = false
+                    },
+                    onMax = {
+                        val max = maxSendable
+                        if (max != null) {
+                            autoMax = auto
+                            amountInput = max.toString()
+                        }
+                    },
                     maxSendable = maxSendable,
                     estimatedFee = estimatedFee,
                     label = label,
                     onLabelChange = { if (it.length <= LABEL_MAX_CHARS) label = it },
                     buildError = buildError,
+                    automatic = auto,
+                    automaticSummary = autoSummaryFor(autoOutcome),
+                    automaticExact = autoIsExact(autoOutcome),
+                    automaticError = autoErrorFor(autoOutcome),
+                    onChooseManually = onChooseManually,
                 )
 
                 SendStep.SHOW_QR -> {
@@ -413,11 +531,17 @@ private fun SendFlow(
             Button(
                 onClick = {
                     val rate = feeRate
-                    val amount = amountSatoshis
-                    if (rate == null || amount == null) return@Button
+                    if (rate == null) return@Button
                     buildError = null
                     try {
-                        prepared = prepareSend(state, selected, recipient, amount, rate)
+                        prepared = if (auto) {
+                            val outcome = autoOutcome
+                            if (outcome !is AutoSendOutcome.Selection) return@Button
+                            prepareSend(state, outcome.inputs, recipient, outcome.amountSatoshis, rate)
+                        } else {
+                            val amount = amountSatoshis ?: return@Button
+                            prepareSend(state, selected, recipient, amount, rate)
+                        }
                         step = SendStep.SHOW_QR
                     } catch (failure: Exception) {
                         buildError = "Could not build the transaction: ${failure.message ?: "unknown error"}"
@@ -463,31 +587,57 @@ private fun FormStep(
     onFeeChange: (String) -> Unit,
     amountInput: String,
     onAmountChange: (String) -> Unit,
+    onMax: () -> Unit,
     maxSendable: Long?,
     estimatedFee: Long?,
     label: String,
     onLabelChange: (String) -> Unit,
     buildError: String?,
+    automatic: Boolean,
+    automaticSummary: String,
+    automaticExact: Boolean,
+    automaticError: String?,
+    onChooseManually: () -> Unit,
 ) {
-    // --- the selected coins ------------------------------------------
+    // --- the coins ----------------------------------------------------
+    //
+    // The automatic path has no explicit selection to list: it shows what the
+    // selector picked for the amount and fee rate so far, a way back to the
+    // manual picker, and (on an exact spend) that there will be no change.
     Text(
-        text = "Selected outputs",
+        text = if (automatic) "Coins" else "Selected outputs",
         style = MaterialTheme.typography.titleMedium,
     )
-    selected.forEach { scanned ->
-        val utxo = scanned.utxo
+    if (automatic) {
         Text(
-            text = "${formatSats(utxo.satoshis)} sats   " +
-                "${shortenedMiddle(utxo.txHash)}:${utxo.txPos}",
+            text = automaticSummary,
+            style = MaterialTheme.typography.bodyMedium,
+            fontFamily = FontFamily.Monospace,
+        )
+        if (automaticExact) {
+            Text(
+                text = EXACT_SPEND_LINE,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        TextButton(onClick = onChooseManually) { Text(CHOOSE_MANUALLY_LABEL) }
+    } else {
+        selected.forEach { scanned ->
+            val utxo = scanned.utxo
+            Text(
+                text = "${formatSats(utxo.satoshis)} sats   " +
+                    "${shortenedMiddle(utxo.txHash)}:${utxo.txPos}",
+                style = MaterialTheme.typography.bodyMedium,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+        Text(
+            text = "Total: ${formatSats(totalSatoshis)} sats",
             style = MaterialTheme.typography.bodyMedium,
             fontFamily = FontFamily.Monospace,
         )
     }
-    Text(
-        text = "Total: ${formatSats(totalSatoshis)} sats",
-        style = MaterialTheme.typography.bodyMedium,
-        fontFamily = FontFamily.Monospace,
-    )
 
     Spacer(modifier = Modifier.height(12.dp))
 
@@ -553,7 +703,7 @@ private fun FormStep(
             modifier = Modifier.weight(1f),
         )
         if (maxSendable != null) {
-            TextButton(onClick = { onAmountChange(maxSendable.toString()) }) { Text("Max") }
+            TextButton(onClick = onMax) { Text("Max") }
         }
     }
     if (maxSendable != null && estimatedFee != null) {
@@ -572,9 +722,16 @@ private fun FormStep(
             color = MaterialTheme.colorScheme.error,
         )
 
-        amount != null && maxSendable != null && amount > maxSendable -> Text(
+        amount != null && maxSendable != null && !automatic && amount > maxSendable -> Text(
             text = "Exceeds the max spendable (${formatSats(maxSendable)} sats " +
                 "after the estimated fee).",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+        )
+    }
+    if (automaticError != null) {
+        Text(
+            text = automaticError,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.error,
         )

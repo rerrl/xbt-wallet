@@ -44,6 +44,7 @@ import com.xbtwallet.app.ui.addresses.AddressesScreen
 import com.xbtwallet.app.ui.receive.ReceiveScreen
 import com.xbtwallet.app.ui.signers.AddSignerScreen
 import com.xbtwallet.app.ui.signers.AddSigningDeviceScreen
+import com.xbtwallet.app.ui.signers.AUTO_SEND_MARKER
 import com.xbtwallet.app.ui.signers.ChainPhase
 import com.xbtwallet.app.ui.signers.ImportXpubScreen
 import com.xbtwallet.app.ui.signers.SignerChainStateStore
@@ -594,6 +595,20 @@ fun XbtWalletApp() {
                             ),
                         )
                     },
+                    // Send opens the air-gapped flow with automatic coin
+                    // selection: no outpoints ride the route, only the marker
+                    // that says so. The screen re-derives the coins from the
+                    // snapshot, which is what makes the route safe to restore
+                    // after process death. See [AUTO_SEND_MARKER].
+                    onOpenSend = {
+                        nav.push(
+                            Route(
+                                Screen.SEND,
+                                signerId = openSigner.id,
+                                address = AUTO_SEND_MARKER,
+                            ),
+                        )
+                    },
                     onBack = { nav.pop() },
                 )
             }
@@ -642,22 +657,35 @@ fun XbtWalletApp() {
 
         Screen.SEND -> {
             val signerId = route.signerId
-            // The selection came in as `txid:vout,txid:vout,…`; blanks (a trailing
-            // comma, an empty address) are dropped rather than becoming a phantom
-            // outpoint. An empty result is the "nothing to send" case below.
-            val outpoints = route.address.orEmpty()
-                .split(",")
-                .filter { it.isNotBlank() }
-            if (chainState == null || signerId == null || outpoints.isEmpty()) {
+            // Two payloads share this route's free-form slot: the automatic path
+            // carries only the [AUTO_SEND_MARKER], and the manual path carries
+            // the selection as `txid:vout,txid:vout,…` — blanks (a trailing
+            // comma, an empty address) are dropped rather than becoming a
+            // phantom outpoint.
+            val auto = route.address == AUTO_SEND_MARKER
+            val outpoints = if (auto) {
+                emptyList()
+            } else {
+                route.address.orEmpty()
+                    .split(",")
+                    .filter { it.isNotBlank() }
+            }
+            if (chainState == null || signerId == null || (!auto && outpoints.isEmpty())) {
                 // No signer to send from, or no coins carried on the route (a
                 // stack restored from a build that saved a Send route before the
                 // selection was put on it). Restart at Home rather than show an
-                // empty send form.
+                // empty send form. The automatic path carries no coins, so it is
+                // not held to that rule.
                 LaunchedEffect(route) { nav.reset() }
             } else {
                 SendScreen(
                     state = chainState,
                     outpoints = outpoints,
+                    auto = auto,
+                    // The way back to the manual picker: the same signer's UTXO
+                    // list, where a selection can be made by hand exactly as it
+                    // always could.
+                    onChooseManually = { nav.push(Route(Screen.SIGNER_UTXOS, signerId = signerId)) },
                     onBack = { nav.pop() },
                 )
             }
