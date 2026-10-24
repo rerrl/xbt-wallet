@@ -2,7 +2,10 @@ package com.xbtwallet.app.ui.home
 
 import com.xbtwallet.app.data.KeyValueStore
 import com.xbtwallet.app.data.ServerSettings
+import com.xbtwallet.app.data.Signer
+import com.xbtwallet.app.data.SignerOrigin
 import com.xbtwallet.app.data.SignerStore
+import com.xbtwallet.app.data.SignerType
 import com.xbtwallet.app.electrum.ElectrumProtocol
 import com.xbtwallet.app.electrum.ElectrumServer
 import com.xbtwallet.app.electrum.TorPhase
@@ -14,6 +17,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -629,6 +633,84 @@ class HomeScreenStateTest {
         }
 
         assertEquals(ServerStatus.CONNECTED, fixture.state.serverStatus)
+    }
+
+    // --- the remove-wallet confirmation copy ---------------------------------
+    //
+    // The dialog is the last thing between a tap and a wallet that is gone, and
+    // what it may honestly say depends on what is actually stored. Both
+    // sentences are pinned verbatim here — the hot one especially, because it is
+    // the only warning a user gets before a seed they have not written down is
+    // destroyed.
+
+    private fun watchOnlySigner() = Signer(
+        id = "w",
+        name = "Cold storage",
+        type = SignerType.WatchOnlyXpub(
+            xpub = "zpub6x",
+            masterFingerprint = "73c5da0a",
+            derivationPath = "84'/0'/0'",
+        ),
+        createdAtEpochSeconds = 0L,
+        importedVia = SignerOrigin.SEEDSIGNER_UR,
+    )
+
+    private fun hotSigner() = Signer(
+        id = "h",
+        name = "Hot wallet",
+        type = SignerType.HotSeed(
+            xpub = "zpub6x",
+            masterFingerprint = "73c5da0a",
+            hasPassphrase = false,
+        ),
+        createdAtEpochSeconds = 0L,
+        importedVia = SignerOrigin.HOT,
+    )
+
+    @Test
+    fun `the watch-only delete copy is unchanged`() {
+        assertEquals(
+            "\u201cCold storage\u201d will be removed from this phone. Only the public key is " +
+                "stored here, so nothing is deleted on the signer itself \u2014 you can add it " +
+                "back any time.",
+            removeWalletConfirmText(watchOnlySigner()),
+        )
+    }
+
+    @Test
+    fun `the hot delete copy is the locked wording, verbatim`() {
+        assertEquals(
+            "\u201cHot wallet\u201d will be removed from this phone, including its seed. Without " +
+                "your written-down recovery words the coins in this wallet are gone forever.",
+            removeWalletConfirmText(hotSigner()),
+        )
+    }
+
+    @Test
+    fun `the hot copy warns about the seed, and never claims nothing is lost`() {
+        val hot = removeWalletConfirmText(hotSigner())
+        val watchOnly = removeWalletConfirmText(watchOnlySigner())
+
+        assertTrue("the two wallets must not get the same sentence", hot != watchOnly)
+        assertTrue(hot.contains("including its seed"))
+        assertTrue(hot.contains("the coins in this wallet are gone forever"))
+        assertFalse(
+            "the watch-only reassurance is false for a hot wallet",
+            hot.contains("nothing is deleted"),
+        )
+        // …and the watch-only copy keeps its own reassurance, which *is* true for
+        // a wallet that only ever stored a public key.
+        assertTrue(watchOnly.contains("nothing is deleted on the signer itself"))
+        assertFalse(watchOnly.contains("including its seed"))
+    }
+
+    @Test
+    fun `the copy names the wallet it is about`() {
+        assertEquals(
+            "\u201cSavings\u201d will be removed from this phone, including its seed. Without your " +
+                "written-down recovery words the coins in this wallet are gone forever.",
+            removeWalletConfirmText(hotSigner().copy(name = "Savings")),
+        )
     }
 
     private companion object {

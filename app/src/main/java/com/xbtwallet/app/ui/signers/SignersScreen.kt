@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerType
 import com.xbtwallet.app.ui.theme.XbtDeviceTagDark
+import com.xbtwallet.app.ui.theme.XbtHotTagDark
 import com.xbtwallet.app.ui.theme.XbtPrimary
 
 /**
@@ -121,6 +122,7 @@ internal fun TypeBadge(
             // orange (or blue), and the label colour carries the contrast.
             SignerTagAccent.ORANGE -> XbtPrimary.copy(alpha = 0.16f)
             SignerTagAccent.DEVICE -> XbtDeviceTagDark.copy(alpha = 0.16f)
+            SignerTagAccent.HOT -> XbtHotTagDark.copy(alpha = 0.16f)
         },
         modifier = modifier,
     ) {
@@ -131,6 +133,7 @@ internal fun TypeBadge(
                 SignerTagAccent.NEUTRAL -> MaterialTheme.colorScheme.onSurfaceVariant
                 SignerTagAccent.ORANGE -> XbtPrimary
                 SignerTagAccent.DEVICE -> XbtDeviceTagDark
+                SignerTagAccent.HOT -> XbtHotTagDark
             },
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
         )

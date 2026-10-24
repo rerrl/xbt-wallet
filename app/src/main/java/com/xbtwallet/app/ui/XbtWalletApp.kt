@@ -17,6 +17,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.xbtwallet.app.data.AppSettingsStore
+import com.xbtwallet.app.data.KeystoreSeedVault
 import com.xbtwallet.app.data.SavedServersStore
 import com.xbtwallet.app.data.ServerSettingsStore
 import com.xbtwallet.app.data.SharedPreferencesKeyValueStore
@@ -136,7 +137,17 @@ enum class Screen { HOME, SERVER, SETTINGS, ABOUT, ADD_SIGNER, SIGNING_DEVICE_CH
 fun XbtWalletApp() {
     val context = LocalContext.current
     val serverStore = remember(context) { ServerSettingsStore(context) }
-    val signerStore = remember(context) { SignerStore(SharedPreferencesKeyValueStore(context)) }
+    // The hot-wallet seed vault: an Android-keystore key per hot signer, and the
+    // encrypted blobs in the same prefs file as everything else (under their own
+    // `hotseed.*` keys). Built here so the one store that can delete a signer
+    // record also has the vault that holds its seed; nothing else needs it yet —
+    // the create/import screens of the next phase will.
+    val seedVault = remember(context) {
+        KeystoreSeedVault(context, SharedPreferencesKeyValueStore(context))
+    }
+    val signerStore = remember(context) {
+        SignerStore(SharedPreferencesKeyValueStore(context), seedVault = seedVault)
+    }
     // One snapshot store for the app: same prefs file as the signer list, its own
     // `snapshot_<id>` keys. Held here so the chain state below can both seed from
     // it and save back to it, and so the delete path can clear a signer's cache.

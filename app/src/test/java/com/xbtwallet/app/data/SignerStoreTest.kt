@@ -739,4 +739,227 @@ class SignerStoreTest {
         assertTrue(SignerStore(backing).list().isEmpty())
         assertNull(backing.map[SignerStore.STORAGE_KEY])
     }
+
+    // --- hot wallets ---------------------------------------------------------
+    //
+    // The second kind of signer: the phone holds the seed. Two new jobs fall out
+    // of that — writing and reading a `hot` record, and taking the seed out of
+    // the vault when the wallet is deleted — and both are additive. Everything
+    // above this line must keep behaving exactly as it did, so the watch-only
+    // cases are re-run beside a hot record rather than replaced by one.
+
+    /** A store wired to a vault, with a deterministic id and clock. */
+    private fun hotStore(
+        backing: InMemoryStore,
+        vault: SeedVault,
+        id: String = "hot-1",
+    ) = SignerStore(
+        storage = backing,
+        now = { 1_700_000_000L },
+        newId = { id },
+        seedVault = vault,
+    )
+
+    @Test
+    fun `addHot writes a hot record with the origin stamped`() {
+        val backing = InMemoryStore()
+        val signer = hotStore(backing, FakeSeedVault()).addHot(
+            name = "Hot wallet",
+            xpub = "zpub6hot",
+            masterFingerprint = "73c5da0a",
+            hasPassphrase = true,
+        )
+
+        assertEquals(
+            SignerType.HotSeed(
+                xpub = "zpub6hot",
+                masterFingerprint = "73c5da0a",
+                derivationPath = "84'/0'/0'",
+                hasPassphrase = true,
+            ),
+            signer.type,
+        )
+        assertEquals(SignerOrigin.HOT, signer.importedVia)
+        assertEquals("hot", signer.typeLabel)
+    }
+
+    @Test
+    fun `a hot record round-trips through storage`() {
+        val backing = InMemoryStore()
+        hotStore(backing, FakeSeedVault()).addHot(
+            name = "Hot wallet",
+            xpub = "zpub6hot",
+            masterFingerprint = "73c5da0a",
+            hasPassphrase = false,
+        )
+
+        // A fresh store — over the same bytes, with no vault at all — reads it
+        // back as itself: the record is self-describing, so nothing but the
+        // delete path ever needs the vault.
+        val reloaded = SignerStore(backing).list().single()
+        assertEquals(
+            SignerType.HotSeed("zpub6hot", "73c5da0a", "84'/0'/0'", hasPassphrase = false),
+            reloaded.type,
+        )
+        assertEquals(SignerOrigin.HOT, reloaded.importedVia)
+        assertEquals("hot", reloaded.typeLabel)
+    }
+
+    @Test
+    fun `the hot blob spells out every field, including the origin`() {
+        val backing = InMemoryStore()
+        hotStore(backing, FakeSeedVault()).addHot("Hot wallet", "zpub6hot", "73c5da0a", hasPassphrase = true)
+
+        val json = backing.map[SignerStore.STORAGE_KEY].orEmpty()
+        assertTrue(json.contains("\"type\":\"hot\""))
+        assertTrue(json.contains("\"masterFingerprint\":\"73c5da0a\""))
+        assertTrue(json.contains("\"derivationPath\":\"84'/0'/0'\""))
+        assertTrue(json.contains("\"hasPassphrase\":true"))
+        // Unlike a text-QR record, a hot one writes its origin even though the
+        // writer would normally omit a value it considers the default: "hot" is
+        // not the default, and the blob should say what it is rather than leave
+        // the reader to infer it from the type tag.
+        assertTrue(json.contains("\"importedVia\":\"hot\""))
+    }
+
+    @Test
+    fun `addHot trims the name and the key material and defaults the path`() {
+        val backing = InMemoryStore()
+        val signer = hotStore(backing, FakeSeedVault()).addHot(
+            name = "  Hot wallet  ",
+            xpub = "  zpub6hot\n",
+            masterFingerprint = " 73c5da0a ",
+            hasPassphrase = false,
+        )
+
+        assertEquals("Hot wallet", signer.name)
+        val type = signer.type as SignerType.HotSeed
+        assertEquals("zpub6hot", type.xpub)
+        assertEquals("73c5da0a", type.masterFingerprint)
+        assertEquals("84'/0'/0'", type.derivationPath)
+    }
+
+    @Test
+    fun `a hot signer is signing-ready by construction`() {
+        val backing = InMemoryStore()
+        val signer = hotStore(backing, FakeSeedVault()).addHot("Hot", "zpub6hot", "73c5da0a", hasPassphrase = true)
+
+        // Nothing is asked of a hot record before it can sign: the seed is in the
+        // vault by the time the record exists (see provisioning), so a fingerprint
+        // and a path are not what decides it here.
+        assertTrue(signer.signingReady)
+        assertTrue(SignerStore(backing).list().single().signingReady)
+
+        // Even the degenerate case — a hot record whose origin says something
+        // else — is signing-ready, because the *type* is what says the seed is
+        // here. Such a record cannot be produced by this build.
+        val odd = Signer(
+            id = "a",
+            name = "Hot",
+            type = SignerType.HotSeed("zpub6hot", "73c5da0a", hasPassphrase = true),
+            createdAtEpochSeconds = 0L,
+            importedVia = SignerOrigin.TEXT_QR,
+        )
+        assertTrue(odd.signingReady)
+    }
+
+    /** An old watch-only blob — no metadata, no origin — beside a new hot one. */
+    @Test
+    fun `a pre-existing watch-only record is unchanged by a hot neighbour`() {
+        val backing = InMemoryStore()
+        backing.putString(
+            SignerStore.STORAGE_KEY,
+            """{"signers":[{"id":"old","name":"Cold","type":"watch-only","xpub":"zpub6old","createdAt":7}]}""",
+        )
+
+        val store = hotStore(backing, FakeSeedVault(), id = "hot-1")
+        val before = store.list().single()
+        store.addHot("Hot wallet", "zpub6hot", "73c5da0a", hasPassphrase = false)
+
+        val reloaded = SignerStore(backing).list()
+        assertEquals(listOf("Cold", "Hot wallet"), reloaded.map { it.name })
+        // The old record is exactly what it was: same type, no metadata invented,
+        // and still not signing-ready.
+        assertEquals(before, reloaded.first())
+        assertNull((reloaded.first().type as SignerType.WatchOnlyXpub).masterFingerprint)
+        assertFalse(reloaded.first().signingReady)
+        assertEquals(SignerOrigin.TEXT_QR, reloaded.first().importedVia)
+    }
+
+    /**
+     * The skip rule, restated for the new shape: a `hot` record that does not
+     * name a key is skipped rather than loaded half-formed, exactly as a
+     * watch-only record without an xpub is.
+     */
+    @Test
+    fun `a hot record without a fingerprint is skipped, not guessed at`() {
+        val backing = InMemoryStore()
+        backing.putString(
+            SignerStore.STORAGE_KEY,
+            """{"signers":[{"id":"a","name":"no fingerprint","type":"hot","xpub":"zpub6hot","createdAt":1},""" +
+                """{"id":"b","name":"no xpub","type":"hot","masterFingerprint":"73c5da0a","createdAt":1},""" +
+                """{"id":"c","name":"good","type":"hot","xpub":"zpub6good","masterFingerprint":"73c5da0a","createdAt":1}]}""",
+        )
+
+        // Only the record that names a key survives; the two half-formed ones are
+        // dropped rather than loaded with a null where an xpub should be.
+        val signers = SignerStore(backing).list()
+        assertEquals(listOf("good"), signers.map { it.name })
+    }
+
+    @Test
+    fun `delete purges the vault for a hot signer`() {
+        val backing = InMemoryStore()
+        val vault = FakeSeedVault()
+        val store = hotStore(backing, vault)
+        val hot = store.addHot("Hot wallet", "zpub6hot", "73c5da0a", hasPassphrase = false)
+        vault.store(hot.id, ByteArray(16) { 7 })
+
+        assertTrue(store.delete(hot.id))
+
+        // The seed goes with the record: this is the destructive half of the
+        // delete, and the confirmation copy for a hot wallet says so.
+        assertEquals(listOf(hot.id), vault.deleted)
+        assertFalse(vault.has(hot.id))
+        assertNull(vault.load(hot.id))
+        assertTrue(store.list().isEmpty())
+    }
+
+    @Test
+    fun `delete touches the vault not at all for a watch-only signer`() {
+        val backing = InMemoryStore()
+        val vault = FakeSeedVault()
+        val store = hotStore(backing, vault)
+        val cold = store.add("Cold storage", "zpub6cold")
+
+        assertTrue(store.delete(cold.id))
+
+        // "Nothing is deleted on the signer itself" is only true if nothing was
+        // touched here — and a call the vault never received is the proof.
+        assertTrue(vault.deleted.isEmpty())
+        assertTrue(vault.stores.isEmpty())
+    }
+
+    @Test
+    fun `a store with no vault still deletes a hot signer`() {
+        // The vault is optional so that every watch-only test can stay a store
+        // over a map; a hot record reaching such a store must not crash.
+        val backing = InMemoryStore()
+        backing.putString(
+            SignerStore.STORAGE_KEY,
+            """{"signers":[{"id":"hot-1","name":"Hot","type":"hot","xpub":"zpub6hot","masterFingerprint":"73c5da0a","derivationPath":"84'/0'/0'","hasPassphrase":false,"importedVia":"hot","createdAt":1}]}""",
+        )
+
+        assertTrue(SignerStore(backing).delete("hot-1"))
+        assertTrue(SignerStore(backing).list().isEmpty())
+    }
+
+    @Test
+    fun `the hot origin reads back from its stored value`() {
+        assertEquals(SignerOrigin.HOT, SignerOrigin.fromStorage("hot"))
+        assertEquals("hot", SignerOrigin.HOT.storageValue)
+        // And it is not the default an unknown value falls back to.
+        assertTrue(SignerOrigin.HOT != SignerOrigin.TEXT_QR)
+        assertEquals(SignerOrigin.TEXT_QR, SignerOrigin.fromStorage("something-new"))
+    }
 }

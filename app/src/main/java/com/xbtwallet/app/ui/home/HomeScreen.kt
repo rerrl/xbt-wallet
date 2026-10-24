@@ -40,6 +40,7 @@ import com.xbtwallet.app.data.KeyValueStore
 import com.xbtwallet.app.data.ServerSettings
 import com.xbtwallet.app.data.Signer
 import com.xbtwallet.app.data.SignerStore
+import com.xbtwallet.app.data.SignerType
 import com.xbtwallet.app.electrum.ElectrumClient
 import com.xbtwallet.app.electrum.ElectrumProtocol
 import com.xbtwallet.app.electrum.ElectrumRouting
@@ -500,6 +501,38 @@ class HomeScreenState(
 }
 
 /**
+ * The body of the *Remove wallet?* confirmation, for the wallet being removed.
+ *
+ * The screen asks two different questions depending on what is actually on the
+ * phone, and the difference is the whole point of the split:
+ *
+ * - A **watch-only or signing-device** wallet stores a public key and nothing
+ *   else, so removing it costs the user a re-import and no coins. The copy says
+ *   so, and has said so since the dialog existed.
+ * - A **hot wallet** stores its seed here. The same sentence would be false for
+ *   it, and dangerously so — the user would tap *Remove* believing the coins are
+ *   safe on some device and only the watch-only convenience is being deleted,
+ *   when in fact the wallet is being destroyed unless the words are written
+ *   down. So a hot wallet gets its own sentence, and it does not soften it.
+ *
+ * Kept as a pure function of the record, out of the composable, so both strings
+ * can be pinned verbatim by a JVM test rather than only by the eye. The strings
+ * are Andrew's, locked: the hot one is reproduced character for character,
+ * including the curly quotes around the name and the em dash in the watch-only
+ * one.
+ */
+internal fun removeWalletConfirmText(signer: Signer): String = when (signer.type) {
+    is SignerType.HotSeed ->
+        "\u201c${signer.name}\u201d will be removed from this phone, including its seed. " +
+            "Without your written-down recovery words the coins in this wallet are gone forever."
+
+    is SignerType.WatchOnlyXpub ->
+        "\u201c${signer.name}\u201d will be removed from this phone. " +
+            "Only the public key is stored here, so nothing is deleted on " +
+            "the signer itself \u2014 you can add it back any time."
+}
+
+/**
  * Remembers a [HomeScreenState] for the app's lifetime.
  *
  * Held at the navigation level rather than inside [HomeScreen] so it survives
@@ -536,9 +569,10 @@ fun rememberHomeScreenState(
  *
  * **The standalone Wallets page is gone.** The list lives here now: a wallet row
  * opens that wallet's own screen, and removing one lives on the row's ⋮ overflow
- * menu — *Remove wallet*, then a two-step confirm — because a watch-only xpub is
- * the only record of an account on this phone, so a stray tap must not be able
- * to lose it. The old Home elements (the Preferences switch, the Server button,
+ * menu — *Remove wallet*, then a two-step confirm — because for a watch-only
+ * wallet that xpub is the only record of the account on this phone, and for a
+ * hot wallet the delete takes the seed with it, so a stray tap must not be able
+ * to lose either. The old Home elements (the Preferences switch, the Server button,
  * the Wallets button and the footer tagline) are gone with it; the Preferences
  * switch and the Server entry point are on Settings now.
  *
@@ -718,11 +752,10 @@ fun HomeScreen(
             onDismissRequest = { confirmingDeleteId = null },
             title = { Text("Remove wallet?") },
             text = {
-                Text(
-                    "\u201c${pendingDelete.name}\u201d will be removed from this phone. " +
-                        "Only the public key is stored here, so nothing is deleted on " +
-                        "the signer itself \u2014 you can add it back any time.",
-                )
+                // Two sentences, chosen by what is actually stored for this
+                // wallet — a hot wallet's seed is on this phone and the dialog
+                // must say so. See [removeWalletConfirmText].
+                Text(removeWalletConfirmText(pendingDelete))
             },
             confirmButton = {
                 TextButton(

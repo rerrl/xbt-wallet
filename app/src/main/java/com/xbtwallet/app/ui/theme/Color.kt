@@ -21,3 +21,11 @@ val XbtWarningDark = Color(0xFFE0A800) // non-fatal warnings, never the success 
 // SeedSigner and from the grey that means a plain text xpub, and never mistakable
 // for the green/amber/red of a status.
 val XbtDeviceTagDark = Color(0xFF5B9BD5) // steel blue
+
+// The tag accent for a hot wallet — a seed on this phone. Amber, and the one tag
+// that is a caution rather than a description of where a key lives: this wallet
+// can be spent from the device in the user's hand. Distinct from the bitcoin
+// orange that the SeedSigner tag wears (and from XbtWarningDark above, which is a
+// status colour and means "something needs attention"), so the two tags cannot be
+// mistaken for each other at a glance.
+val XbtHotTagDark = Color(0xFFFFB300) // amber
