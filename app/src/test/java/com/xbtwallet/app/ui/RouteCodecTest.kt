@@ -145,4 +145,34 @@ class RouteCodecTest {
         assertEquals(Route(Screen.HOME), Route.decode("NOT_A_SCREEN"))
         assertEquals(Route(Screen.HOME), Route.decode(""))
     }
+
+    /**
+     * The two screens the dice-create walk added carry nothing at all: they are
+     * bare names, before and after a round trip, and no argument of any kind
+     * rides them.
+     *
+     * That is the point of the phase rather than an accident of it: the recovery
+     * words and the passphrase are the two things this walk produces, and a route
+     * is saved state — written to the instance-state bundle and kept across a
+     * process restart. There is deliberately nowhere on the route for them to sit.
+     */
+    @Test
+    fun `the create walk's new screens encode as bare names with no argument`() {
+        val walk = listOf(Screen.HOT_WALLET_BACKUP, Screen.HOT_WALLET_FINISH)
+
+        walk.forEach { screen ->
+            val route = Route(screen)
+
+            assertEquals("a bare screen name, and nothing after it", screen.name, route.encode())
+            assertEquals(route, Route.decode(route.encode()))
+            assertNull("no signer on this route", route.signerId)
+            assertNull("no address on this route", route.address)
+            assertNull("no origin on this route", route.origin)
+        }
+
+        assertEquals("HOT_WALLET_BACKUP", Route(Screen.HOT_WALLET_BACKUP).encode())
+        assertEquals("HOT_WALLET_FINISH", Route(Screen.HOT_WALLET_FINISH).encode())
+        assertEquals(Route(Screen.HOT_WALLET_BACKUP), Route.decode("HOT_WALLET_BACKUP"))
+        assertEquals(Route(Screen.HOT_WALLET_FINISH), Route.decode("HOT_WALLET_FINISH"))
+    }
 }

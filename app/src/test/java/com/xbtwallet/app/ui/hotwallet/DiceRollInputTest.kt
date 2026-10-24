@@ -132,4 +132,32 @@ class DiceRollInputTest {
         assertFalse("but not for twenty-four", twentyFour.isFull)
         assertEquals(50, twentyFour.count)
     }
+
+    /**
+     * The exact boundary, one roll either side, for both counts the app offers:
+     * 49 rolls are not a 12-word seed and 50 are; 98 are not a 24-word seed and
+     * 99 are. This is the rule the dice screen's *Create wallet* button is
+     * enabled by, so an off-by-one here would either refuse a complete roll or
+     * offer to derive words from an incomplete one.
+     */
+    @Test
+    fun `the input is full at exactly the fifty and ninety-nine roll marks`() {
+        val twelve = DiceRollInput(DiceRollInput.targetRollsFor(12))
+        repeat(49) { twelve.append(1 + it % 6) }
+        assertEquals(49, twelve.count)
+        assertFalse("49 rolls are one short of twelve words", twelve.isFull)
+
+        twelve.append(6)
+        assertEquals(50, twelve.count)
+        assertTrue("50 rolls make twelve words", twelve.isFull)
+
+        val twentyFour = DiceRollInput(DiceRollInput.targetRollsFor(24))
+        repeat(98) { twentyFour.append(1 + it % 6) }
+        assertEquals(98, twentyFour.count)
+        assertFalse("98 rolls are one short of twenty-four words", twentyFour.isFull)
+
+        twentyFour.append(6)
+        assertEquals(99, twentyFour.count)
+        assertTrue("99 rolls make twenty-four words", twentyFour.isFull)
+    }
 }

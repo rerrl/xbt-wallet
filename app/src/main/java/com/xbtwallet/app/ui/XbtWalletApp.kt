@@ -17,6 +17,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.xbtwallet.app.data.AppSettingsStore
+import com.xbtwallet.app.data.HotWalletProvisioner
 import com.xbtwallet.app.data.KeystoreSeedVault
 import com.xbtwallet.app.data.SavedServersStore
 import com.xbtwallet.app.data.ServerSettingsStore
@@ -28,8 +29,11 @@ import com.xbtwallet.app.data.SnapshotStore
 import com.xbtwallet.app.ui.about.AboutScreen
 import com.xbtwallet.app.ui.home.HomeScreen
 import com.xbtwallet.app.ui.home.rememberHomeScreenState
+import com.xbtwallet.app.ui.hotwallet.HotWalletBackupScreen
+import com.xbtwallet.app.ui.hotwallet.HotWalletCreateFlow
 import com.xbtwallet.app.ui.hotwallet.HotWalletCreateScreen
 import com.xbtwallet.app.ui.hotwallet.HotWalletDiceScreen
+import com.xbtwallet.app.ui.hotwallet.HotWalletFinishScreen
 import com.xbtwallet.app.ui.hotwallet.HotWalletImportScreen
 import com.xbtwallet.app.ui.hotwallet.HotWalletImportWordsScreen
 import com.xbtwallet.app.ui.hotwallet.hotWalletWordCount
@@ -67,7 +71,30 @@ import kotlinx.coroutines.launch
  * name, not a route); it rides in the [Route] that carries this screen onto the
  * back stack, so each level remembers its own argument. See [NavStack].
  */
-enum class Screen { HOME, SERVER, SETTINGS, ABOUT, ADD_SIGNER, SIGNING_DEVICE_CHOICE, IMPORT_XPUB, ADD_SIGNING_DEVICE, HOT_WALLET_CREATE, HOT_WALLET_DICE, HOT_WALLET_IMPORT, HOT_WALLET_IMPORT_WORDS, SIGNER_DETAIL, SIGNER_UTXOS, SIGNER_ADDRESSES, RECEIVE, SEND }
+enum class Screen { HOME, SERVER, SETTINGS, ABOUT, ADD_SIGNER, SIGNING_DEVICE_CHOICE, IMPORT_XPUB, ADD_SIGNING_DEVICE, HOT_WALLET_CREATE, HOT_WALLET_DICE, HOT_WALLET_BACKUP, HOT_WALLET_FINISH, HOT_WALLET_IMPORT, HOT_WALLET_IMPORT_WORDS, SIGNER_DETAIL, SIGNER_UTXOS, SIGNER_ADDRESSES, RECEIVE, SEND }
+
+/**
+ * The screens the create-hot-wallet walk passes through, dice first.
+ *
+ * The walk's intermediate secrets — the recovery words and the passphrase — live
+ * in one in-memory holder rather than in the composition of any one screen
+ * ([HotWalletCreateFlow]), because the user has to walk through several of these
+ * screens while the words are still only in memory. This set is what says how
+ * far that memory is allowed to reach: while *any* of these is the current
+ * screen the holder is kept, and the moment one of them is left for a screen
+ * outside the set the holder is wiped (see the [DisposableEffect] in
+ * [XbtWalletApp]).
+ *
+ * The dice screen belongs to the set even though it holds no words yet: a walk
+ * out of it is a walk out of the flow, and including it keeps the
+ * [DisposableEffect]'s key from flickering as the dice screen hands its words to
+ * the backup screen one screen later.
+ */
+internal val HOT_WALLET_CREATE_FLOW_SCREENS = setOf(
+    Screen.HOT_WALLET_DICE,
+    Screen.HOT_WALLET_BACKUP,
+    Screen.HOT_WALLET_FINISH,
+)
 
 /**
  * The app's navigation and its shared stores.
@@ -119,11 +146,14 @@ enum class Screen { HOME, SERVER, SETTINGS, ABOUT, ADD_SIGNER, SIGNING_DEVICE_CH
  * - **Hot wallet** pushes [Screen.HOT_WALLET_CREATE] (dice rolls) or
  *   [Screen.HOT_WALLET_IMPORT] (an existing seed). The dice path then opens
  *   [Screen.HOT_WALLET_DICE], which carries no argument: it asks for its own
- *   12/24 word count. The import path asks for the word count first and then
- *   opens [Screen.HOT_WALLET_IMPORT_WORDS] with it on the route's free-form
- *   `address` slot. **These screens are UI scaffolding for the ratified
- *   hot-wallet phase: they create, import and store no key material, and their
- *   terminal buttons are disabled.**
+ *   12/24 word count, turns the rolls into recovery words and hands them to the
+ *   shared [HotWalletCreateFlow], and walks on to [Screen.HOT_WALLET_BACKUP]
+ *   (the words, shown once) and [Screen.HOT_WALLET_FINISH] (a name and an
+ *   optional passphrase), where [HotWalletProvisioner] stores the entropy in the
+ *   keystore-backed vault and creates the signer. **The import path is still UI
+ *   scaffolding: it asks for its word count first, opens
+ *   [Screen.HOT_WALLET_IMPORT_WORDS] with it on the route's free-form `address`
+ *   slot, and its terminal button stays disabled.**
  * - **Watch only** pushes [Screen.IMPORT_XPUB].
  *
  * So back from any form returns to the screen that sent you there. The add paths
@@ -131,7 +161,15 @@ enum class Screen { HOME, SERVER, SETTINGS, ABOUT, ADD_SIGNER, SIGNING_DEVICE_CH
  * resets the stack to HOME rather than pushing on top of the form: the wallet list
  * lives on Home now, so the new wallet is immediately visible where the add most
  * often starts, and a back press from there leaves the app rather than reopening a
- * form that has already been submitted.
+ * form that has already been submitted. The dice path lands the same way, for the
+ * same reason, once provisioning succeeds.
+ *
+ * **The dice path's secrets never ride the stack.** Routes are saved state
+ * ([NavStack.Saver]), so the recovery words and the passphrase — the two strings
+ * this walk produces — are kept in one `remember {}`-scoped
+ * [HotWalletCreateFlow] instead: it survives recomposition and rotation, dies
+ * with the process, and is wiped after a successful provision and again the
+ * moment the walk is left unfinished ([HOT_WALLET_CREATE_FLOW_SCREENS]).
  */
 @Composable
 fun XbtWalletApp() {
@@ -161,6 +199,21 @@ fun XbtWalletApp() {
     val savedServersStore = remember(context) {
         SavedServersStore(SharedPreferencesKeyValueStore(context))
     }
+    // The one thing that turns recovery words into a stored wallet: derived
+    // account, entropy into the vault, signer record. Built once here, beside
+    // the stores it writes through, and handed to the finish screen — it holds
+    // no state of its own beyond them, so a second instance would buy nothing.
+    val hotWalletProvisioner = remember(signerStore, seedVault) {
+        HotWalletProvisioner(signerStore, seedVault)
+    }
+    // The create walk's intermediate secrets — the recovery words and the
+    // passphrase — and nowhere else. A plain `remember`, deliberately **not**
+    // `rememberSaveable`: the navigation stack *is* saved state, and these two
+    // strings must not be in it. Plain remember survives recomposition and
+    // rotation and dies with the process, so a process death mid-walk starts the
+    // walk over with nothing stored; the wipe-on-abandon effect below covers the
+    // case where the user simply walks away.
+    val hotWalletFlow = remember { HotWalletCreateFlow() }
 
     val homeState = rememberHomeScreenState(signerStore, serverStore)
 
@@ -168,6 +221,22 @@ fun XbtWalletApp() {
     // the one destination the `when` below renders.
     val nav = rememberSaveable(saver = NavStack.Saver) { NavStack() }
     val route = nav.current
+
+    // --- Wipe the create walk's secrets when the walk is left ---------------
+    //
+    // The words and the passphrase exist only in `hotWalletFlow`, and they are
+    // only needed while a create-flow screen is on display. Keyed on *whether*
+    // such a screen is current, so walking dice → backup → finish never disposes
+    // it (all three are in the set) and a successful provision — which clears the
+    // flow itself and then resets the stack to HOME — simply clears it a second
+    // time, which is why `clear` is idempotent. The value is captured in a local
+    // because `onDispose` runs after `route` has already moved on: what matters
+    // is whether the flow was *in* use, not where the user landed.
+    val inHotWalletCreateFlow = route.screen in HOT_WALLET_CREATE_FLOW_SCREENS
+    DisposableEffect(inHotWalletCreateFlow) {
+        val wasInFlow = inHotWalletCreateFlow
+        onDispose { if (wasInFlow) hotWalletFlow.clear() }
+    }
 
     // The app-scoped scope the per-signer scans run in. Deliberately *not* the
     // composition's: a scan must keep running while the user navigates away from
@@ -355,24 +424,73 @@ fun XbtWalletApp() {
             onBack = { nav.pop() },
         )
 
-        // --- The hot-wallet walk: UI scaffolding, no key material ------------
+        // --- The hot-wallet walk --------------------------------------------
         //
         // The dice path carries no argument at all: the dice screen owns the
         // 12/24 word-count choice, so the create screen's one button pushes a
-        // bare route. The import path still asks for the word count first, and
-        // it rides the route's free-form `address` slot as "12" or "24" — the
-        // same segment Send uses for its selected outpoints — so no codec change
-        // was needed. A route that arrives without one of those two values (a
-        // saved stack from a build that had no such screen, say) restarts at
-        // Home rather than rendering a word-entry screen with no idea how many
-        // words to expect.
+        // bare route. Neither do the two screens after it — the walk's secrets
+        // ride the shared `hotWalletFlow`, never the route (see that class). The
+        // import path still asks for the word count first, and it rides the
+        // route's free-form `address` slot as "12" or "24" — the same segment
+        // Send uses for its selected outpoints — so no codec change was needed.
+        // A route that arrives without one of those two values (a saved stack
+        // from a build that had no such screen, say) restarts at Home rather
+        // than rendering a word-entry screen with no idea how many words to
+        // expect; the two create-path screens after the dice guard the same way
+        // on a missing mnemonic (a stack restored after process death mid-walk,
+        // which is exactly when the flow is empty).
 
         Screen.HOT_WALLET_CREATE -> HotWalletCreateScreen(
             onDiceRoll = { nav.push(Route(Screen.HOT_WALLET_DICE)) },
             onBack = { nav.pop() },
         )
 
-        Screen.HOT_WALLET_DICE -> HotWalletDiceScreen(onBack = { nav.pop() })
+        Screen.HOT_WALLET_DICE -> HotWalletDiceScreen(
+            flow = hotWalletFlow,
+            // The words are in the flow by the time this runs (the screen sets
+            // them first). Which screen comes next is the caller's business —
+            // that is what keeps the secrets off the route.
+            onCreateWallet = { nav.push(Route(Screen.HOT_WALLET_BACKUP)) },
+            onBack = { nav.pop() },
+        )
+
+        Screen.HOT_WALLET_BACKUP -> {
+            val words = hotWalletFlow.mnemonic
+            if (words == null) {
+                // No words to show: the walk was never started, or the process
+                // died mid-walk and the flow died with it. Restart at Home
+                // rather than show an empty backup screen. Keyed on the route so
+                // this fires once per bad entry.
+                LaunchedEffect(route) { nav.reset() }
+            } else {
+                HotWalletBackupScreen(
+                    words = words,
+                    onConfirm = { nav.push(Route(Screen.HOT_WALLET_FINISH)) },
+                    onBack = { nav.pop() },
+                )
+            }
+        }
+
+        Screen.HOT_WALLET_FINISH -> {
+            val words = hotWalletFlow.mnemonic
+            if (words == null) {
+                LaunchedEffect(route) { nav.reset() }
+            } else {
+                HotWalletFinishScreen(
+                    mnemonic = words,
+                    flow = hotWalletFlow,
+                    provisioner = hotWalletProvisioner,
+                    // The wallet exists by now. Re-read through the store so
+                    // Home shows it — amber "hot" tag and all — and reset the
+                    // stack, exactly as every other add path lands.
+                    onCreated = {
+                        homeState.refresh()
+                        nav.reset()
+                    },
+                    onBack = { nav.pop() },
+                )
+            }
+        }
 
         Screen.HOT_WALLET_IMPORT -> HotWalletImportScreen(
             onChooseWords = { words ->

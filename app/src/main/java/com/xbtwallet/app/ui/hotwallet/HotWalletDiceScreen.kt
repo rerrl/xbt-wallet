@@ -29,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.xbtwallet.app.crypto.DiceEntropy
 import com.xbtwallet.app.ui.OrangeOutlineButton
 import com.xbtwallet.app.ui.theme.XbtWalletTheme
 
@@ -49,12 +50,8 @@ internal const val HOT_WALLET_DICE_WORDS_24 = "24 words"
 /** The label of the button that removes the last roll. */
 internal const val HOT_WALLET_DICE_UNDO = "Undo"
 
-/** The terminal button, shown disabled because there is nothing behind it. */
+/** The terminal button: it derives the words and goes on to the backup step. */
 internal const val HOT_WALLET_DICE_CREATE_BUTTON = "Create wallet"
-
-/** The note saying why that button is disabled. */
-internal const val HOT_WALLET_CREATE_NOTE =
-    "Wallet creation is not wired up yet \u2014 this is a UI preview."
 
 /**
  * **Dice roll** — the dice-entry screen behind *Create hot wallet*.
@@ -73,18 +70,26 @@ internal const val HOT_WALLET_CREATE_NOTE =
  * simply frozen once rolling has begun.
  *
  * The digits are held only as the user's typed input. Nothing is rolled by the
- * phone, nothing is hashed, and **nothing is stored**: the rules of the input
- * live in [DiceRollInput] (plain Kotlin, pinned by a JVM test), while the screen
- * itself is stateless beyond that one remembered helper.
+ * phone and nothing is stored: the rules of the input live in [DiceRollInput]
+ * (plain Kotlin, pinned by a JVM test), while the screen itself is stateless
+ * beyond that one remembered helper.
  *
- * The terminal *Create wallet* button is deliberately `enabled = false` and the
- * note beneath it says why: this whole flow is UI scaffolding for the
- * hot-wallet phase, and the button will stay disabled until there is a real
- * implementation to wire it to.
+ * The terminal *Create wallet* button is live exactly when the input is full
+ * ([DiceRollInput.isFull] — 50 rolls for 12 words, 99 for 24). Tapping it turns
+ * the rolls into the recovery words and hands them to the shared
+ * [HotWalletCreateFlow], then goes on to the backup step that shows them. The
+ * words never touch the route: see [HotWalletCreateFlow] for why.
+ *
+ * @param flow the walk's in-memory holder for the words it derives.
+ * @param onCreateWallet navigation: on to the backup step. The caller pushes it;
+ *   this screen only says when.
+ * @param onBack the header's back affordance, one level up the walk.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HotWalletDiceScreen(
+    flow: HotWalletCreateFlow,
+    onCreateWallet: () -> Unit,
     onBack: () -> Unit,
 ) {
     // The count is this screen's own state now: 12 is the default, and the
@@ -196,22 +201,19 @@ fun HotWalletDiceScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // Disabled on purpose: there is nothing behind it yet.
+            // Live once every roll is in: it turns the rolls into the recovery
+            // words and hands them to the flow (never onto the route — the back
+            // stack is saved state), then the caller walks on to the backup step.
             Button(
-                onClick = {},
-                enabled = false,
+                onClick = {
+                    flow.setMnemonic(DiceEntropy.rollsToMnemonic(input.rolls))
+                    onCreateWallet()
+                },
+                enabled = input.isFull,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(HOT_WALLET_DICE_CREATE_BUTTON)
             }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = HOT_WALLET_CREATE_NOTE,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
 
             Spacer(modifier = Modifier.height(24.dp))
         }
@@ -247,6 +249,6 @@ private fun DiceKeyRow(digits: List<Int>, onDigit: (Int) -> Unit) {
 @Composable
 private fun HotWalletDiceScreenPreview() {
     XbtWalletTheme {
-        HotWalletDiceScreen(onBack = {})
+        HotWalletDiceScreen(flow = HotWalletCreateFlow(), onCreateWallet = {}, onBack = {})
     }
 }

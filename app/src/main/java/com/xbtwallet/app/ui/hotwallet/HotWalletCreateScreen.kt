@@ -33,9 +33,12 @@ import com.xbtwallet.app.ui.theme.XbtWalletTheme
  * asked on the dice screen itself, where the choice sits beside the count of
  * rolls it implies.
  *
- * **UI scaffolding only.** Nothing on this screen creates, derives or stores key
- * material; the steps after it are the dice input screen and, eventually, the
- * hot-wallet phase itself. The button here navigates, and that is all it does.
+ * **Where the walk goes.** The button here navigates to the dice screen; the
+ * dice rolls become the wallet's recovery words, which are shown once on the
+ * backup screen and then named and provisioned on the finish screen. None of
+ * those strings — neither the words nor a passphrase — travels on a route: the
+ * back stack is saved state, so they live in one in-memory holder instead
+ * ([HotWalletCreateFlow]). This screen itself only navigates.
  */
 
 /** The screen title. */
@@ -74,8 +77,8 @@ internal fun hotWalletWordCount(address: String?): Int? =
     address?.toIntOrNull()?.takeIf { it == 12 || it == 24 }
 
 /**
- * The `← Back` + title header the hot-wallet screens share, so the three of them
- * cannot drift apart on something as small as a spacer.
+ * The `← Back` + title header the hot-wallet screens share, so they cannot drift
+ * apart on something as small as a spacer.
  */
 @Composable
 internal fun HotWalletHeader(title: String, onBack: () -> Unit) {
