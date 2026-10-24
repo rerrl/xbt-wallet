@@ -1,6 +1,7 @@
 package com.xbtwallet.app.ui.signers
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -17,14 +18,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
-import com.xbtwallet.app.chain.ConfirmationBucket
 import com.xbtwallet.app.chain.TransactionDirection
 import com.xbtwallet.app.chain.TransactionRow
-import com.xbtwallet.app.chain.confirmationBucket
-import com.xbtwallet.app.chain.confirmationLabel
 import com.xbtwallet.app.chain.formatBlockTimestamp
 import com.xbtwallet.app.chain.hasUndatedConfirmedRows
 import kotlinx.coroutines.launch
@@ -43,7 +41,9 @@ import kotlinx.coroutines.launch
  *
  * Each row is the wallet's net effect — value in minus value out, change
  * excluded from the "out" side — with a confirmation badge; see
- * [TransactionRowItem]. Rows are static: no tap target, no detail view.
+ * [TransactionRowItem]. Tapping a row opens its detail screen, carrying only the
+ * txid on the navigation route; the detail screen reads the row back out of this
+ * same snapshot by that id.
  *
  * The list is capped at [MAX_TRANSACTIONS] rows, with a line saying so when the
  * account has more — a watch-only coordinator with years of history should not
@@ -53,7 +53,11 @@ import kotlinx.coroutines.launch
  * row by row (see [hasUndatedConfirmedRows]).
  */
 @Composable
-internal fun TransactionsSection(state: SignerChainState, modifier: Modifier = Modifier) {
+internal fun TransactionsSection(
+    state: SignerChainState,
+    onOpenTransaction: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Column(modifier = modifier.fillMaxWidth()) {
         Text(
             text = "Transactions",
@@ -70,7 +74,7 @@ internal fun TransactionsSection(state: SignerChainState, modifier: Modifier = M
                 "Connect a server to see this account's transactions.",
             )
             ChainPhase.ERROR -> TransactionsFailed(state)
-            ChainPhase.READY -> TransactionsReady(state)
+            ChainPhase.READY -> TransactionsReady(state, onOpenTransaction)
         }
     }
 }
@@ -84,7 +88,7 @@ internal fun TransactionsSection(state: SignerChainState, modifier: Modifier = M
  * the header's single spinner, not here.
  */
 @Composable
-private fun TransactionsReady(state: SignerChainState) {
+private fun TransactionsReady(state: SignerChainState, onOpenTransaction: (String) -> Unit) {
     val scope = rememberCoroutineScope()
     if (state.syncFailed) {
         Text(
@@ -108,7 +112,7 @@ private fun TransactionsReady(state: SignerChainState) {
         )
         Spacer(modifier = Modifier.height(6.dp))
     }
-    TransactionsList(transactions)
+    TransactionsList(transactions, onOpenTransaction)
 }
 
 @Composable
@@ -156,7 +160,10 @@ private fun TransactionsFailed(state: SignerChainState) {
 }
 
 @Composable
-private fun TransactionsList(transactions: List<TransactionRow>) {
+private fun TransactionsList(
+    transactions: List<TransactionRow>,
+    onOpenTransaction: (String) -> Unit,
+) {
     if (transactions.isEmpty()) {
         Text(
             text = "No transactions yet",
@@ -184,7 +191,9 @@ private fun TransactionsList(transactions: List<TransactionRow>) {
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        shown.forEach { transaction -> TransactionRowItem(transaction) }
+        shown.forEach { transaction ->
+            TransactionRowItem(transaction, onClick = { onOpenTransaction(transaction.txHash) })
+        }
         if (transactions.size > shown.size) {
             Text(
                 text = "Showing the latest ${shown.size} of ${transactions.size} transactions.",
@@ -200,13 +209,14 @@ private fun TransactionsList(transactions: List<TransactionRow>) {
  * came in, red when it went out), a confirmation badge on the right, and the
  * truncated txid underneath in monospace.
  *
- * The row is deliberately **not** interactive. The previous iteration made it
- * tap-to-copy; this one shows an amount, and a tap that copies a txid underneath
- * a number a user might be trying to read is a trap. There is no detail view to
- * expand into either — the card keeps rows at a glance.
+ * The row is a tap target that opens [TransactionDetailScreen] for that txid.
+ * The click carries only the id — the detail screen reads the row back out of
+ * the same snapshot — so a rotation or a restored back stack cannot replay a
+ * stale copy of a row's amount. The pressed state is the platform's ripple,
+ * the same convention as every other tappable row in the app.
  */
 @Composable
-private fun TransactionRowItem(transaction: TransactionRow) {
+private fun TransactionRowItem(transaction: TransactionRow, onClick: () -> Unit) {
     val tint = when (transaction.direction) {
         TransactionDirection.IN -> IncomingGreen
         TransactionDirection.OUT -> OutgoingRed
@@ -215,6 +225,8 @@ private fun TransactionRowItem(transaction: TransactionRow) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .clip(MaterialTheme.shapes.small)
+            .clickable(onClick = onClick)
             .background(tint.copy(alpha = 0.10f), MaterialTheme.shapes.small)
             .padding(horizontal = 8.dp, vertical = 6.dp),
     ) {
@@ -265,36 +277,5 @@ private fun transactionTimestampLabel(transaction: TransactionRow): String? = wh
     else -> null
 }
 
-/**
- * The confirmation count as a small badge: red for unconfirmed, amber for the
- * shallow 1–5 range, green once a transaction is six blocks deep. The text comes
- * from [confirmationLabel] and carries the real depth up to 99, then caps at
- * `100+ confs`, because past that the exact count stops mattering (and a wider
- * badge would break the row).
- */
-@Composable
-private fun ConfirmationBadge(confirmations: Int) {
-    val color = when (confirmationBucket(confirmations)) {
-        ConfirmationBucket.UNCONFIRMED -> OutgoingRed
-        ConfirmationBucket.SHALLOW -> PendingAmber
-        ConfirmationBucket.SETTLED -> IncomingGreen
-    }
-    Text(
-        text = confirmationLabel(confirmations),
-        style = MaterialTheme.typography.labelSmall,
-        fontFamily = FontFamily.Monospace,
-        color = color,
-        modifier = Modifier
-            .background(color.copy(alpha = 0.14f), MaterialTheme.shapes.small)
-            .padding(horizontal = 6.dp, vertical = 2.dp),
-    )
-}
-
 /** How many transactions the section lays out before it stops and says so. */
 private const val MAX_TRANSACTIONS = 50
-
-/** The row palette: in, out, and the amber of "mined but not settled". */
-private val IncomingGreen = Color(0xFF4CAF50)
-private val OutgoingRed = Color(0xFFFF6B6B)
-private val PendingAmber = Color(0xFFFFC107)
-private val NeutralGrey = Color(0xFFB6BCC4)

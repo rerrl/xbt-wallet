@@ -32,6 +32,10 @@ import com.xbtwallet.app.data.SignerOrigin
  *   separator and the segment needs no escaping. Keeping the selection on the
  *   route (rather than in shared state) is what makes a rotation on the Send
  *   screen land back on the same set of coins.
+ *   For [Screen.SIGNER_TRANSACTION_DETAIL] the same slot carries the **txid**
+ *   of the row that was tapped. The screen reads the row itself back out of the
+ *   current snapshot by that id; putting row data on a persisted route would
+ *   replay a stale amount after a refresh or a restore.
  * @property origin the import path the user *declared* by tapping a row of the
  *   Add-wallet chooser, carried onto the form that row opened. Only the two
  *   animated-BC-UR rows need it — both of them open the same scanner, and only
