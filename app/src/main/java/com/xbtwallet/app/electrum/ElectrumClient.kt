@@ -267,7 +267,21 @@ class ElectrumClient(
 
             var id = 0
 
-            val negotiated = rpc(++id, "server.version", listOf(CLIENT_NAME, PROTOCOL_VERSION), reader, writer)
+            // Advertise a [min, max] range rather than one version: a server
+            // that needs 1.8 refuses a bare "1.4", while an older server still
+            // answers happily to a range that includes its version.
+            val negotiated = rpc(++id, "server.version", serverVersionParams(), reader, writer)
+            negotiatedProtocolVersion(negotiated)?.let { version ->
+                when {
+                    compareProtocolVersions(version, PROTOCOL_MIN) < 0 -> throw ElectrumException(
+                        "unsupported protocol version $version: the server negotiated below our minimum ($PROTOCOL_MIN)",
+                    )
+
+                    compareProtocolVersions(version, PROTOCOL_MAX) > 0 -> throw ElectrumException(
+                        "unsupported protocol version $version: the server negotiated above our maximum ($PROTOCOL_MAX)",
+                    )
+                }
+            }
             log("< negotiated: ${describeVersion(negotiated)}")
 
             val features = rpc(++id, "server.features", emptyList(), reader, writer)
@@ -422,7 +436,67 @@ class ElectrumClient(
         /** Client identity sent to the server in `server.version`. */
         const val CLIENT_NAME: String = "xbt-wallet 0.0.1"
 
-        /** Electrum protocol version this client speaks. */
-        const val PROTOCOL_VERSION: String = "1.4"
+        /**
+         * Lowest protocol version the client accepts. Advertised in the
+         * `server.version` range; a server that picks a lower version is refused
+         * rather than spoken to with a protocol we cannot read.
+         */
+        const val PROTOCOL_MIN: String = "1.4"
+
+        /**
+         * Highest protocol version the client accepts. 1.8 matters: the Bitcoin
+         * Knots BLAKE2b chain Andrew's test server indexes appends an 84-byte
+         * proof-of-work extension to every header from height 961640 on (164
+         * bytes instead of 80) and refuses clients below 1.8 rather than let
+         * them misread those headers. The header parser here reads only the
+         * ordinary 80-byte prefix, so both shapes are safe.
+         */
+        const val PROTOCOL_MAX: String = "1.8"
     }
+}
+
+/**
+ * The parameters for a `server.version` request: the client name and a
+ * `[min, max]` protocol range.
+ *
+ * Sending a single version — as this client used to — makes any server that
+ * requires 1.8 answer "unsupported request … a client below protocol 1.8 cannot
+ * read. Refusing rather than serving headers it would misinterpret." The range
+ * lets the server choose the newest version both ends understand and keeps
+ * older servers working.
+ */
+internal fun serverVersionParams(): List<Any?> = listOf(
+    ElectrumClient.CLIENT_NAME,
+    listOf(ElectrumClient.PROTOCOL_MIN, ElectrumClient.PROTOCOL_MAX),
+)
+
+/**
+ * The protocol version out of a `server.version` reply (`[server_name,
+ * version]`), or null when the server did not name one.
+ *
+ * A reply without a version is not an error: some servers answer with just
+ * their name. The handshake proceeds and the log says so.
+ */
+internal fun negotiatedProtocolVersion(result: Any?): String? = when (result) {
+    is List<*> -> when (val version = result.getOrNull(1)) {
+        is String -> version
+        is Number -> version.toString()
+        else -> null
+    }
+
+    else -> null
+}
+
+/**
+ * Orders two protocol version strings numerically, so "1.10" sorts above "1.8"
+ * (a plain string comparison would not).
+ */
+internal fun compareProtocolVersions(left: String, right: String): Int {
+    val leftParts = left.split('.').mapNotNull { it.toIntOrNull() }
+    val rightParts = right.split('.').mapNotNull { it.toIntOrNull() }
+    for (index in 0 until maxOf(leftParts.size, rightParts.size)) {
+        val comparison = leftParts.getOrElse(index) { 0 }.compareTo(rightParts.getOrElse(index) { 0 })
+        if (comparison != 0) return comparison
+    }
+    return 0
 }

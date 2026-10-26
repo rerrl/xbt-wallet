@@ -1,5 +1,6 @@
 package com.xbtwallet.app.ui.server
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,6 +20,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -38,7 +41,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
@@ -279,7 +286,10 @@ class ServerScreenState(
         log.clear()
         appendLog("xbt-wallet — private Electrum connection test")
         appendLog("target: $host:$portNumber (${protocol.label})")
-        appendLog("handshake: server.version ${ElectrumClient.PROTOCOL_VERSION}, then server.features, server.banner")
+        appendLog(
+            "handshake: server.version ${ElectrumClient.PROTOCOL_MIN}\u2013${ElectrumClient.PROTOCOL_MAX}, " +
+                "then server.features, server.banner",
+        )
 
         val server = ElectrumServer(host = host, port = portNumber, protocol = protocol)
         if (ElectrumRouting.isOnionHost(host)) {
@@ -376,7 +386,7 @@ fun ServerScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             if (state.presets.isNotEmpty()) {
                 // Names only, deliberately. A preset carries a host:port, and a
@@ -416,7 +426,7 @@ fun ServerScreen(
                         }
                     }
                 }
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(8.dp))
             }
 
             OutlinedTextField(
@@ -425,11 +435,17 @@ fun ServerScreen(
                 label = { Text("Host or IP") },
                 placeholder = { Text("192.168.1.10 or example.onion") },
                 singleLine = true,
+                // A hostname or IP is a URI, not prose: the IME must not
+                // autocorrect it or helpfully insert a space after every dot.
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Uri,
+                    autoCorrectEnabled = false,
+                ),
                 modifier = Modifier.fillMaxWidth(),
             )
 
             if (onion) {
-                Spacer(modifier = Modifier.height(6.dp))
+                Spacer(modifier = Modifier.height(4.dp))
                 val problem = ElectrumRouting.onionAddressProblem(state.host)
                 if (problem != null) {
                     // Refused, not just warned: "Test connection" will not dial.
@@ -447,7 +463,7 @@ fun ServerScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
             OutlinedTextField(
                 value = state.port,
@@ -458,7 +474,7 @@ fun ServerScreen(
                 modifier = Modifier.fillMaxWidth(),
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -482,7 +498,7 @@ fun ServerScreen(
             )
 
             state.inputError?.let { error ->
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = error,
                     style = MaterialTheme.typography.bodySmall,
@@ -490,7 +506,7 @@ fun ServerScreen(
                 )
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
             val clipboard = LocalClipboardManager.current
             var copiedNotice by remember { mutableStateOf<String?>(null) }
@@ -527,27 +543,9 @@ fun ServerScreen(
                 TextButton(onClick = state::clearLog, enabled = state.log.isNotEmpty()) {
                     Text("Clear log")
                 }
-                Spacer(modifier = Modifier.width(4.dp))
-                TextButton(
-                    onClick = {
-                        // The whole log, timestamps included, in the order it is
-                        // shown — that is what a bug report needs.
-                        clipboard.setText(AnnotatedString(state.log.joinToString("\n")))
-                        copiedNotice = "Copied ${state.log.size} lines"
-                    },
-                    enabled = state.log.isNotEmpty(),
-                ) {
-                    Text("Copy log")
-                }
-            }
-
-            copiedNotice?.let { notice ->
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = notice,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF2E7D32),
-                )
+                // The copy action is NOT here: as a fourth button it ran off the
+                // right edge of a narrow phone. It lives on the log box itself —
+                // see ConnectionLog.
             }
 
             if (showSavePreset) {
@@ -584,13 +582,23 @@ fun ServerScreen(
                 )
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
             StatusRow(state)
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
-            ConnectionLog(state, modifier = Modifier.weight(1f))
+            ConnectionLog(
+                state = state,
+                copiedNotice = copiedNotice,
+                onCopy = {
+                    // The whole log, timestamps included, in the order it is
+                    // shown — that is what a bug report needs.
+                    clipboard.setText(AnnotatedString(state.log.joinToString("\n")))
+                    copiedNotice = "Copied ${state.log.size} lines"
+                },
+                modifier = Modifier.weight(1f),
+            )
         }
     }
 }
@@ -621,42 +629,105 @@ private fun StatusRow(state: ServerScreenState) {
 }
 
 @Composable
-private fun ConnectionLog(state: ServerScreenState, modifier: Modifier = Modifier) {
+private fun ConnectionLog(
+    state: ServerScreenState,
+    copiedNotice: String?,
+    onCopy: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.small,
         color = MaterialTheme.colorScheme.surfaceVariant,
     ) {
-        if (state.log.isEmpty()) {
-            Text(
-                text = "Connection log \u2014 requests and replies appear here.",
-                style = MaterialTheme.typography.bodySmall,
-                textAlign = TextAlign.Center,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(16.dp),
-            )
-        } else {
-            val listState = rememberLazyListState()
-            LaunchedEffect(state.log.size) {
-                listState.scrollToItem(state.log.size - 1)
-            }
-            LazyColumn(
-                state = listState,
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-                contentPadding = PaddingValues(12.dp),
-                modifier = Modifier.fillMaxSize(),
-            ) {
-                items(state.log.size) { index ->
-                    Text(
-                        text = state.log[index],
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                    )
+        Box(modifier = Modifier.fillMaxSize()) {
+            if (state.log.isEmpty()) {
+                Text(
+                    text = "Connection log \u2014 requests and replies appear here.",
+                    style = MaterialTheme.typography.bodySmall,
+                    textAlign = TextAlign.Center,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(16.dp),
+                )
+            } else {
+                val listState = rememberLazyListState()
+                LaunchedEffect(state.log.size) {
+                    listState.scrollToItem(state.log.size - 1)
+                }
+                LazyColumn(
+                    state = listState,
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                    contentPadding = PaddingValues(12.dp),
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    items(state.log.size) { index ->
+                        Text(
+                            text = state.log[index],
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
                 }
             }
+
+            // The copy button lives on the log's own top-right corner and only
+            // exists while there is something to copy. Overlaid rather than
+            // placed in the button row: there it was the fourth button and ran
+            // off the right edge of a narrow phone.
+            if (state.log.isNotEmpty()) {
+                IconButton(
+                    onClick = onCopy,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(4.dp)
+                        .size(32.dp),
+                ) {
+                    CopyLogIcon()
+                }
+            }
+
+            copiedNotice?.let { notice ->
+                Text(
+                    text = notice,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF2E7D32),
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                )
+            }
         }
+    }
+}
+
+/**
+ * A copy glyph drawn in code — two overlapping rounded sheets.
+ *
+ * Deliberately not a Material icon: the core icon set has no copy glyph, and
+ * `material-icons-extended` is a large artifact to pull in for one shape.
+ */
+@Composable
+private fun CopyLogIcon(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) {
+    Canvas(modifier = modifier.size(18.dp)) {
+        val strokeWidth = size.minDimension * 0.09f
+        val corner = size.minDimension * 0.16f
+        val sheet = Size(size.width * 0.56f, size.height * 0.56f)
+        drawRoundRect(
+            color = tint,
+            topLeft = Offset(size.width * 0.08f, size.height * 0.08f),
+            size = sheet,
+            cornerRadius = CornerRadius(corner, corner),
+            style = Stroke(width = strokeWidth),
+        )
+        drawRoundRect(
+            color = tint,
+            topLeft = Offset(size.width * 0.36f, size.height * 0.36f),
+            size = sheet,
+            cornerRadius = CornerRadius(corner, corner),
+            style = Stroke(width = strokeWidth),
+        )
     }
 }
 
