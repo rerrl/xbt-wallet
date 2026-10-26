@@ -65,7 +65,7 @@ class ElectrumClientTest {
                 listOf("server.version", "server.features", "server.banner"),
                 mock.requests.map { it["method"] },
             )
-            assertEquals(listOf("xbt-wallet 0.0.1", "1.4"), mock.requests.first()["params"])
+            assertEquals(listOf("xbt-wallet 0.0.1", listOf("1.4", "1.8")), mock.requests.first()["params"])
 
             assertTrue(text, text.contains("plain tcp"))
             assertTrue(text, text.contains("> {\"id\":1,\"method\":\"server.version\""))
@@ -77,6 +77,125 @@ class ElectrumClientTest {
             // Printed so the full handshake log can be read straight out of the
             // test report — this is the same text the Server screen shows.
             println("[mock electrs connection log]\n$text\n[/mock electrs connection log]")
+        }
+    }
+
+    @Test
+    fun `handshake negotiates protocol 1_8 with a server that refuses sub-1_8 clients`() {
+        // The real-world failure: electrum.awokenlazarus.xyz:50002 answers a
+        // single "1.4" with "a client below protocol 1.8 cannot read … Refusing
+        // rather than serving headers it would misinterpret." A proper client
+        // advertises a [min, max] range; the server picks the max it can serve
+        // and the client adopts it.
+        MockElectrumServer { method, params, _ ->
+            when (method) {
+                "server.version" -> {
+                    val range = params[1] as? List<*> ?: return@MockElectrumServer Reply.Error(
+                        -32602,
+                        "unsupported request Single(\"${params[1]}\")",
+                    )
+                    val max = range[1] as String
+                    // Refuse anything below 1.8 the way a BLAKE2b-header server does.
+                    if (compareProtocolVersions(max, "1.8") < 0) {
+                        Reply.Error(
+                            -32602,
+                            "unsupported request Range(\"$range\") … a client below protocol 1.8 cannot read. " +
+                                "Refusing rather than serving headers it would misinterpret.",
+                        )
+                    } else {
+                        Reply.Result(listOf("Fulcrum 1.11.1", "1.8"))
+                    }
+                }
+                "server.features" -> Reply.Result(
+                    linkedMapOf<String, Any?>(
+                        "genesis_hash" to GENESIS_HASH,
+                        "protocol_min" to "1.8",
+                        "protocol_max" to "1.8",
+                        "server_version" to "Fulcrum 1.11.1",
+                    ),
+                )
+                "server.banner" -> Reply.Result("Welcome")
+                else -> Reply.Error(-32601, "unknown method $method")
+            }
+        }.use { mock ->
+            val connected = runBlocking { client(mock.port).testConnection() }
+            val text = logText()
+
+            assertTrue("a server requiring protocol 1.8 must still connect; log:\n$text", connected)
+            assertNull("mock server failed: ${mock.failure}", mock.failure)
+            // The request really carried a range, not a single version.
+            assertEquals(
+                listOf("xbt-wallet 0.0.1", listOf("1.4", "1.8")),
+                mock.requests.first()["params"],
+            )
+            // …and the negotiated version the server chose is what the log shows.
+            assertTrue(text, text.contains("negotiated: Fulcrum 1.11.1, protocol 1.8"))
+            assertTrue(text, text.contains("connection test succeeded"))
+        }
+    }
+
+    @Test
+    fun `handshake keeps working against an older server and adopts its version`() {
+        MockElectrumServer { method, _, _ ->
+            when (method) {
+                "server.version" -> Reply.Result(listOf("electrs 0.10.0", "1.4"))
+                "server.features" -> Reply.Result(
+                    linkedMapOf<String, Any?>(
+                        "genesis_hash" to GENESIS_HASH,
+                        "protocol_min" to "1.4",
+                        "protocol_max" to "1.4",
+                        "server_version" to "electrs 0.10.0",
+                    ),
+                )
+                "server.banner" -> Reply.Result("Welcome")
+                else -> Reply.Error(-32601, "unknown method $method")
+            }
+        }.use { mock ->
+            val connected = runBlocking { client(mock.port).testConnection() }
+            val text = logText()
+
+            assertTrue("an older server must keep working; log:\n$text", connected)
+            assertTrue(text, text.contains("negotiated: electrs 0.10.0, protocol 1.4"))
+            // No warning about the server's version being outside our range.
+            assertFalse(text, text.contains("below protocol"))
+        }
+    }
+
+    @Test
+    fun `negotiation falls back to the requested version when the server sends no version`() {
+        MockElectrumServer { method, _, _ ->
+            when (method) {
+                "server.version" -> Reply.Result(listOf("bare-server"))
+                "server.features" -> Reply.Result(linkedMapOf<String, Any?>("genesis_hash" to GENESIS_HASH))
+                "server.banner" -> Reply.Result("Welcome")
+                else -> Reply.Error(-32601, "unknown method $method")
+            }
+        }.use { mock ->
+            val connected = runBlocking { client(mock.port).testConnection() }
+            val text = logText()
+
+            assertTrue("a reply without a version must not fail the handshake; log:\n$text", connected)
+            assertTrue(text, text.contains("negotiated: bare-server"))
+            assertTrue(text, text.contains("connection test succeeded"))
+        }
+    }
+
+    @Test
+    fun `a server that supports neither end of the range is reported clearly`() {
+        MockElectrumServer { method, _, _ ->
+            when (method) {
+                "server.version" -> Reply.Result(listOf("future-server", "2.0"))
+                "server.features" -> Reply.Result(linkedMapOf<String, Any?>("genesis_hash" to GENESIS_HASH))
+                "server.banner" -> Reply.Result("Welcome")
+                else -> Reply.Error(-32601, "unknown method $method")
+            }
+        }.use { mock ->
+            val connected = runBlocking { client(mock.port).testConnection() }
+            val text = logText()
+
+            assertFalse("a server above our max protocol must be refused; log:\n$text", connected)
+            assertTrue(text, text.contains("unsupported protocol version 2.0"))
+            assertTrue(text, text.contains("connection test failed"))
         }
     }
 
