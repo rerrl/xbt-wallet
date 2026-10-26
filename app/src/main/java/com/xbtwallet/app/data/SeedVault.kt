@@ -48,7 +48,17 @@ import javax.crypto.spec.GCMParameterSpec
  * refuses and signs nothing).
  */
 interface SeedVault {
-    /** Encrypts [entropy] under this signer's key and stores it, replacing any previous entry. */
+    /**
+     * Encrypts [entropy] under this signer's key and stores it, replacing any previous entry.
+     *
+     * **A write may need the user.** The signer's keystore key is bound to device
+     * authentication ([KeystoreSeedVault]) and a key that has just been generated
+     * — which is the case for every new wallet — is not usable until the user has
+     * authenticated. Such a write throws [VaultAuthenticationRequiredException];
+     * the caller, which is the only layer that can show a prompt, authenticates
+     * and calls this again with the same [entropy]. The retry reuses the key the
+     * first attempt generated, so nothing is lost by the refusal.
+     */
     fun store(signerId: String, entropy: ByteArray)
 
     /** The signer's entropy, a typed authentication challenge, or nothing. */

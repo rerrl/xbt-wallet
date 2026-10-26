@@ -15,6 +15,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import kotlinx.coroutines.runBlocking
 import org.junit.Test
 
 /**
@@ -195,7 +196,7 @@ class HotWalletCreateFlowTest {
 
         // What the finish screen does on its terminal button, passphrase included.
         flow.setPassphrase("TREZOR")
-        val result = provisioner.provision("My hot wallet", words, flow.passphrase)
+        val result = runBlocking { provisioner.provision("My hot wallet", words, flow.passphrase) }
         assertTrue("a new wallet, not a duplicate", result is ProvisionResult.Created)
         val created = (result as ProvisionResult.Created).signer
         flow.clear()

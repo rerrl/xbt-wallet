@@ -54,6 +54,16 @@ internal const val HOT_WALLET_DICE_UNDO = "Undo"
 internal const val HOT_WALLET_DICE_CREATE_BUTTON = "Create wallet"
 
 /**
+ * The readout's fixed height: enough for the longest readout this screen can
+ * produce — 99 monospace digits of the 24-word walk, four lines at the text
+ * style the readout uses — plus the box's own 12dp padding on both sides.
+ *
+ * A constant rather than a measurement on purpose: the whole point is that the
+ * readout's size does not depend on what is in it.
+ */
+private val DICE_READOUT_HEIGHT = 120.dp
+
+/**
  * **Dice roll** — the dice-entry screen behind *Create hot wallet*.
  *
  * The interaction is the one the ratified design calls for: the user rolls a
@@ -106,12 +116,45 @@ fun HotWalletDiceScreen(
     val input = remember(wordCount) { DiceRollInput(targetRolls) }
     var rolls by remember(wordCount) { mutableStateOf(input.rolls) }
 
-    Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        // The keypad, Undo and Create live in the bottom bar, not at the end of
+        // the scrolling column. That is the fix for the mid-tap shift: the
+        // readout's height is no longer able to push them, because they are not
+        // above it in the first place — they are pinned to the bottom of the
+        // window, in a bar sized by its own content.
+        bottomBar = {
+            DiceControls(
+                undoEnabled = rolls.isNotEmpty(),
+                createEnabled = input.isFull,
+                onDigit = { digit ->
+                    input.append(digit)
+                    rolls = input.rolls
+                },
+                onUndo = {
+                    input.backspace()
+                    rolls = input.rolls
+                },
+                onCreate = {
+                    // Live once every roll is in: it turns the rolls into the
+                    // recovery words and hands them to the flow (never onto the
+                    // route — the back stack is saved state), then the caller
+                    // walks on to the backup step.
+                    flow.setMnemonic(DiceEntropy.rollsToMnemonic(input.rolls))
+                    onCreateWallet()
+                },
+            )
+        },
+    ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
                 .padding(horizontal = 20.dp, vertical = 12.dp)
+                // Still scrollable: on a short window the header, copy, toggle
+                // and readout can want more room than there is, and scrolling is
+                // the honest answer. The controls are not in here, so this scroll
+                // can never move them.
                 .verticalScroll(rememberScrollState()),
         ) {
             HotWalletHeader(title = HOT_WALLET_DICE_TITLE, onBack = onBack)
@@ -156,66 +199,100 @@ fun HotWalletDiceScreen(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // The digits themselves, in a wrapping readout.
-            Surface(
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                shape = MaterialTheme.shapes.small,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(
-                    text = rolls,
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontFamily = FontFamily.Monospace,
-                    modifier = Modifier.padding(12.dp),
-                )
-            }
+            // The digits themselves, in a box of a fixed height. This is the other
+            // half of the layout fix: the readout cannot grow line-by-line as
+            // digits arrive, so nothing anywhere is pushed by a roll.
+            RollsReadout(rolls = rolls)
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+    }
+}
 
-            DiceKeyRow(digits = listOf(1, 2, 3)) { digit ->
-                input.append(digit)
-                rolls = input.rolls
-            }
+/**
+ * The digits entered so far, in a fixed-height box that scrolls inside itself.
+ *
+ * The height is sized for the longest target this screen can ask for — 99
+ * monospace digits of the 24-word walk — so the full readout is visible without
+ * scrolling on an ordinary phone, and scrolls internally rather than reflowing
+ * the screen on a narrow or landscape one. Either way it never changes size, and
+ * that is the point: the controls are in the bottom bar and this can no longer
+ * affect them, but a stable readout also keeps the counter and the toggle above
+ * it still.
+ */
+@Composable
+private fun RollsReadout(rolls: String) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = MaterialTheme.shapes.small,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(DICE_READOUT_HEIGHT),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(12.dp),
+        ) {
+            Text(
+                text = rolls,
+                style = MaterialTheme.typography.bodyLarge,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+    }
+}
+
+/**
+ * The pinned cluster: two rows of die faces, *Undo*, and the terminal *Create
+ * wallet*.
+ *
+ * Everything here is always in the same place. The bar's own height is fixed by
+ * its content — six 64dp faces, the two buttons and the gaps between them — and
+ * none of it depends on how many rolls have been entered.
+ */
+@Composable
+private fun DiceControls(
+    undoEnabled: Boolean,
+    createEnabled: Boolean,
+    onDigit: (Int) -> Unit,
+    onUndo: () -> Unit,
+    onCreate: () -> Unit,
+) {
+    Surface(color = MaterialTheme.colorScheme.background) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 12.dp),
+        ) {
+            DiceKeyRow(digits = listOf(1, 2, 3), onDigit = onDigit)
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            DiceKeyRow(digits = listOf(4, 5, 6)) { digit ->
-                input.append(digit)
-                rolls = input.rolls
-            }
+            DiceKeyRow(digits = listOf(4, 5, 6), onDigit = onDigit)
 
             Spacer(modifier = Modifier.height(8.dp))
 
             // The same full-width secondary style as the rest of the app, and
             // disabled rather than absent while there is nothing to undo.
             OrangeOutlineButton(
-                onClick = {
-                    input.backspace()
-                    rolls = input.rolls
-                },
+                onClick = onUndo,
                 modifier = Modifier.fillMaxWidth(),
-                enabled = rolls.isNotEmpty(),
+                enabled = undoEnabled,
             ) {
                 Text(HOT_WALLET_DICE_UNDO)
             }
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-            // Live once every roll is in: it turns the rolls into the recovery
-            // words and hands them to the flow (never onto the route — the back
-            // stack is saved state), then the caller walks on to the backup step.
             Button(
-                onClick = {
-                    flow.setMnemonic(DiceEntropy.rollsToMnemonic(input.rolls))
-                    onCreateWallet()
-                },
-                enabled = input.isFull,
+                onClick = onCreate,
+                enabled = createEnabled,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(HOT_WALLET_DICE_CREATE_BUTTON)
             }
-
-            Spacer(modifier = Modifier.height(24.dp))
         }
     }
 }

@@ -20,18 +20,25 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.fragment.app.FragmentActivity
+import com.xbtwallet.app.data.HotWalletDerivation
 import com.xbtwallet.app.data.HotWalletProvisioner
 import com.xbtwallet.app.data.ProvisionResult
+import com.xbtwallet.app.ui.lock.BiometricLockAuthenticator
+import com.xbtwallet.app.ui.lock.authenticateAndWait
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -92,6 +99,58 @@ internal const val HOT_WALLET_FINISH_DUPLICATE = "This wallet is already importe
 
 /** The action beside [HOT_WALLET_FINISH_DUPLICATE]: out of the walk, to the list. */
 internal const val HOT_WALLET_FINISH_HOME = "Go to Home"
+
+/**
+ * Shown when the wallet could not be stored because its seed's key needed the
+ * user's own device authentication and did not get it.
+ *
+ * A refusal is not a defect: the wallet was simply not created, and Retry runs
+ * the same attempt again.
+ */
+internal const val HOT_WALLET_FINISH_AUTH_CANCELLED =
+    "Couldn't verify it's you, so the wallet wasn't created. Tap Retry when ready."
+
+/** The title of the prompt that unlocks the vault key a new wallet is stored under. */
+internal const val HOT_WALLET_FINISH_PROMPT_TITLE = "Authenticate to store the wallet"
+
+/** That prompt's subtitle: whose credential is being asked for, in one line. */
+internal const val HOT_WALLET_FINISH_PROMPT_SUBTITLE = "Use your screen lock."
+
+/** The label above the wallet's fingerprint without the passphrase. */
+internal const val HOT_WALLET_FINISH_FINGERPRINT_LABEL = "Fingerprint (no passphrase)"
+
+/** The label above the wallet's fingerprint with the passphrase typed so far. */
+internal const val HOT_WALLET_FINISH_PASSPHRASE_FINGERPRINT_LABEL =
+    "Fingerprint (with passphrase)"
+
+/** Shown in place of a fingerprint that is still being computed, or cannot be. */
+internal const val HOT_WALLET_FINISH_FINGERPRINT_PENDING = "\u2026"
+
+/**
+ * How long typing must pause before the passphrase fingerprint is recomputed.
+ *
+ * Deriving it is PBKDF2 plus a BIP-32 walk — tens of milliseconds of real work —
+ * and re-running that for every keystroke of a long passphrase would put the CPU
+ * on the critical path for no benefit. Everything typed within the window
+ * collapses into one derivation.
+ */
+internal const val HOT_WALLET_FINISH_FINGERPRINT_DEBOUNCE_MILLIS = 250L
+
+/**
+ * The master fingerprint of the wallet [mnemonic] plus [passphrase] describes —
+ * the same eight lowercase hex digits, from the same
+ * [HotWalletDerivation.derive] every other fingerprint in this app comes from.
+ *
+ * Null when [mnemonic] is not a well-formed phrase, which is the only way the
+ * derivation can fail: the screen already holds words that were validated a step
+ * earlier, so this is a guard rather than a case that happens.
+ *
+ * A pure function, deliberately: the screen's fingerprint logic is the one thing
+ * on this screen worth pinning without a composition, and the debounce and the
+ * background dispatch are wrappers around this call, not part of it.
+ */
+internal fun walletFingerprint(mnemonic: List<String>, passphrase: String): String? =
+    runCatching { HotWalletDerivation.derive(mnemonic, passphrase).masterFingerprint }.getOrNull()
 
 /**
  * The header title for a walk: `Finish` when the wallet is being created,
@@ -188,6 +247,12 @@ fun HotWalletFinishScreen(
     var error by remember { mutableStateOf<String?>(null) }
     var duplicate by remember { mutableStateOf(false) }
 
+    // The wallet's identity in its two forms. The no-passphrase one never changes
+    // while the screen is up (the words cannot), so it is derived once; the
+    // passphrased one follows what has been typed.
+    var plainFingerprint by remember { mutableStateOf<String?>(null) }
+    var passphraseFingerprint by remember { mutableStateOf<String?>(null) }
+
     val scope = rememberCoroutineScope()
 
     // FLAG_SECURE for as long as this screen is composed: a passphrase is being
@@ -197,6 +262,45 @@ fun HotWalletFinishScreen(
     DisposableEffect(Unit) {
         activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         onDispose { activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
+    }
+
+    // The device prompt a create needs when the vault's key that will hold the
+    // seed is bound to device authentication — which is every device with a lock
+    // screen, and so every device that can create a hot wallet at all. Built from
+    // the host activity; a composition with no activity (a preview, a JVM test)
+    // gets none, and the provision then reports the user did not authenticate
+    // rather than storing anything.
+    val prompt = remember(activity) {
+        (activity as? FragmentActivity)?.let {
+            BiometricLockAuthenticator(
+                it,
+                title = HOT_WALLET_FINISH_PROMPT_TITLE,
+                subtitle = HOT_WALLET_FINISH_PROMPT_SUBTITLE,
+            )
+        }
+    }
+
+    // The wallet the words alone describe, derived once on entry and off the main
+    // thread: PBKDF2 plus a BIP-32 walk is real work, and the frame must not wait
+    // on it.
+    LaunchedEffect(mnemonic) {
+        plainFingerprint = withContext(Dispatchers.Default) { walletFingerprint(mnemonic, "") }
+    }
+
+    // The wallet the passphrase *as typed* would produce. Keyed on the passphrase,
+    // so every keystroke cancels the derivation in flight and restarts the pause:
+    // only the last thing typed is ever derived, a cancelled job writes nothing,
+    // and the field being emptied clears the line at once (this is the same
+    // wallet as the line above, so showing it would only repeat it).
+    LaunchedEffect(passphrase) {
+        if (passphrase.isEmpty()) {
+            passphraseFingerprint = null
+            return@LaunchedEffect
+        }
+        delay(HOT_WALLET_FINISH_FINGERPRINT_DEBOUNCE_MILLIS)
+        passphraseFingerprint = withContext(Dispatchers.Default) {
+            walletFingerprint(mnemonic, passphrase)
+        }
     }
 
     val canSubmit = createEnabled(passphrase, repeatPassphrase) && !creating
@@ -239,7 +343,21 @@ fun HotWalletFinishScreen(
                                 // with everything else.
                                 flow.setPassphrase(passphrase)
                                 val result = withContext(Dispatchers.Default) {
-                                    provisioner.provision(walletName, mnemonic, passphrase)
+                                    provisioner.provision(walletName, mnemonic, passphrase) {
+                                        // Sealing a new wallet's seed happens under a
+                                        // key bound to device authentication, so the
+                                        // vault asks for the user here. A prompt is a
+                                        // fragment transaction and belongs on the
+                                        // main thread, while the rest of the attempt
+                                        // stays off it.
+                                        if (prompt == null) {
+                                            false
+                                        } else {
+                                            withContext(Dispatchers.Main) {
+                                                prompt.authenticateAndWait()
+                                            }
+                                        }
+                                    }
                                 }
                                 when (result) {
                                     // The entropy is in the vault and the record
@@ -253,6 +371,12 @@ fun HotWalletFinishScreen(
                                     // this phone's. Say so, and let the button
                                     // become the way out.
                                     is ProvisionResult.AlreadyExists -> duplicate = true
+                                    // Nothing was written either: the vault's key
+                                    // needed the user and did not get them. The
+                                    // words are still here, so the button's Retry
+                                    // runs the same attempt again.
+                                    ProvisionResult.AuthenticationCancelled ->
+                                        error = HOT_WALLET_FINISH_AUTH_CANCELLED
                                 }
                             } catch (cancellation: CancellationException) {
                                 throw cancellation
@@ -342,6 +466,27 @@ fun HotWalletFinishScreen(
                 )
             }
 
+            // The wallet these words make — with and without the passphrase. Live,
+            // and read-only: the passphrase itself is never shown, but its effect on
+            // the wallet is, so a mistyped passphrase becomes a fingerprint that
+            // does not change between two identical typings.
+            Spacer(modifier = Modifier.height(20.dp))
+
+            FingerprintLine(
+                label = HOT_WALLET_FINISH_FINGERPRINT_LABEL,
+                value = plainFingerprint,
+            )
+
+            // Only while a passphrase has been typed: with the field empty this is
+            // the same wallet as the line above.
+            if (passphrase.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                FingerprintLine(
+                    label = HOT_WALLET_FINISH_PASSPHRASE_FINGERPRINT_LABEL,
+                    value = passphraseFingerprint,
+                )
+            }
+
             // A duplicate explains itself where the passphrase fields are, since
             // the button below has already become the way out of the walk.
             if (duplicate) {
@@ -367,5 +512,29 @@ fun HotWalletFinishScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
         }
+    }
+}
+
+/**
+ * One labelled fingerprint: what it is above, the eight hex digits below.
+ *
+ * A null [value] — still being derived, or not derivable at all — shows the
+ * placeholder rather than an empty gap, so the section does not jump when a
+ * derivation lands.
+ */
+@Composable
+private fun FingerprintLine(label: String, value: String?) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = value ?: HOT_WALLET_FINISH_FINGERPRINT_PENDING,
+            style = MaterialTheme.typography.bodyLarge,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
     }
 }
