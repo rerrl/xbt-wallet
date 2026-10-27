@@ -73,7 +73,7 @@ class PsbtSignerTest {
             assertEquals("input $index must carry the unified sighash byte", 0x21, signature.last().toInt() and 0xFF)
             assertArrayEquals("input $index public key", pubs[index], pubKey)
 
-            val digest = Sighash.p2wpkhDigest(decodeTransaction(unsigned), index, utxos[index])
+            val digest = Sighash.p2wpkhDigest(decodeTransaction(unsigned), index, utxos, SIGHASH_UNIFIED)
             assertTrue(
                 "input $index signature must verify",
                 Ecdsa.verify(Secp256k1.parse(pubKey), digest, signature.copyOf(signature.size - 1)),

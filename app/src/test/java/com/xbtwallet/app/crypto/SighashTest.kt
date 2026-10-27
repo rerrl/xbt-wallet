@@ -6,16 +6,18 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * BIP-143 segwit v0 signature hashing, against the specification's own vector.
+ * The BIP-143 half of [Sighash]: the plain segwit v0 digest, against the
+ * specification's own vector.
  *
  * The vector is the native-P2WPKH example from `bip-0143.mediawiki`: a two-input
- * transaction whose second input is a P2WPKH program. The preimage is pinned
- * verbatim, and both accepted hashtypes are checked against it — `0x01`, the
- * spec's own digest, and `0x21`, the unified variant this wallet signs with,
- * which differs only in the last four bytes of the preimage.
+ * transaction whose second input is a P2WPKH program. The preimage and the
+ * digest are pinned verbatim.
  *
  * The refusals are as important as the vector: a non-P2WPKH witness utxo, an
- * out-of-range input index, and every hashtype outside the SIGHASH_ALL class.
+ * out-of-range input index, and every hashtype that is not `SIGHASH_ALL` — which
+ * now includes `0x21`, because the unified bit selects a *different message*
+ * entirely and is computed by `Sighash.unifiedPreimage` (see
+ * [UnifiedSighashTest]).
  */
 class SighashTest {
 
@@ -47,40 +49,26 @@ class SighashTest {
 
     private val digest01 = "c37af31116d1b27caf68aae9e3ac82f1477929014d5b917657d0eb49478cb670"
 
-    /** The same vector with only the nHashType field swapped to the unified 0x21. */
-    private val digest21 = "847b264c435c77ae161560b48d50030bfba3ce80aecefdd85abc071c3d199673"
-
     private val tx get() = decodeTransaction(fromHex(unsignedTx))
 
     @Test
     fun `BIP-143 vector - the preimage is reproduced verbatim`() {
-        assertEquals(preimage01, toHex(Sighash.p2wpkhPreimage(tx, 1, witnessUtxo, Sighash.SIGHASH_ALL)))
+        assertEquals(preimage01, toHex(Sighash.p2wpkhPreimage(tx, 1, witnessUtxo)))
     }
 
     @Test
     fun `BIP-143 vector - the SIGHASH_ALL digest`() {
-        assertEquals(digest01, toHex(Sighash.p2wpkhDigest(tx, 1, witnessUtxo, Sighash.SIGHASH_ALL)))
+        assertEquals(digest01, toHex(Sighash.p2wpkhLegacyDigest(tx, 1, witnessUtxo)))
+        assertEquals(digest01, toHex(Sighash.p2wpkhDigest(tx, 1, listOf(witnessUtxo, witnessUtxo), Sighash.SIGHASH_ALL)))
     }
 
     @Test
-    fun `the unified 0x21 digest is the same preimage with the hashtype swapped`() {
-        val unified = Sighash.p2wpkhPreimage(tx, 1, witnessUtxo)
-        val plain = Sighash.p2wpkhPreimage(tx, 1, witnessUtxo, Sighash.SIGHASH_ALL)
-
-        // Identical up to the four nHashType bytes...
-        assertEquals(toHex(plain.dropLast(4).toByteArray()), toHex(unified.dropLast(4).toByteArray()))
-        assertEquals("21000000", toHex(unified.takeLast(4).toByteArray()))
-        // ... and the published digest.
-        assertEquals(digest21, toHex(Sighash.p2wpkhDigest(tx, 1, witnessUtxo)))
-        assertEquals(digest21, toHex(Sighash.p2wpkhDigest(tx, 1, witnessUtxo, SIGHASH_UNIFIED)))
-    }
-
-    @Test
-    fun `the default hashtype is the unified one`() {
-        assertEquals(
-            toHex(Sighash.p2wpkhDigest(tx, 1, witnessUtxo, SIGHASH_UNIFIED)),
-            toHex(Sighash.p2wpkhDigest(tx, 1, witnessUtxo)),
-        )
+    fun `a hashtype with the unified bit is not a BIP-143 preimage`() {
+        // 0x21 selects the unified message; BIP-143 must refuse to produce one
+        // for it rather than silently hashing the byte.
+        assertThrows(IllegalArgumentException::class.java) {
+            Sighash.p2wpkhPreimage(tx, 1, witnessUtxo, 0x21L)
+        }
     }
 
     @Test
@@ -110,7 +98,7 @@ class SighashTest {
 
     @Test
     fun `hashtypes outside the SIGHASH_ALL class are refused`() {
-        listOf(0x00L, 0x02L, 0x03L, 0x81L, 0x82L, 0x83L).forEach { hashType ->
+        listOf(0x00L, 0x02L, 0x03L, 0x21L, 0x81L, 0x82L, 0x83L).forEach { hashType ->
             assertThrows(
                 "hashtype 0x${hashType.toString(16)} must be refused",
                 IllegalArgumentException::class.java,
@@ -122,7 +110,7 @@ class SighashTest {
     fun `the preimage is the length BIP-143 specifies`() {
         // 4 + 32 + 32 + 36 + 26 + 8 + 4 + 32 + 4 + 4
         assertEquals(182, Sighash.p2wpkhPreimage(tx, 1, witnessUtxo).size)
-        assertTrue(Sighash.p2wpkhDigest(tx, 1, witnessUtxo).size == 32)
+        assertTrue(Sighash.p2wpkhLegacyDigest(tx, 1, witnessUtxo).size == 32)
     }
 
     private fun fromHex(hex: String): ByteArray {
