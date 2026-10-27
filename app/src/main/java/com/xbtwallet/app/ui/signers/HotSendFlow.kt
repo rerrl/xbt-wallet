@@ -35,6 +35,16 @@ import kotlinx.coroutines.CancellationException
 class HotSendFlowState(
     private val sign: suspend (passphrase: String) -> SignedSend,
     private val broadcast: suspend (txHex: String) -> String,
+    /**
+     * Called with the signed transaction's hex the moment a signature exists,
+     * before it is broadcast, and never anywhere else. It is the debug seam for
+     * the one failure a signature can produce that the app cannot see locally:
+     * a node rejecting the spend for a reason only the node knows. The default
+     * is a no-op, so a JVM test can drive the flow without one and pass a
+     * capture when it wants to assert what would be logged. Production wires it
+     * to logcat (see `SendScreen`).
+     */
+    private val dumpSignedTx: (String) -> Unit = {},
 ) {
 
     /**
@@ -143,6 +153,9 @@ class HotSendFlowState(
 
         when (outcome) {
             is SignedSend.Signed -> {
+                // The one place a signature exists: hand the hex to the debug
+                // seam before anything can depend on the broadcast.
+                dumpSignedTx(outcome.txHex)
                 signedTxHex = outcome.txHex
                 passphraseRequired = false
                 passphraseError = null
@@ -209,6 +222,14 @@ internal const val VAULT_UNAVAILABLE_MESSAGE =
 
 /** The review screen's title, and the form's terminal button for a hot wallet. */
 internal const val HOT_REVIEW_TITLE = "Review transaction"
+
+/**
+ * The logcat tag the signed raw transaction is dumped under, once, the moment a
+ * signature exists. It is what a node rejection can be diagnosed against: the
+ * hex carries the witness (signature and public key), so the message the signer
+ * actually committed to can be recomputed from it.
+ */
+internal const val HOT_SEND_DUMP_TAG = "XbtHotSend"
 
 /** The review's terminal control. */
 internal const val SIGN_AND_BROADCAST_LABEL = "Sign & broadcast"

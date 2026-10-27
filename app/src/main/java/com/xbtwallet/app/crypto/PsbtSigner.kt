@@ -65,6 +65,15 @@ object PsbtSigner {
             throw PsbtException("a master fingerprint is four bytes, got ${fingerprint.size}")
         }
 
+        // The unified signature hash commits to every spent output, so every
+        // input's witness utxo is needed before any input can be signed — not
+        // just the one being signed. Read them once, up front, so a missing one
+        // is refused before a signature exists.
+        val spentOutputs = psbt.inputs.mapIndexed { index, input ->
+            input.witnessUtxo
+                ?: throw PsbtException("input $index has no witness utxo; refusing to sign it")
+        }
+
         val signedInputs = psbt.inputs.mapIndexed { index, input ->
             val sighash = input.sighashType
                 ?: throw PsbtException("input $index does not declare a sighash type; refusing to sign it")
@@ -73,9 +82,6 @@ object PsbtSigner {
                     "input $index declares sighash 0x${sighash.toString(16)}, not the unified 0x21",
                 )
             }
-
-            val witnessUtxo = input.witnessUtxo
-                ?: throw PsbtException("input $index has no witness utxo; refusing to sign it")
 
             val derivation = input.derivations.firstOrNull { matches(it.masterFingerprint, fingerprint) }
                 ?: throw PsbtException(
@@ -91,7 +97,7 @@ object PsbtSigner {
             }
 
             val child = accountKey.derive(derivation.path.drop(3))
-            val digest = Sighash.p2wpkhDigest(tx, index, witnessUtxo)
+            val digest = Sighash.p2wpkhDigest(tx, index, spentOutputs, SIGHASH_UNIFIED)
             val signature = Ecdsa.sign(child.privateKey, digest) + byteArrayOf(SIGHASH_UNIFIED.toByte())
 
             ParsedPsbtInput(

@@ -93,6 +93,24 @@ class HotSendFlowTest {
     }
 
     @Test
+    fun `the signed hex is dumped once, before the broadcast`() = runBlocking {
+        val dumped = mutableListOf<String>()
+        val flow = HotSendFlowState(
+            sign = { SignedSend.Signed(txHex = "00ff", txid = "tx-1") },
+            broadcast = { "tx-1" },
+            dumpSignedTx = { dumped += it },
+        )
+
+        flow.signAndBroadcast()
+
+        assertEquals(
+            "exactly one dump, and it is the signed bytes (the witness a node rejection needs)",
+            listOf("00ff"),
+            dumped,
+        )
+    }
+
+    @Test
     fun `a refused empty passphrase shows a clean prompt, not an error`() = runBlocking {
         val flow = flowThatSigns(passphrase = "correct horse")
 

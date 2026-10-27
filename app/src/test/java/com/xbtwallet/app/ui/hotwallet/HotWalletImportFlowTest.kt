@@ -20,6 +20,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import kotlinx.coroutines.runBlocking
 import org.junit.Test
 
 /**
@@ -70,6 +71,14 @@ class HotWalletImportFlowTest {
     }
 
     /**
+     * [HotWalletProvisioner.provision] is `suspend` because a device-backed
+     * vault's write can need the user to authenticate first. [FakeSeedVault]
+     * never challenges, so these tests drive the attempt to completion here.
+     */
+    private fun provisionNow(name: String, mnemonic: List<String>, passphrase: String = ""): ProvisionResult =
+        runBlocking { provisioner.provision(name, mnemonic, passphrase) }
+
+    /**
      * What the word field's button does: validate what was typed, hand the
      * normalised words to the holder, and only then is the walk allowed to go on.
      */
@@ -86,7 +95,7 @@ class HotWalletImportFlowTest {
         assertEquals("what the field holds is the phrase the vectors name", words, state.words)
 
         // What the finish screen does on its terminal button.
-        val result = provisioner.provision("Imported", requireNotNull(flow.mnemonic))
+        val result = provisionNow("Imported", requireNotNull(flow.mnemonic))
         flow.clear()
 
         assertTrue("a new wallet, not a duplicate", result is ProvisionResult.Created)
@@ -115,7 +124,7 @@ class HotWalletImportFlowTest {
     @Test
     fun `the vault holds the phrase's entropy, never the seed`() {
         enterWords()
-        val result = provisioner.provision("Imported", requireNotNull(flow.mnemonic))
+        val result = provisionNow("Imported", requireNotNull(flow.mnemonic))
         val signer = (result as ProvisionResult.Created).signer
 
         val stored = vault.peek(signer.id)
@@ -138,7 +147,7 @@ class HotWalletImportFlowTest {
     @Test
     fun `no part of the phrase reaches storage`() {
         enterWords()
-        provisioner.provision("Imported", requireNotNull(flow.mnemonic))
+        provisionNow("Imported", requireNotNull(flow.mnemonic))
 
         val entropy = Bip39.mnemonicToEntropy(words)
         val secretEncodings = listOf(
@@ -160,14 +169,14 @@ class HotWalletImportFlowTest {
     @Test
     fun `importing a phrase this phone already holds writes nothing`() {
         enterWords()
-        val first = provisioner.provision("Imported", requireNotNull(flow.mnemonic))
+        val first = provisionNow("Imported", requireNotNull(flow.mnemonic))
         assertTrue(first is ProvisionResult.Created)
         flow.clear()
 
         // A second walk with the same words — the field validates them, the holder
         // takes them, and the finish screen's button runs the same call.
         enterWords()
-        val second = provisioner.provision("Imported again", requireNotNull(flow.mnemonic))
+        val second = provisionNow("Imported again", requireNotNull(flow.mnemonic))
 
         assertTrue("the walk is told, rather than left with a second wallet", second is ProvisionResult.AlreadyExists)
         assertEquals((first as ProvisionResult.Created).signer, (second as ProvisionResult.AlreadyExists).signer)
@@ -189,13 +198,13 @@ class HotWalletImportFlowTest {
     @Test
     fun `the holder is emptied by both the success path and the duplicate's way out`() {
         enterWords()
-        val first = provisioner.provision("Imported", requireNotNull(flow.mnemonic))
+        val first = provisionNow("Imported", requireNotNull(flow.mnemonic))
         assertTrue(first is ProvisionResult.Created)
         flow.clear()
         assertNull(flow.mnemonic)
 
         enterWords()
-        val second = provisioner.provision("Imported", requireNotNull(flow.mnemonic))
+        val second = provisionNow("Imported", requireNotNull(flow.mnemonic))
         assertTrue(second is ProvisionResult.AlreadyExists)
         // The duplicate's Home action.
         flow.clear()

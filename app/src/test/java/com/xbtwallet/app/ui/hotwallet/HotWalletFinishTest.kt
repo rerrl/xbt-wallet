@@ -1,6 +1,10 @@
 package com.xbtwallet.app.ui.hotwallet
 
+import com.xbtwallet.app.data.HotWalletDerivation
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -50,5 +54,64 @@ class HotWalletFinishTest {
         assertFalse(createEnabled(passphrase = "word ", repeat = "word"))
         assertFalse(createEnabled(passphrase = "", repeat = "x"))
         assertTrue(createEnabled(passphrase = " ", repeat = " "))
+    }
+
+    // --- the live fingerprints ----------------------------------------------
+    //
+    // `walletFingerprint` is the whole of the screen's fingerprint logic (the
+    // debounce and the background dispatch are wrappers around it, not part of
+    // it), so the two lines the screen shows are pinned here without a
+    // composition.
+
+    /** `abandon` × 11 + `about`: BIP-39's all-zero-entropy vector. */
+    private val bip84Words: List<String> = List(11) { "abandon" } + "about"
+
+    /** That vector's master fingerprint, the value a signer shows for the same seed. */
+    private val bip84MasterFingerprint = "73c5da0a"
+
+    @Test
+    fun `the no-passphrase fingerprint is the master fingerprint of the words alone`() {
+        assertEquals(bip84MasterFingerprint, walletFingerprint(bip84Words, ""))
+        assertEquals(
+            "and it is exactly what the app's own derivation reports",
+            HotWalletDerivation.derive(bip84Words).masterFingerprint,
+            walletFingerprint(bip84Words, ""),
+        )
+    }
+
+    @Test
+    fun `a passphrase gives a different fingerprint, and the same one every time`() {
+        val plain = walletFingerprint(bip84Words, "")
+        val hidden = walletFingerprint(bip84Words, "TREZOR")
+
+        assertNotEquals("a passphrase is a different wallet", plain, hidden)
+        assertEquals("and re-deriving reproduces it", hidden, walletFingerprint(bip84Words, "TREZOR"))
+        assertEquals(
+            "the passphrase path is the app's derivation, not a second one",
+            HotWalletDerivation.derive(bip84Words, "TREZOR").masterFingerprint,
+            hidden,
+        )
+        assertNotEquals(
+            "case matters, exactly as it does for the wallet itself",
+            hidden,
+            walletFingerprint(bip84Words, "trezor"),
+        )
+    }
+
+    @Test
+    fun `the fingerprint is the format the rest of the app shows`() {
+        val fingerprint = walletFingerprint(bip84Words, "TREZOR")
+
+        assertEquals(8, fingerprint?.length)
+        assertTrue("eight lowercase hex digits", fingerprint!!.all { it in "0123456789abcdef" })
+    }
+
+    @Test
+    fun `an unusable phrase yields no fingerprint rather than throwing`() {
+        // The words are validated a step earlier, so this is a guard — but a
+        // screen that crashed while deriving would be a worse failure than one
+        // that shows nothing.
+        assertNull(walletFingerprint(listOf("not", "a", "mnemonic"), ""))
+        assertNull(walletFingerprint(List(12) { "abandon" }, ""))
     }
 }

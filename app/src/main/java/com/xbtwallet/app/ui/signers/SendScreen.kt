@@ -3,6 +3,7 @@ package com.xbtwallet.app.ui.signers
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.util.Log
 import android.view.WindowManager
 import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -370,6 +371,12 @@ private fun SendFlow(
             null
         } else {
             HotSendFlowState(
+                dumpSignedTx = { hex ->
+                    // Safe to log: this is a public transaction, not key material.
+                    // It carries the witness, which is what a node's rejection has
+                    // to be diagnosed against.
+                    runCatching { Log.i(HOT_SEND_DUMP_TAG, hex) }
+                },
                 sign = { passphrase ->
                     val current = prepared
                         ?: throw IllegalStateException("nothing has been prepared to sign")
