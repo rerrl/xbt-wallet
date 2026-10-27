@@ -126,16 +126,19 @@ class HotWalletSpendSignatureTest {
         // Computed by a separate implementation of the specification for this
         // exact unsigned transaction and these exact spent outputs (the same
         // reference implementation the vectors in `UnifiedSighashTest` come
-        // from). If the message this wallet signs changes shape again, this
-        // fails before a node has to reject the spend.
+        // from). The `scriptCode` tail is serialised **once** — the raw 25-byte
+        // implied P2PKH script behind a single compact-size length byte — which
+        // is what a node's `SignatureHashUnified` writes when it does
+        // `ss << scriptCode` on that script. If the message this wallet signs
+        // changes shape again, this fails before a node has to reject the spend.
         assertEquals(
             "input 0 unified digest",
-            "7ff810143fcf0ba3ab4a23609fd832eda50a2f3477f642e5dfbdcddfc78afd11",
+            "c58d93700304feb2d39339c0e297ffc411bcc67baf93e5a9945a6af7d13525b7",
             h(Sighash.unifiedDigest(tx, 0, fixture.spentOutputs, SIGHASH_UNIFIED)),
         )
         assertEquals(
             "input 1 unified digest",
-            "5af531322c0890e2678a841b488af025455107324b2302cabdb9629677886bee",
+            "43e5ac47a69791677c7978141bf931778dc92cfcb2dbb42cc5f3b9c00fd55914",
             h(Sighash.unifiedDigest(tx, 1, fixture.spentOutputs, SIGHASH_UNIFIED)),
         )
 

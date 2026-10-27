@@ -137,7 +137,7 @@ class UnifiedSighashTest {
         val spent = listOf(WitnessUtxo(100_000L, scriptPubKey))
 
         val impliedScriptCode =
-            byteArrayOf(0x19, 0x76, 0xa9.toByte(), 0x14) + Hashes.hash160(pubKey) + byteArrayOf(0x88.toByte(), 0xac.toByte())
+            byteArrayOf(0x76, 0xa9.toByte(), 0x14) + Hashes.hash160(pubKey) + byteArrayOf(0x88.toByte(), 0xac.toByte())
 
         assertEquals(
             toHex(Sighash.unifiedDigestWithScript(tx, 0, spent, 0x21L, 1, impliedScriptCode)),

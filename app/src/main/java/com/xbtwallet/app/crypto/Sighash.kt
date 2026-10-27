@@ -155,8 +155,9 @@ object Sighash {
         out.write(input.previousTxid)
         out.write(uint32Le(input.outputIndex))
 
-        // scriptCode: the P2PKH script the P2WPKH program is executed as.
-        out.write(scriptCode(scriptPubKey))
+        // scriptCode: the P2PKH script the P2WPKH program is executed as,
+        // serialised the way BIP-143 writes it (0x19 then the 25 bytes).
+        out.write(bip143ScriptCode(scriptPubKey))
 
         // amount (8-byte LE) and nSequence
         out.write(uint64Le(witnessUtxo.satoshis))
@@ -191,10 +192,11 @@ object Sighash {
      * The unified message for a **P2WPKH** input [inputIndex] of [tx], spending
      * [spentOutputs], under [hashType] (which must carry the opt-in bit).
      *
-     * The script type byte is fixed at 1 (segwit v0) and the tail is the
-     * BIP-143 implied P2PKH `scriptCode`, so this is the whole of what this
-     * wallet needs — see [unifiedPreimageWithScript] for the general form the
-     * specification's vectors drive.
+     * The script type byte is fixed at 1 (segwit v0) and the tail is the raw
+     * implied P2PKH `scriptCode` — the 25-byte script a P2WPKH input is executed
+     * as, which this message serialises itself. This is the whole of what
+     * this wallet needs — see [unifiedPreimageWithScript] for the general form
+     * the specification's vectors drive.
      *
      * ```
      * epoch (0) || hashType (1 byte) || nVersion (4 LE) || nLocktime (5 LE)
@@ -229,7 +231,13 @@ object Sighash {
             spentOutputs = spentOutputs,
             hashType = hashType,
             scriptType = SCRIPT_TYPE_P2WPKH,
-            scriptCode = scriptCode(signed.scriptPubKey),
+            // The **raw** implied P2PKH script (25 bytes). The unified tail is
+            // `compact-size length, then bytes`, and [unifiedPreimageWithScript]
+            // applies that one prefix; handing it BIP-143's already-serialised
+            // 26-byte form (0x19 then the script) would prefix it a second time
+            // and produce a message one byte too long — a digest no node
+            // computes, which is exactly the rejection this fixes.
+            scriptCode = impliedP2pkhScript(signed.scriptPubKey),
         )
     }
 
@@ -237,11 +245,18 @@ object Sighash {
      * The unified message with the script type and `scriptCode` supplied
      * directly — the specification's own inputs, and what its vectors drive.
      *
-     * For script type 1 `scriptCode` is the BIP-143 implied P2PKH script, which
-     * [unifiedPreimage] derives from the witness utxo. For script type 0 it is
-     * the scriptPubKey (with the signature removed by the interpreter, an
-     * operation that does not apply to segwit v0). Script types 2 and 3 carry a
-     * taproot tail and are not implemented: this wallet is native segwit only.
+     * For script type 1 `scriptCode` is the **raw** implied P2PKH script — the
+     * 25-byte `76a914…88ac` a P2WPKH input is executed as, exactly what the
+     * specification's vectors carry in their `scriptCode` column — which
+     * [unifiedPreimage] derives from the witness utxo. It is the *unserialised*
+     * form: the `compact-size length, then bytes` in the message layout below is
+     * applied here, once. (BIP-143's own preimage instead takes this script
+     * already serialised, `0x19` and all — the two are different byte strings,
+     * and passing one where the other belongs is a one-byte-longer message.)
+     * For script type 0 it is the scriptPubKey (with the signature removed by
+     * the interpreter, an operation that does not apply to segwit v0). Script
+     * types 2 and 3 carry a taproot tail and are not implemented: this wallet is
+     * native segwit only.
      */
     internal fun unifiedPreimageWithScript(
         tx: DecodedTransaction,
@@ -425,11 +440,26 @@ object Sighash {
             scriptPubKey[0] == 0x00.toByte() &&
             scriptPubKey[1] == 0x14.toByte()
 
-    /** `0x19 76a914 <20-byte key hash> 88ac`, taken from the witness-utxo program. */
-    private fun scriptCode(scriptPubKey: ByteArray): ByteArray =
-        byteArrayOf(0x19, 0x76, 0xa9.toByte(), 0x14) +
+    /**
+     * The raw implied P2PKH script for a P2WPKH program — `76a914 <20 bytes>
+     * 88ac`, **25 bytes**, with no length prefix. This is the script a P2WPKH
+     * input is executed as, and it is what the specification's `scriptCode`
+     * column holds; both algorithms serialise it themselves
+     * ([bip143ScriptCode] for BIP-143, `compactString` for the unified tail).
+     */
+    private fun impliedP2pkhScript(scriptPubKey: ByteArray): ByteArray =
+        byteArrayOf(0x76, 0xa9.toByte(), 0x14) +
             scriptPubKey.copyOfRange(2, 22) +
             byteArrayOf(0x88.toByte(), 0xac.toByte())
+
+    /**
+     * BIP-143's `scriptCode` for a P2WPKH input: the implied P2PKH script
+     * **already serialised** as BIP-143 writes it — `0x19` then the 25 bytes,
+     * 26 in all. BIP-143 puts this value into its preimage verbatim, so it must
+     * not be length-prefixed again there.
+     */
+    private fun bip143ScriptCode(scriptPubKey: ByteArray): ByteArray =
+        byteArrayOf(0x19) + impliedP2pkhScript(scriptPubKey)
 
     private fun uint32Le(value: Long): ByteArray = byteArrayOf(
         (value and 0xFF).toByte(),
